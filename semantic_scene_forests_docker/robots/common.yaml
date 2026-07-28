@@ -1,0 +1,29 @@
+services:
+  semantic-scene-forests-base:
+    image: ${SSF_ROBOT_IMAGE:-ids-git.fzi.de:5555/interne-projekte/dissertations/oberacker_semantic_multi_robot_mapping/semantic_scene_forests_generation/semantic_scene_forests/robot:kilted}
+    build:
+      context: ../..
+      dockerfile: semantic_scene_forests_docker/docker/Dockerfile.robots
+      platforms:
+        - linux/amd64
+        - linux/arm64
+      ssh:
+        - default
+    init: true
+    stdin_open: true
+    tty: true
+    network_mode: host
+    ipc: host
+    ulimits:
+      memlock: -1
+    privileged: true
+    env_file:
+      - path: ./ros_config.env
+        required: true
+    cgroup: host
+    cpus: 0.5
+    mem_limit: 500mb
+    volumes:
+      - type: bind
+        source: zenoh-configs
+        target: /zenoh_configs

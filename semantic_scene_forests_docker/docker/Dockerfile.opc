@@ -1,0 +1,51 @@
+ARG ROBOT_IMAGE=ids-git.fzi.de:5555/interne-projekte/dissertations/oberacker_semantic_multi_robot_mapping/semantic_scene_forests_generation/semantic_scene_forests/robot:kilted
+FROM ${ROBOT_IMAGE} AS base
+
+RUN sudo mkdir -p /home/ubuntu/ws && sudo chown -R ubuntu:ubuntu /home/ubuntu/ws
+WORKDIR /home/ubuntu/ws
+
+# install GUI-specific dependencies plus the rviz2 and rqt applications used to host the
+# semantic scene forests visualization plugins (the plugin packages only depend on the rviz/rqt
+# libraries, not the standalone apps).
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+  --mount=type=cache,target=/var/lib/apt,sharing=locked \
+  sudo apt-get update \
+  && sudo apt-get install -y --no-install-recommends \
+  libx11-dev \
+  libxcb1-dev \
+  libxrandr-dev \
+  libxinerama-dev \
+  libxcursor-dev \
+  libxi-dev \
+  libxkbcommon-dev \
+  wayland-protocols \
+  libwayland-dev \
+  ros-kilted-rviz2 \
+  ros-kilted-rqt \
+  && sudo rm -rf /var/lib/apt/lists/*
+
+# The robots base image already contains the full monorepo source under
+# src/semantic_scene_forests, with the two visualization packages COLCON_IGNORE'd. Re-enable them,
+# pull their GUI dependencies via rosdep, and build them as an overlay on top of the
+# robots install.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+  --mount=type=cache,target=/var/lib/apt,sharing=locked <<'EOF'
+set -e
+rm -f /home/ubuntu/ws/src/semantic_scene_forests/semantic_scene_forests_visualization_rviz/COLCON_IGNORE
+rm -f /home/ubuntu/ws/src/semantic_scene_forests/semantic_scene_forests_visualization_rqt/COLCON_IGNORE
+cd /home/ubuntu/ws
+sudo apt-get update
+rosdep update
+rosdep install --from-paths src --ignore-src -r -y
+sudo rm -rf /var/lib/apt/lists/*
+EOF
+
+# build the visualization packages as the ubuntu user, overlaying the robots install
+USER ubuntu
+RUN --mount=type=cache,target=/home/ubuntu/.cache/colcon,uid=1000,gid=1000 \
+  source /opt/ros/kilted/setup.bash && \
+  source /home/ubuntu/ws/install/setup.bash && \
+  colcon build --packages-up-to \
+  semantic_scene_forests_visualization_rviz \
+  semantic_scene_forests_visualization_rqt
+USER root

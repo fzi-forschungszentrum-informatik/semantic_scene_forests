@@ -1,0 +1,4 @@
+object_manager:
+  ros__parameters:
+    frame_id: "map"
+    publish_frequency_hz: 1.0

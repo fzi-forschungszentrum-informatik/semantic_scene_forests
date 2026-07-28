@@ -1,0 +1,15 @@
+semantic_scene_forests_generation:
+  ros__parameters:
+    server_url: "http://ids-gpu-01.fzi.de:30001/v1"
+    api_key: ""
+    frame_id: "map"
+    prompt_dir: ""
+    phase1_model: "Qwen/Qwen3-VL-8B-Instruct"
+    phase1_tasks:
+      - "semantic_scene_forests_generation/ColorTask"
+      - "semantic_scene_forests_generation/MaterialTask"
+      - "semantic_scene_forests_generation/ManipulationTask"
+    phase2_model: "Qwen/Qwen3-VL-8B-Instruct"
+    phase2_tasks:
+      - "semantic_scene_forests_generation/CategoryTask"
+      - "semantic_scene_forests_generation/AffordanceTask"

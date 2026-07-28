@@ -1,0 +1,127 @@
+FROM ids-git.fzi.de:5555/ret/core_stack/fzi-ret-stack/fzi-ret-devel:kilted AS base
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+
+# install additional basic tools
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+  --mount=type=cache,target=/var/lib/apt,sharing=locked \
+  sudo apt-get update && \
+  sudo apt-get install -y --no-install-recommends \
+  openssh-client \
+  && sudo rm -rf /var/lib/apt/lists/*
+
+# Known host for SSH-based clones of the private FZI repo (used by local builds that forward an
+# SSH agent; CI clones it over HTTPS instead). Written into the ubuntu user's home so vcs import
+# sees it. The other repos (github, codeberg) are pulled over public HTTPS.
+RUN mkdir -p ~/.ssh && \
+  ssh-keyscan ids-git.fzi.de >> ~/.ssh/known_hosts
+
+####################################################################################################
+
+FROM base AS builder
+
+# WORKDIR creates missing directories as root, so claim it for the ubuntu user before chdir'ing in.
+RUN sudo mkdir -p /home/ubuntu/ws && sudo chown -R ubuntu:ubuntu /home/ubuntu/ws
+WORKDIR /home/ubuntu/ws
+
+# install additional dependencies
+COPY semantic_scene_forests_docker/docker/additional-apt-requirements.txt /additional-apt-deps.txt
+COPY semantic_scene_forests_docker/docker/additional-pip-requirements.txt /additional-pip-deps.txt
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+  --mount=type=cache,target=/var/lib/apt,sharing=locked \
+  sudo apt-get update \
+  && xargs -a /additional-apt-deps.txt sudo apt-get install -y --no-install-recommends \
+  && sudo pip3 install --break-system-packages --ignore-installed --no-cache-dir -r /additional-pip-deps.txt \
+  && sudo rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /home/ubuntu/ws/src
+
+# Bring in the local monorepo source. The build context is the monorepo root, so this
+# copies every semantic_scene_forests_* package as it is checked out locally. The nested
+# semantic_scene_forests_docker/COLCON_IGNORE keeps colcon from descending into the tooling folder.
+COPY --chown=ubuntu:ubuntu . /home/ubuntu/ws/src/semantic_scene_forests
+
+# External dependency repositories only (the semantic_scene_forests_* packages now come from the
+# local COPY above, so they are no longer listed in robots_repos.yaml).
+COPY semantic_scene_forests_docker/robots_repos.yaml /repos.yaml
+
+RUN --mount=type=ssh,uid=1000 \
+  --mount=type=secret,id=gitlab_token,uid=1000 \
+  --mount=type=cache,target=/var/cache/apt,sharing=locked \
+  --mount=type=cache,target=/var/lib/apt,sharing=locked <<'EOF'
+set -e
+if [ -s /run/secrets/gitlab_token ]; then
+  git config --global url."https://ids-git.fzi.de/".insteadOf "git@ids-git.fzi.de:"
+  git config --global credential."https://ids-git.fzi.de".helper \
+    '!f() { echo username=gitlab-ci-token; echo "password=$(cat /run/secrets/gitlab_token)"; }; f'
+fi
+cd /home/ubuntu/ws/src
+vcs import --input /repos.yaml
+if [ -d "/home/ubuntu/ws/src/vision_msgs/vision_msgs_rviz_plugins" ]; then
+  touch /home/ubuntu/ws/src/vision_msgs/vision_msgs_rviz_plugins/COLCON_IGNORE
+fi
+touch /home/ubuntu/ws/src/semantic_scene_forests/semantic_scene_forests_visualization_rviz/COLCON_IGNORE
+touch /home/ubuntu/ws/src/semantic_scene_forests/semantic_scene_forests_visualization_rqt/COLCON_IGNORE
+cd ..
+sudo apt-get update
+rosdep update
+rosdep install --from-paths src --ignore-src -r -y \
+  --skip-keys "rviz_common rviz_rendering rviz_default_plugins rviz_ogre_vendor rqt_gui_cpp"
+sudo rm -rf /var/lib/apt/lists/*
+EOF
+
+# build workspace as the ubuntu user (cargo writes under $HOME/.cargo which is already ubuntu-owned).
+# uid/gid on the cache mount lets the ubuntu user write to it.
+USER ubuntu
+RUN --mount=type=cache,target=/home/ubuntu/.cache/colcon,uid=1000,gid=1000 \
+  source /opt/ros/kilted/setup.bash && \
+  colcon build
+USER root
+
+####################################################################################################
+
+FROM base AS final
+
+RUN sudo mkdir -p /home/ubuntu/ws && sudo chown -R ubuntu:ubuntu /home/ubuntu/ws
+WORKDIR /home/ubuntu/ws
+
+# install additional dependencies (runtime)
+COPY semantic_scene_forests_docker/docker/additional-apt-requirements.txt /additional-apt-deps.txt
+COPY semantic_scene_forests_docker/docker/additional-pip-requirements.txt /additional-pip-deps.txt
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+  --mount=type=cache,target=/var/lib/apt,sharing=locked \
+  sudo apt-get update \
+  && xargs -a /additional-apt-deps.txt sudo apt-get install -y --no-install-recommends \
+  && sudo pip3 install --break-system-packages --ignore-installed --no-cache-dir -r /additional-pip-deps.txt \
+  && sudo rm -rf /var/lib/apt/lists/*
+
+# copy built workspace from builder (preserve ubuntu ownership for symlink-install paths)
+COPY --from=builder --chown=ubuntu:ubuntu /home/ubuntu/ws /home/ubuntu/ws
+
+# install runtime dependencies declared by the workspace packages. The builder stage
+# resolves these via rosdep, but the final stage is a fresh image, so any runtime dep that
+# is neither in the base image nor additional-apt-requirements.txt (e.g. rsl, pulled in via
+# generate_parameter_library and providing librsl.so) would otherwise be missing here and
+# cause dlopen failures when loading the composable nodes.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+  --mount=type=cache,target=/var/lib/apt,sharing=locked <<'EOF'
+set -e
+sudo apt-get update
+rosdep update
+rosdep install --from-paths src --ignore-src -r -y \
+  --skip-keys "rviz_common rviz_rendering rviz_default_plugins rviz_ogre_vendor rqt_gui_cpp"
+sudo rm -rf /var/lib/apt/lists/*
+EOF
+
+# copy entrypoint script
+COPY --chown=ubuntu:ubuntu semantic_scene_forests_docker/docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
+
+CMD /bin/bash

@@ -1,0 +1,98 @@
+<!--
+  Copyright (c) 2026 FZI Forschungszentrum Informatik
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are met:
+
+     * Redistributions of source code must retain the above copyright
+       notice, this list of conditions and the following disclaimer.
+
+     * Redistributions in binary form must reproduce the above copyright
+       notice, this list of conditions and the following disclaimer in the
+       documentation and/or other materials provided with the distribution.
+
+     * Neither the name of the copyright holder nor the names of its
+       contributors may be used to endorse or promote products derived from
+       this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+  ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+  LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+  CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+  SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+  INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+  CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+  POSSIBILITY OF SUCH DAMAGE.
+-->
+
+<launch>
+    <arg name="enable_tracker" default="false"
+         description="Enable object tracker component. If false, only the object manager runs."/>
+
+    <!-- Parameter files. Default to the configs shipped with semantic_scene_forests_launch so the
+         whole stack is configured from a single place. Override to point elsewhere. -->
+    <arg name="tracker_config_file"
+         default="$(find-pkg-share semantic_scene_forests_launch)/config/object_tracker.yaml"
+         description="YAML parameter file for the object tracker (only used if enable_tracker is true)."/>
+    <arg name="manager_config_file"
+         default="$(find-pkg-share semantic_scene_forests_object_manager)/config/object_manager.yaml"
+         description="YAML parameter file for the object manager."/>
+
+    <!-- Object Manager arguments -->
+    <arg name="managed_objects_topic" default="managed_objects"
+         description="Topic name for managed objects output"/>
+
+    <arg name="detections_2d_topic" default="vision/detections_2d"
+         description="Topic name for 2D detections"/>
+    <arg name="detections_3d_topic" default="vision/detections_3d"
+         description="Topic name for 3D detections"/>
+    <arg name="camera_image_topic" default="camera/image"
+         description="Topic name for camera images"/>
+    <arg name="object_candidates_topic" default="object_candidates"
+         description="Topic name for tracked object candidates output"/>
+
+    <!-- Shared frame ID used by both tracker and manager. Overrides the value in the
+         parameter files so deployment-time wiring stays in the launch file. -->
+    <arg name="scene_graph_frame" default="map"
+         description="TF Frame for the scene graph. Used by both tracker (world_frame) and manager (frame_id)."/>
+
+    <!-- Use simulation time (not part of the tuning config). -->
+    <arg name="use_sim_time" default="true"
+         description="Use simulation time for the tracker"/>
+
+
+    <node_container pkg="rclcpp_components" exec="component_container_mt"
+                    name="object_manager_container" namespace="" output="screen">
+
+        <!-- ObjectTrackerComponent (only if tracker enabled).
+             Tuning parameters come from tracker_config_file; world_frame and use_sim_time
+             are applied afterwards so the launch-level wiring wins. -->
+        <composable_node pkg="semantic_scene_forests_object_tracker"
+                         plugin="semantic_scene_forests_object_tracker::ObjectTrackerComponent"
+                         name="object_tracker"
+                         if="$(var enable_tracker)">
+            <remap from="detections_2d" to="$(var detections_2d_topic)"/>
+            <remap from="detections_3d" to="$(var detections_3d_topic)"/>
+            <remap from="camera/image" to="$(var camera_image_topic)"/>
+            <remap from="object_candidates" to="$(var object_candidates_topic)"/>
+            <param from="$(var tracker_config_file)"/>
+            <param name="world_frame" value="$(var scene_graph_frame)"/>
+            <param name="use_sim_time" value="$(var use_sim_time)"/>
+        </composable_node>
+
+        <!-- ObjectManagerNode.
+             Tuning parameters come from manager_config_file; frame_id is applied afterwards. -->
+        <composable_node pkg="semantic_scene_forests_object_manager"
+                         plugin="semantic_scene_forests_object_manager::ObjectManagerNode"
+                         name="object_manager">
+            <remap from="object_candidates" to="$(var object_candidates_topic)"/>
+            <remap from="managed_objects" to="$(var managed_objects_topic)"/>
+            <param from="$(var manager_config_file)"/>
+            <param name="frame_id" value="$(var scene_graph_frame)"/>
+        </composable_node>
+
+    </node_container>
+</launch>

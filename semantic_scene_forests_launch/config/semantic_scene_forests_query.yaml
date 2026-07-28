@@ -1,0 +1,9 @@
+semantic_scene_forests_query:
+  ros__parameters:
+    server_url: "http://ids-gpu-01.fzi.de:30001/v1"
+    api_key: ""
+    model: "Qwen/Qwen3-VL-8B-Instruct"
+    temperature: 0.2
+    max_tokens: 2048
+    max_steps: 10
+    prompt_dir: ""

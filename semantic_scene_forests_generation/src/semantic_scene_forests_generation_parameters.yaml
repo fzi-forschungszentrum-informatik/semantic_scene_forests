@@ -1,0 +1,50 @@
+semantic_scene_forests_generation:
+  server_url:
+    type: string
+    default_value: "http://ids-gpu-01.fzi.de:30001/v1"
+    description: "OpenAI-compatible LLM server endpoint."
+  api_key:
+    type: string
+    default_value: ""
+    description: "Bearer token for the server. Leave empty for unauthenticated local servers."
+  llm_connect_timeout_seconds:
+    type: int
+    default_value: 5
+    description: "Maximum time allowed to establish an LLM HTTP connection."
+  llm_request_timeout_seconds:
+    type: int
+    default_value: 120
+    description: "Maximum time allowed for an LLM HTTP request, including inference."
+  visuals_request_timeout_seconds:
+    type: int
+    default_value: 10
+    description: "Maximum time allowed to fetch image crops for one object."
+  frame_id:
+    type: string
+    default_value: "world"
+    description: "Frame ID written into published scene graph message headers."
+  prompt_dir:
+    type: string
+    default_value: ""
+    description: "Directory containing .j2 Jinja2 prompt templates. Defaults to the package share/resources directory when empty."
+  phase1_model:
+    type: string
+    default_value: "Qwen/Qwen3-VL-8B-Instruct"
+    description: "VLM model name used for Phase 1 (per-object) tasks."
+  phase1_tasks:
+    type: string_array
+    default_value:
+      - "semantic_scene_forests_generation/ColorTask"
+      - "semantic_scene_forests_generation/MaterialTask"
+      - "semantic_scene_forests_generation/ManipulationTask"
+    description: "Pluginlib class names of IObjectTask plugins to run in Phase 1."
+  phase2_model:
+    type: string
+    default_value: "Qwen/Qwen3-VL-8B-Instruct"
+    description: "LLM model name used for Phase 2 (whole-graph) tasks."
+  phase2_tasks:
+    type: string_array
+    default_value:
+      - "semantic_scene_forests_generation/CategoryTask"
+      - "semantic_scene_forests_generation/AffordanceTask"
+    description: "Pluginlib class names of IGraphTask plugins to run in Phase 2."

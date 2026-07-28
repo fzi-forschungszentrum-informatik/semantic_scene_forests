@@ -1,0 +1,15 @@
+# The Docker build context is the monorepo root. Keep it small and reproducible by
+# excluding VCS metadata and colcon build artifacts. Do NOT exclude COLCON_IGNORE files —
+# semantic_scene_forests_docker/COLCON_IGNORE must reach the image so colcon skips the tooling folder.
+.git
+.gitignore
+**/build/
+**/install/
+**/log/
+**/.claude/
+**/.opencode/
+
+# colcon outputs sometimes sit one level up; harmless to ignore here too.
+build/
+install/
+log/

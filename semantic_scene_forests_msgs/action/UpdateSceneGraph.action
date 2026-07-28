@@ -1,0 +1,13 @@
+# Goal
+uint8 phase
+uint8 PHASE_1 = 1
+uint8 PHASE_2 = 2
+---
+# Result
+bool success
+string message
+---
+# Feedback
+uint32 current_object
+uint32 total_objects
+string status

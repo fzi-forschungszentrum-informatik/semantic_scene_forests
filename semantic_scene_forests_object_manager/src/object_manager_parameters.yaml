@@ -1,0 +1,13 @@
+object_manager:
+  frame_id:
+    type: string
+    default_value: "world"
+    description: "Frame ID used in the header of published managed_objects messages."
+    validation:
+      not_empty<>: []
+  publish_frequency_hz:
+    type: double
+    default_value: 1.0
+    description: "Frequency at which managed_objects are published on a timer."
+    validation:
+      gt<>: [0.0]

@@ -1,0 +1,37 @@
+        - driver: nvidia
+          count: all
+          capabilities: [gpu]
+
+services:
+  zenoh:
+    extends:
+      file: common.yaml
+      service: semantic-scene-forests-base
+    command: ros2 run rmw_zenoh_cpp rmw_zenohd
+    cpus: 3.0
+    mem_limit: 4gb
+
+  # Core perception pipeline brought up via the combined launch file, which loads the
+  # object tracker, object manager, scene graph generation and query nodes into a single
+  # multi-threaded component container (see semantic_scene_forests_launch/launch/scene_graph_combined.launch.xml).
+  #
+  # NOTE: the previous standalone semantic_scene_forests_docker split this into separate per-node
+  # services (object_tracker / generation / planning) and passed an external pipeline.toml
+  # to generation. The scene_graph_planning_rs node is not part of this monorepo. If you
+  # want the per-service decomposition or the external pipeline.toml config back, split this
+  # service accordingly and re-add the mounts/additional_launch_files bind below.
+  semantic_scene_forests:
+    depends_on:
+      - zenoh
+    extends:
+      file: common.yaml
+      service: semantic-scene-forests-base
+    command: ros2 launch semantic_scene_forests_launch scene_graph_combined.launch.xml camera_image_topic:=/spot/camera/hand/image use_sim_time:=True scene_graph_frame:=spot/map
+    cpus: 12.0
+    mem_limit: 16gb
+    deploy: *gpu-deploy
+    volumes:
+      - type: bind
+        source: mounts/additional_launch_files/
+        target: /additional_launch_files
+        read_only: true

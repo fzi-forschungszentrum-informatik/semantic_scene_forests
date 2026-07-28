@@ -1,0 +1,11 @@
+string object_description
+---
+bool success
+string message
+
+int64 object_id
+---
+# Ids of scene-graph nodes the agent has inspected ("expanded") so far.
+int64[] expanded_node_ids
+# Human-readable progress line.
+string status

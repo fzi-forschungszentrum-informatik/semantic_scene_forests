@@ -1,0 +1,7 @@
+# Ignore zenoh-configs directory (cloned via vcs import)
+zenoh-configs/*
+!zenoh-configs/.gitkeep
+
+# Ignore dev workspace source (cloned via vcs import)
+mounts/dev_ws/src/*
+!mounts/dev_ws/src/.gitkeep

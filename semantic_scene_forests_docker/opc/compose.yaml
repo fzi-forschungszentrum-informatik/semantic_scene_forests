@@ -1,0 +1,106 @@
+x-gpu-deploy: &gpu-deploy
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: all
+          capabilities: [gpu]
+
+x-gui-environment: &gui-environment
+  - DISPLAY
+  - TERM
+  - XDG_RUNTIME_DIR
+  - SHELL
+
+services:
+  zenoh:
+    extends:
+      file: common.yaml
+      service: semantic-scene-forests-base
+    command: ros2 run rmw_zenoh_cpp rmw_zenohd
+    cpus: 3.0
+    mem_limit: 4gb
+
+  # Launches RViz2, which can load the semantic_scene_forests_visualization_rviz plugin built into
+  # the opc image. (The standalone egui-based scene graph visualization node is not part of
+  # this monorepo; the visualization here is the RViz2/rqt plugins.) To use the rqt plugin
+  # instead, run `rqt` from the opc_devcontainer shell below.
+  semantic_scene_forests_visualization_rviz:
+    depends_on:
+      - zenoh
+    extends:
+      file: common.yaml
+      service: semantic-scene-forests-base
+    command: ros2 run rviz2 rviz2
+    cpus: 4.0
+    mem_limit: 6gb
+    environment: *gui-environment
+    deploy: *gpu-deploy
+    volumes:
+      - type: bind
+        source: /tmp/.X11-unix
+        target: /tmp/.X11-unix
+      - type: bind
+        source: /dev/dri
+        target: /dev/dri
+      - type: bind
+        source: /run/user/1000
+        target: /run/user/1000
+
+  semantic_scene_forests_visualization_rqt:
+    depends_on:
+      - zenoh
+    extends:
+      file: common.yaml
+      service: semantic-scene-forests-base
+    command: ros2 run rqt_gui rqt_gui
+    cpus: 4.0
+    mem_limit: 6gb
+    environment: *gui-environment
+    deploy: *gpu-deploy
+    volumes:
+      - type: bind
+        source: /tmp/.X11-unix
+        target: /tmp/.X11-unix
+      - type: bind
+        source: /dev/dri
+        target: /dev/dri
+      - type: bind
+        source: /run/user/1000
+        target: /run/user/1000
+
+  opc_devcontainer:
+    depends_on:
+      - zenoh
+    extends:
+      file: common.yaml
+      service: semantic-scene-forests-base
+    env_file:
+      - path: ./ros_config.env
+        required: true
+    network_mode: host
+    ipc: host
+    ulimits:
+      memlock: -1
+    privileged: true
+    environment: *gui-environment
+    deploy: *gpu-deploy
+    entrypoint: zsh
+    stdin_open: true
+    tty: true
+    volumes:
+      - type: bind
+        source: mounts/dev_ws
+        target: /home/ubuntu/ws
+      - type: bind
+        source: zenoh-configs
+        target: /zenoh_configs
+      - type: bind
+        source: /tmp/.X11-unix
+        target: /tmp/.X11-unix
+      - type: bind
+        source: /dev/dri
+        target: /dev/dri
+      - type: bind
+        source: /run/user/1000
+        target: /run/user/1000

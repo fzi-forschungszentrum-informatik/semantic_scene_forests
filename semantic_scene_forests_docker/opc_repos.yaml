@@ -1,0 +1,7 @@
+repositories:
+  # OPC-specific repositories
+  # Currently empty - add visualization or other OPC-only packages here
+  # semantic_scene_forests_visualization:
+  #   type: git
+  #   url: git@ids-git.fzi.de:interne-projekte/dissertations/oberacker_semantic_multi_robot_mapping/semantic_scene_forests_generation/next_gen/semantic_scene_forests_visualization.git
+  #   version: main

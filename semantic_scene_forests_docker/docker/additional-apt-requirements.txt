@@ -1,0 +1,7 @@
+ros-kilted-compressed-image-transport
+ros-kilted-compressed-depth-image-transport
+ros-kilted-example-interfaces
+ros-kilted-test-msgs
+python3-pip
+python3-vcstool
+git

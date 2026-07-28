@@ -1,0 +1,14 @@
+object_tracker:
+  ros__parameters:
+    world_frame: "map"
+    max_trackable_objects: 1000
+    gate_threshold_strict: 3.0
+    gate_threshold_confirmed: 10.0
+    confidence_threshold: 0.8
+    measurement_noise_std: 0.4
+    process_noise_std: 0.05
+    confirmation_threshold: 3
+    unconfirmed_track_timeout: 30.0
+    merge_iou_threshold: 0.6
+    crop_padding: 10
+    max_crops_per_object: 5

@@ -1,0 +1,4 @@
+# Get current list of managed objects
+# No request parameters
+---
+ManagedObject[] objects

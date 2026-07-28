@@ -1,0 +1,111 @@
+<!--
+  Copyright (c) 2026 FZI Forschungszentrum Informatik
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are met:
+
+     * Redistributions of source code must retain the above copyright
+       notice, this list of conditions and the following disclaimer.
+
+     * Redistributions in binary form must reproduce the above copyright
+       notice, this list of conditions and the following disclaimer in the
+       documentation and/or other materials provided with the distribution.
+
+     * Neither the name of the copyright holder nor the names of its
+       contributors may be used to endorse or promote products derived from
+       this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+  ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+  LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+  CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+  SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+  INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+  CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+  POSSIBILITY OF SUCH DAMAGE.
+-->
+
+<launch>
+  <arg name="config_dir" default="$(find-pkg-share semantic_scene_forests_launch)/config"
+       description="Directory containing configuration files"/>
+  <arg name="scene_graph_frame" default="map"
+       description="TF Frame for the scene graph"/>
+  <arg name="use_sim_time" default="false"
+       description="Use the /clock topic for time on all components."/>
+  <arg name="enable_diagnostics" default="true"
+       description="Run the diagnostic_aggregator to collect /diagnostics into /diagnostics_agg."/>
+
+  <!-- Camera image consumed by the object tracker. -->
+  <arg name="camera_image_topic" default="camera/image"
+       description="Topic name for the camera image input."/>
+
+  <!-- Detections topics feeding the tracker. Only settable when the converter
+       is NOT used; with the converter enabled these are produced internally on
+       vision/detections_2d and vision/detections_3d. -->
+  <arg name="detections_2d_topic" default="vision/detections_2d"
+       description="Topic name for 2D detections input (used only when the converter is disabled)."/>
+  <arg name="detections_3d_topic" default="vision/detections_3d"
+       description="Topic name for 3D detections input (used only when the converter is disabled)."/>
+
+  <node_container pkg="rclcpp_components" exec="component_container_mt"
+                  name="scene_graph_container" namespace="" output="screen">
+
+    <!-- Object Tracker Component (converter disabled: read external detections) -->
+    <composable_node pkg="semantic_scene_forests_object_tracker"
+                     plugin="semantic_scene_forests_object_tracker::ObjectTrackerComponent"
+                     name="object_tracker">
+      <param from="$(var config_dir)/object_tracker.yaml"/>
+      <param name="world_frame" value="$(var scene_graph_frame)"/>
+      <param name="use_sim_time" value="$(var use_sim_time)"/>
+      <remap from="detections_2d" to="$(var detections_2d_topic)"/>
+      <remap from="detections_3d" to="$(var detections_3d_topic)"/>
+      <remap from="camera/image" to="$(var camera_image_topic)"/>
+      <remap from="object_candidates" to="object_candidates"/>
+    </composable_node>
+
+    <!-- Object Manager Node -->
+    <composable_node pkg="semantic_scene_forests_object_manager"
+                     plugin="semantic_scene_forests_object_manager::ObjectManagerNode"
+                     name="object_manager">
+      <param from="$(var config_dir)/object_manager.yaml"/>
+      <param name="frame_id" value="$(var scene_graph_frame)"/>
+      <param name="use_sim_time" value="$(var use_sim_time)"/>
+      <remap from="object_candidates" to="object_candidates"/>
+      <remap from="managed_objects" to="managed_objects"/>
+    </composable_node>
+
+    <!-- Scene Graph Generation Component -->
+    <composable_node pkg="semantic_scene_forests_generation"
+                     plugin="semantic_scene_forests_generation::SceneGraphGenerationNode"
+                     name="semantic_scene_forests_generation">
+      <param from="$(var config_dir)/semantic_scene_forests_generation.yaml"/>
+      <param name="frame_id" value="$(var scene_graph_frame)"/>
+      <param name="use_sim_time" value="$(var use_sim_time)"/>
+      <remap from="/managed_objects" to="/managed_objects"/>
+      <remap from="/scene_graph" to="/scene_graph"/>
+      <remap from="/update_scene_graph" to="/update_scene_graph"/>
+      <remap from="/get_object_visuals" to="/get_object_visuals"/>
+    </composable_node>
+
+    <!-- Scene Graph Query Component -->
+    <composable_node pkg="semantic_scene_forests_query"
+                     plugin="semantic_scene_forests_query::SceneGraphQueryNode"
+                     name="semantic_scene_forests_query">
+      <param from="$(var config_dir)/semantic_scene_forests_query.yaml"/>
+      <param name="use_sim_time" value="$(var use_sim_time)"/>
+    </composable_node>
+
+  </node_container>
+
+  <!-- Diagnostic aggregator: groups each node's /diagnostics into a per-node
+       tree on /diagnostics_agg (view with rqt_robot_monitor). -->
+  <node pkg="diagnostic_aggregator" exec="aggregator_node" name="diagnostic_aggregator"
+        output="screen" if="$(var enable_diagnostics)">
+    <param from="$(var config_dir)/diagnostic_aggregator.yaml"/>
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+  </node>
+
+</launch>

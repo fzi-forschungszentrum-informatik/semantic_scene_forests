@@ -1,0 +1,11 @@
+[[pipeline]]
+name = "vlm_instance_extraction"
+model = "Qwen/Qwen3-VL-8B-Instruct"
+tasks = ["color", "material", "manipulation"]
+phase = 1
+
+[[pipeline]]
+name = "llm_meta_extraction"
+model = "Qwen/Qwen3-30B"
+tasks = ["category", "affordance"]
+phase = 2

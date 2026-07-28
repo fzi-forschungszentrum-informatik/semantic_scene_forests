@@ -1,0 +1,35 @@
+semantic_scene_forests_query:
+  server_url:
+    type: string
+    default_value: "http://ids-gpu-01.fzi.de:30001/v1"
+    description: "OpenAI-compatible LLM server endpoint."
+  api_key:
+    type: string
+    default_value: ""
+    description: "Bearer token for the server. Leave empty for unauthenticated local servers."
+  model:
+    type: string
+    default_value: "Qwen/Qwen3-VL-8B-Instruct"
+    description: "(Vision-)LLM model name used for both the FindObject and PromptLLM agents."
+  temperature:
+    type: double
+    default_value: 0.2
+    description: "Sampling temperature for the LLM."
+    validation:
+      bounds<>: [0.0, 2.0]
+  max_tokens:
+    type: int
+    default_value: 2048
+    description: "Maximum number of tokens generated per completion."
+    validation:
+      gt<>: [0]
+  max_steps:
+    type: int
+    default_value: 10
+    description: "Maximum number of agent tool-call rounds before the agent must answer."
+    validation:
+      gt<>: [0]
+  prompt_dir:
+    type: string
+    default_value: ""
+    description: "Directory containing the .j2 Jinja2 prompt templates. Defaults to the package share/resources directory when empty."

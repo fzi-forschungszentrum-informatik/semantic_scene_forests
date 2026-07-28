@@ -1,0 +1,80 @@
+object_tracker:
+  world_frame:
+    type: string
+    default_value: "map"
+    description: "Target coordinate frame for all tracked 3D bounding boxes."
+    read_only: true
+  max_trackable_objects:
+    type: int
+    default_value: 1000
+    description: "Maximum number of objects that can be tracked."
+    read_only: true
+    validation:
+      gt<>: [0]
+  gate_threshold_strict:
+    type: double
+    default_value: 3.0
+    description: "Mahalanobis distance threshold for matching against unconfirmed tracks (strict gate)."
+    validation:
+      gt<>: [0.0]
+  gate_threshold_confirmed:
+    type: double
+    default_value: 10.0
+    description: "Mahalanobis distance threshold for matching against confirmed tracks (relaxed gate)."
+    validation:
+      gt<>: [0.0]
+  confidence_threshold:
+    type: double
+    default_value: 0.8
+    description: "Minimum detection confidence score to accept a detection."
+    validation:
+      bounds<>: [0.0, 1.0]
+  measurement_noise_std:
+    type: double
+    default_value: 0.4
+    description: "Standard deviation for Kalman filter measurement noise (R matrix)."
+    validation:
+      gt<>: [0.0]
+  process_noise_std:
+    type: double
+    default_value: 0.05
+    description: "Standard deviation for Kalman filter process noise (Q matrix)."
+    validation:
+      gt<>: [0.0]
+  confirmation_threshold:
+    type: int
+    default_value: 3
+    description: "Number of observations required before a track is confirmed."
+    validation:
+      gt<>: [0]
+  unconfirmed_track_timeout:
+    type: double
+    default_value: 30.0
+    description: "Seconds after last observation before an unconfirmed track is deleted."
+    validation:
+      gt<>: [0.0]
+  merge_iou_threshold:
+    type: double
+    default_value: 0.6
+    description: "Minimum 3D bbox IoU to merge overlapping confirmed tracks of the same class."
+    validation:
+      bounds<>: [0.0, 1.0]
+  class_whitelist:
+    type: string_array
+    default_value: []
+    description: "If non-empty, only track objects with these class names. Empty means track all."
+    read_only: true
+    validation:
+      unique<>: []
+  crop_padding:
+    type: int
+    default_value: 10
+    description: "Pixels of padding to add around cropped image patches."
+    validation:
+      gt_eq<>: [0]
+  max_crops_per_object:
+    type: int
+    default_value: 5
+    description: "Maximum number of cropped image patches to store per tracked object."
+    validation:
+      gt<>: [0]

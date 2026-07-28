@@ -1,0 +1,10 @@
+string query
+---
+bool success
+string message
+string response
+---
+# Ids of scene-graph nodes the agent has inspected ("expanded") so far.
+int64[] expanded_node_ids
+# Human-readable progress line.
+string status

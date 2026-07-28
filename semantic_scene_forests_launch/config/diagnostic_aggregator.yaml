@@ -1,0 +1,33 @@
+# Diagnostic aggregator configuration for the scene graph system.
+#
+# diagnostic_updater prefixes every task name with the node name, so each node's
+# diagnostics appear as "<node>: <task>" (e.g. "object_tracker: Health",
+# "semantic_scene_forests_query: Connectivity"). One GenericAnalyzer per node therefore just
+# needs to match on that node-name prefix.
+#
+# Loaded by the diagnostic_aggregator/aggregator_node in
+# scene_graph_combined.launch.xml; results are published on /diagnostics_agg and
+# can be viewed with `ros2 run rqt_robot_monitor rqt_robot_monitor`.
+/**:
+  ros__parameters:
+    path: Scene Graph
+    object_tracker:
+      type: diagnostic_aggregator/GenericAnalyzer
+      path: Object Tracker
+      timeout: 5.0
+      startswith: ['object_tracker']
+    object_manager:
+      type: diagnostic_aggregator/GenericAnalyzer
+      path: Object Manager
+      timeout: 5.0
+      startswith: ['object_manager']
+    semantic_scene_forests_generation:
+      type: diagnostic_aggregator/GenericAnalyzer
+      path: Scene Graph Generation
+      timeout: 5.0
+      startswith: ['semantic_scene_forests_generation']
+    semantic_scene_forests_query:
+      type: diagnostic_aggregator/GenericAnalyzer
+      path: Scene Graph Query
+      timeout: 5.0
+      startswith: ['semantic_scene_forests_query']
