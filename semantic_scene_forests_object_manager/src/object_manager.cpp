@@ -36,7 +36,8 @@ bool ObjectManager::processObjectCandidate(
   const semantic_scene_forests_object_msgs::msg::ObjectCandidate& candidate,
   const rclcpp::Time& now)
 {
-  if (m_blocked_ids.contains(candidate.id))
+  const std::scoped_lock LOCK{m_objects_mutex};
+  if (auto it = m_objects.find(candidate.id); it != m_objects.end() && it->second.is_blocked)
   {
     return false;
   }
@@ -46,19 +47,25 @@ bool ObjectManager::processObjectCandidate(
 
 bool ObjectManager::blockObject(int64_t id)
 {
+  const std::scoped_lock LOCK{m_objects_mutex};
   auto it = m_objects.find(id);
   if (it == m_objects.end())
   {
     return false;
   }
-  m_objects.erase(it);
-  m_blocked_ids.insert(id);
+  it->second.is_blocked = true;
   return true;
 }
 
 bool ObjectManager::unblockObject(int64_t id)
 {
-  m_blocked_ids.erase(id);
+  const std::scoped_lock LOCK{m_objects_mutex};
+  auto it = m_objects.find(id);
+  if (it == m_objects.end())
+  {
+    return false;
+  }
+  it->second.is_blocked = false;
   return true;
 }
 
@@ -66,6 +73,7 @@ bool ObjectManager::editObject(
   const semantic_scene_forests_object_msgs::srv::EditObject::Request& request,
   const rclcpp::Time& now)
 {
+  const std::scoped_lock LOCK{m_objects_mutex};
   auto it = m_objects.find(request.object_id);
   if (it == m_objects.end())
   {
@@ -103,6 +111,7 @@ bool ObjectManager::editObject(
 std::vector<semantic_scene_forests_object_msgs::msg::ManagedObject>
 ObjectManager::getManagedObjects(const std::string& frame_id) const
 {
+  const std::scoped_lock LOCK{m_objects_mutex};
   std::vector<semantic_scene_forests_object_msgs::msg::ManagedObject> result;
   result.reserve(m_objects.size());
   for (const auto& [id, obj] : m_objects)
@@ -115,6 +124,7 @@ ObjectManager::getManagedObjects(const std::string& frame_id) const
 std::vector<semantic_scene_forests_object_msgs::msg::ObjectVisuals>
 ObjectManager::getObjectVisuals(const std::vector<int64_t>& ids) const
 {
+  const std::scoped_lock LOCK{m_objects_mutex};
   std::vector<semantic_scene_forests_object_msgs::msg::ObjectVisuals> result;
   const auto LOOKUP = [&](int64_t id) {
     auto it = m_objects.find(id);

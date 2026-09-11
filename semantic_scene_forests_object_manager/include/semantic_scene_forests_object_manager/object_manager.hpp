@@ -29,9 +29,9 @@
 #pragma once
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include <rclcpp/time.hpp>
@@ -69,8 +69,8 @@ public:
   buildMessage(const std::string& frame_id, const rclcpp::Time& now) const;
 
 private:
+  mutable std::mutex m_objects_mutex;
   std::unordered_map<int64_t, ManagedObject> m_objects;
-  std::unordered_set<int64_t> m_blocked_ids;
 };
 
 } // namespace semantic_scene_forests_object_manager
