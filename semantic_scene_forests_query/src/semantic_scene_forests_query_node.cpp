@@ -148,6 +148,39 @@ SceneGraphQueryNode::SceneGraphQueryNode(const rclcpp::NodeOptions& options)
               m_params.server_url.c_str());
 }
 
+SceneGraphQueryNode::~SceneGraphQueryNode()
+{
+  std::jthread find_object_worker;
+  {
+    const std::scoped_lock LOCK{m_find_object_mutex};
+    m_find_object_stopping = true;
+    if (m_find_object_worker.joinable())
+    {
+      m_find_object_worker.request_stop();
+      find_object_worker = std::move(m_find_object_worker);
+    }
+  }
+  if (find_object_worker.joinable())
+  {
+    find_object_worker.join();
+  }
+
+  std::jthread prompt_llm_worker;
+  {
+    const std::scoped_lock LOCK{m_prompt_llm_mutex};
+    m_prompt_llm_stopping = true;
+    if (m_prompt_llm_worker.joinable())
+    {
+      m_prompt_llm_worker.request_stop();
+      prompt_llm_worker = std::move(m_prompt_llm_worker);
+    }
+  }
+  if (prompt_llm_worker.joinable())
+  {
+    prompt_llm_worker.join();
+  }
+}
+
 // ── Setup ─────────────────────────────────────────────────────────────────────
 
 void SceneGraphQueryNode::loadTemplates(const std::string& prompt_dir)
@@ -412,12 +445,21 @@ SceneGraphQueryNode::handleFindObjectGoal(const rclcpp_action::GoalUUID& /*uuid*
     RCLCPP_WARN(get_logger(), "Rejecting FindObject goal: empty object_description");
     return rclcpp_action::GoalResponse::REJECT;
   }
-  const std::scoped_lock LOCK{m_graph_mutex};
-  if (!m_last_graph)
   {
-    RCLCPP_WARN(get_logger(), "Rejecting FindObject goal: no scene graph received yet");
+    const std::scoped_lock LOCK{m_graph_mutex};
+    if (!m_last_graph)
+    {
+      RCLCPP_WARN(get_logger(), "Rejecting FindObject goal: no scene graph received yet");
+      return rclcpp_action::GoalResponse::REJECT;
+    }
+  }
+  const std::scoped_lock LOCK{m_find_object_mutex};
+  if (m_find_object_stopping || m_find_object_active)
+  {
+    RCLCPP_WARN(get_logger(), "Rejecting FindObject goal: another FindObject goal is active");
     return rclcpp_action::GoalResponse::REJECT;
   }
+  m_find_object_active = true;
   return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
 }
 
@@ -430,7 +472,51 @@ SceneGraphQueryNode::handleFindObjectCancel(const std::shared_ptr<FindObjectGoal
 void SceneGraphQueryNode::handleFindObjectAccepted(
   const std::shared_ptr<FindObjectGoal>& goal_handle)
 {
-  std::thread{[this, goal_handle] { executeFindObject(goal_handle); }}.detach();
+  std::jthread completed_worker;
+  bool cancel_goal = false;
+  {
+    const std::scoped_lock LOCK{m_find_object_mutex};
+    if (m_find_object_stopping)
+    {
+      m_find_object_active = false;
+      cancel_goal          = true;
+    }
+    else
+    {
+      completed_worker = std::move(m_find_object_worker);
+    }
+  }
+
+  if (cancel_goal)
+  {
+    auto result       = std::make_shared<FindObjectAction::Result>();
+    result->success   = false;
+    result->message   = "Node is shutting down";
+    result->object_id = -1;
+    goal_handle->canceled(result);
+    return;
+  }
+  if (completed_worker.joinable())
+  {
+    completed_worker.join();
+  }
+
+  const std::scoped_lock LOCK{m_find_object_mutex};
+  if (m_find_object_stopping)
+  {
+    m_find_object_active = false;
+    auto result          = std::make_shared<FindObjectAction::Result>();
+    result->success      = false;
+    result->message      = "Node is shutting down";
+    result->object_id    = -1;
+    goal_handle->canceled(result);
+    return;
+  }
+  m_find_object_worker = std::jthread([this, goal_handle] {
+    executeFindObject(goal_handle);
+    const std::scoped_lock LOCK{m_find_object_mutex};
+    m_find_object_active = false;
+  });
 }
 
 void SceneGraphQueryNode::executeFindObject(const std::shared_ptr<FindObjectGoal>& goal_handle)
@@ -502,12 +588,21 @@ SceneGraphQueryNode::handlePromptLLMGoal(const rclcpp_action::GoalUUID& /*uuid*/
     RCLCPP_WARN(get_logger(), "Rejecting PromptLLM goal: empty query");
     return rclcpp_action::GoalResponse::REJECT;
   }
-  const std::scoped_lock LOCK{m_graph_mutex};
-  if (!m_last_graph)
   {
-    RCLCPP_WARN(get_logger(), "Rejecting PromptLLM goal: no scene graph received yet");
+    const std::scoped_lock LOCK{m_graph_mutex};
+    if (!m_last_graph)
+    {
+      RCLCPP_WARN(get_logger(), "Rejecting PromptLLM goal: no scene graph received yet");
+      return rclcpp_action::GoalResponse::REJECT;
+    }
+  }
+  const std::scoped_lock LOCK{m_prompt_llm_mutex};
+  if (m_prompt_llm_stopping || m_prompt_llm_active)
+  {
+    RCLCPP_WARN(get_logger(), "Rejecting PromptLLM goal: another PromptLLM goal is active");
     return rclcpp_action::GoalResponse::REJECT;
   }
+  m_prompt_llm_active = true;
   return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
 }
 
@@ -519,7 +614,49 @@ SceneGraphQueryNode::handlePromptLLMCancel(const std::shared_ptr<PromptLLMGoal>&
 
 void SceneGraphQueryNode::handlePromptLLMAccepted(const std::shared_ptr<PromptLLMGoal>& goal_handle)
 {
-  std::thread{[this, goal_handle] { executePromptLLM(goal_handle); }}.detach();
+  std::jthread completed_worker;
+  bool cancel_goal = false;
+  {
+    const std::scoped_lock LOCK{m_prompt_llm_mutex};
+    if (m_prompt_llm_stopping)
+    {
+      m_prompt_llm_active = false;
+      cancel_goal         = true;
+    }
+    else
+    {
+      completed_worker = std::move(m_prompt_llm_worker);
+    }
+  }
+
+  if (cancel_goal)
+  {
+    auto result     = std::make_shared<PromptLLMAction::Result>();
+    result->success = false;
+    result->message = "Node is shutting down";
+    goal_handle->canceled(result);
+    return;
+  }
+  if (completed_worker.joinable())
+  {
+    completed_worker.join();
+  }
+
+  const std::scoped_lock LOCK{m_prompt_llm_mutex};
+  if (m_prompt_llm_stopping)
+  {
+    m_prompt_llm_active = false;
+    auto result         = std::make_shared<PromptLLMAction::Result>();
+    result->success     = false;
+    result->message     = "Node is shutting down";
+    goal_handle->canceled(result);
+    return;
+  }
+  m_prompt_llm_worker = std::jthread([this, goal_handle] {
+    executePromptLLM(goal_handle);
+    const std::scoped_lock LOCK{m_prompt_llm_mutex};
+    m_prompt_llm_active = false;
+  });
 }
 
 void SceneGraphQueryNode::executePromptLLM(const std::shared_ptr<PromptLLMGoal>& goal_handle)

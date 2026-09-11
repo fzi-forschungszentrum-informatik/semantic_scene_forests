@@ -35,6 +35,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -77,7 +78,7 @@ class SEMANTIC_SCENE_FORESTS_QUERY_PUBLIC SceneGraphQueryNode : public rclcpp::N
 {
 public:
   explicit SceneGraphQueryNode(const rclcpp::NodeOptions& options);
-  ~SceneGraphQueryNode() override = default;
+  ~SceneGraphQueryNode() override;
 
 private:
   using SceneGraphMsg      = semantic_scene_forests_msgs::msg::SceneGraph;
@@ -109,6 +110,19 @@ private:
   std::optional<SceneGraphMsg> m_last_graph;
   mutable std::mutex m_objects_mutex;
   std::unordered_map<int64_t, ManagedObject> m_cached_objects;
+
+  // ── Action workers ──────────────────────────────────────────────────────
+  // One in-flight jthread per action type: a new goal of the same type is
+  // rejected while one is active, and the destructor joins both on shutdown
+  // instead of leaking a detached thread that could use-after-free the node.
+  mutable std::mutex m_find_object_mutex;
+  std::jthread m_find_object_worker;
+  bool m_find_object_active{false};
+  bool m_find_object_stopping{false};
+  mutable std::mutex m_prompt_llm_mutex;
+  std::jthread m_prompt_llm_worker;
+  bool m_prompt_llm_active{false};
+  bool m_prompt_llm_stopping{false};
 
   // ── Diagnostics ────────────────────────────────────────────────────────
   diagnostic_updater::Updater m_diagnostic_updater;
