@@ -92,6 +92,12 @@ public:
 
   virtual void initialize(rclcpp::Node* node, const TemplateMap& templates) = 0;
 
+  // NOTE: `current_graph` and `graph` may alias the same SceneGraph instance (the
+  // current call site always passes the same object for both). Implementations
+  // MUST snapshot any container/iterator obtained from `current_graph` (e.g. via
+  // getConceptNodes()) into a local value BEFORE mutating `graph` — do not hold
+  // live references or iterators into `current_graph` across a `graph` mutation.
+  // See category_task.cpp / affordance_task.cpp for the correct snapshot pattern.
   virtual TaskResult execute(oai::OpenAIClient& client,
                              std::vector<oai::Message>& history,
                              const fzi::semantic_scene_forests::SceneGraph& current_graph,

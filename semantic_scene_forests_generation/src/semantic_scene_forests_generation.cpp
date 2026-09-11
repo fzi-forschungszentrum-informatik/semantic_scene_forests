@@ -389,6 +389,18 @@ void SceneGraphGenerationNode::executeGoal(const std::shared_ptr<GoalHandle>& go
     goal_handle->abort(result);
     RCLCPP_ERROR(get_logger(), "%s", message.c_str());
   }
+  catch (...)
+  {
+    // A pluginlib-loaded task can throw a type that isn't a std::exception; without this
+    // catch-all it would escape the jthread body uncaught and call std::terminate().
+    const std::string message = "Scene graph update failed: unknown exception";
+    m_llm_errors.increment(message);
+    auto result     = std::make_shared<UpdateSceneGraphAction::Result>();
+    result->success = false;
+    result->message = message;
+    goal_handle->abort(result);
+    RCLCPP_ERROR(get_logger(), "%s", message.c_str());
+  }
   clearActiveGoal();
 }
 
