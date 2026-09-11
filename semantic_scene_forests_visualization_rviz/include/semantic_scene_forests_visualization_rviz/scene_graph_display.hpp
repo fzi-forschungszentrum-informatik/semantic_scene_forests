@@ -31,6 +31,7 @@
 
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -133,7 +134,9 @@ private:
   };
   std::map<int64_t, LabelVisual> m_object_labels;
 
-  // Per-object visual data and selection handlers for right-click context menu
+  // Per-object visual data and selection handlers for right-click context menu.
+  // Written from ROS callback threads, read from the Qt GUI thread — guard both.
+  mutable std::mutex m_object_visuals_mutex;
   std::map<int64_t, ObjectVisual> m_object_visuals;
 
   // Render panel (QPointer for safe access — not owned)
