@@ -59,6 +59,35 @@ TEST(SceneGraphTest, AddObjectNodeWithId)
   EXPECT_TRUE(graph.hasNode(10));
 }
 
+TEST(SceneGraphTest, UpdateObjectNodeExistingIdIsNoOp)
+{
+  SceneGraph graph;
+  auto detection             = std::make_shared<vision_msgs::msg::Detection3D>();
+  detection->header.frame_id = "camera";
+  std::array<sensor_msgs::msg::Image::SharedPtr, 5> visuals{};
+  visuals[0] = std::make_shared<sensor_msgs::msg::Image>();
+
+  auto obj = graph.addObjectNodeWithId(10, "cup", detection, visuals).value();
+
+  auto msg = std::make_unique<semantic_scene_forests_msgs::msg::SceneGraph>();
+  semantic_scene_forests_msgs::msg::ObjectNode object_msg;
+  object_msg.id = obj;
+  msg->object_nodes.push_back(object_msg);
+
+  auto result = graph.updateSceneGraphFromMsg(*msg);
+  ASSERT_TRUE(result.has_value());
+
+  auto node = graph.findNode(obj);
+  ASSERT_TRUE(node.has_value());
+  ASSERT_TRUE(std::holds_alternative<ObjectNode>(node.value()));
+
+  const auto& object_node = std::get<ObjectNode>(node.value());
+  EXPECT_EQ(object_node.class_name, "cup");
+  ASSERT_NE(object_node.detection, nullptr);
+  EXPECT_EQ(object_node.detection->header.frame_id, "camera");
+  EXPECT_NE(object_node.visuals[0], nullptr);
+}
+
 TEST(SceneGraphTest, AddConceptNode)
 {
   SceneGraph graph;

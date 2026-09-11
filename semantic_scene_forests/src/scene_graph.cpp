@@ -684,26 +684,18 @@ void SceneGraph::swap(SceneGraph& other) noexcept
 std::expected<void, SceneGraphError> SceneGraph::updateObjectNodeFromMsg(
   const semantic_scene_forests_msgs::msg::ObjectNode& object_msg) noexcept
 {
-  auto detection = std::make_shared<vision_msgs::msg::Detection3D>();
-  std::array<sensor_msgs::msg::Image::SharedPtr, 5> visuals{};
-
   if (this->m_id_map.left.count(object_msg.id) > 0)
   {
-    ObjectNode object_node{
-      .id = object_msg.id, .class_name = "", .detection = detection, .visuals = visuals};
-    SceneGraphNode node(std::in_place_type<ObjectNode>, std::move(object_node));
-
-    if (const auto IT = this->m_id_map.left.find(object_msg.id); IT != this->m_id_map.left.end())
-    {
-      this->m_graph[IT->second] = std::move(node);
-    }
+    // ObjectNode.msg carries no class_name/detection/visuals — nothing to merge, and
+    // replacing the node here would discard its real detection/visuals data.
+    return {};
   }
-  else
+
+  auto detection = std::make_shared<vision_msgs::msg::Detection3D>();
+  std::array<sensor_msgs::msg::Image::SharedPtr, 5> visuals{};
+  if (auto result = addObjectNodeWithId(object_msg.id, "", detection, visuals); !result)
   {
-    if (auto result = addObjectNodeWithId(object_msg.id, "", detection, visuals); !result)
-    {
-      return std::unexpected(result.error());
-    }
+    return std::unexpected(result.error());
   }
   return {};
 }
