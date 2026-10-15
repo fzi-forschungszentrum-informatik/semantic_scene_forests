@@ -32,6 +32,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <rclcpp/time.hpp>
@@ -48,6 +49,13 @@ namespace semantic_scene_forests_object_manager {
 class ObjectManager
 {
 public:
+  enum class EditFailure
+  {
+    SUCCESS,
+    UNKNOWN_OBJECT,
+    INVALID_CROP_INDEX
+  };
+
   bool
   processObjectCandidate(const semantic_scene_forests_object_msgs::msg::ObjectCandidate& candidate,
                          const rclcpp::Time& now);
@@ -59,6 +67,10 @@ public:
   bool editObject(const semantic_scene_forests_object_msgs::srv::EditObject::Request& request,
                   const rclcpp::Time& now);
 
+  bool editObject(const semantic_scene_forests_object_msgs::srv::EditObject::Request& request,
+                  const rclcpp::Time& now,
+                  EditFailure& failure);
+
   [[nodiscard]] std::vector<semantic_scene_forests_object_msgs::msg::ManagedObject>
   getManagedObjects(const std::string& frame_id) const;
 
@@ -68,9 +80,12 @@ public:
   [[nodiscard]] semantic_scene_forests_object_msgs::msg::ManagedObjectArray
   buildMessage(const std::string& frame_id, const rclcpp::Time& now) const;
 
+  [[nodiscard]] size_t getBlockedObjectCount() const;
+
 private:
   mutable std::mutex m_objects_mutex;
   std::unordered_map<int64_t, ManagedObject> m_objects;
+  std::unordered_set<int64_t> m_blocked_ids;
 };
 
 } // namespace semantic_scene_forests_object_manager

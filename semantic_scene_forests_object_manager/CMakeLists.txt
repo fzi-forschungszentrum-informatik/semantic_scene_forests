@@ -67,6 +67,13 @@ install(DIRECTORY launch config
   DESTINATION share/${PROJECT_NAME}
 )
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+
+  ament_add_gtest(test_object_manager test/test_object_manager.cpp)
+  target_link_libraries(test_object_manager object_manager_component)
+endif()
+
 ament_export_dependencies(
   rclcpp
   rclcpp_components
