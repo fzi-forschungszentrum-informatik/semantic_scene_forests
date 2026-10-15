@@ -33,12 +33,13 @@
 #include <fstream>
 #include <future>
 #include <iterator>
+#include <limits>
 #include <thread>
 #include <utility>
 
 #include <fmt/format.h>
 
-#include <ament_index_cpp/get_package_share_directory.hpp>
+#include <ament_index_cpp/get_package_share_path.hpp>
 
 #include <cv_bridge/cv_bridge.hpp>
 
@@ -51,7 +52,6 @@ namespace semantic_scene_forests_query {
 
 using json   = nlohmann::json;
 namespace fs = std::filesystem;
-using namespace std::chrono_literals;
 
 namespace {
 
@@ -61,8 +61,6 @@ constexpr const char* K_MANAGED_OBJECTS_TOPIC = "managed_objects";
 constexpr const char* K_GET_OBJECT_VISUALS    = "get_object_visuals";
 constexpr const char* K_FIND_OBJECT_ACTION    = "find_object";
 constexpr const char* K_PROMPT_LLM_ACTION     = "prompt_llm";
-
-constexpr auto K_VISUALS_TIMEOUT = 10s;
 
 // Extract the first balanced {...} block from arbitrary model text (handles
 // fenced ```json blocks and surrounding prose). Returns the substring or "".
@@ -98,9 +96,8 @@ SceneGraphQueryNode::SceneGraphQueryNode(const rclcpp::NodeOptions& options)
   }
   else
   {
-    prompt_dir =
-      fs::path(ament_index_cpp::get_package_share_directory("semantic_scene_forests_query")) /
-      "resources";
+    prompt_dir = fs::path(ament_index_cpp::get_package_share_path("semantic_scene_forests_query")) /
+                 "resources";
   }
   loadTemplates(prompt_dir.string());
 
@@ -150,6 +147,9 @@ SceneGraphQueryNode::SceneGraphQueryNode(const rclcpp::NodeOptions& options)
 
 SceneGraphQueryNode::~SceneGraphQueryNode()
 {
+  // Mark both action kinds stopping and request BOTH workers to stop before
+  // joining either, so a goal blocked in one worker cannot delay the other's
+  // teardown. Joins happen outside the action mutexes.
   std::jthread find_object_worker;
   {
     const std::scoped_lock LOCK{m_find_object_mutex};
@@ -160,11 +160,6 @@ SceneGraphQueryNode::~SceneGraphQueryNode()
       find_object_worker = std::move(m_find_object_worker);
     }
   }
-  if (find_object_worker.joinable())
-  {
-    find_object_worker.join();
-  }
-
   std::jthread prompt_llm_worker;
   {
     const std::scoped_lock LOCK{m_prompt_llm_mutex};
@@ -174,6 +169,10 @@ SceneGraphQueryNode::~SceneGraphQueryNode()
       m_prompt_llm_worker.request_stop();
       prompt_llm_worker = std::move(m_prompt_llm_worker);
     }
+  }
+  if (find_object_worker.joinable())
+  {
+    find_object_worker.join();
   }
   if (prompt_llm_worker.joinable())
   {
@@ -228,27 +227,70 @@ void SceneGraphQueryNode::onSceneGraph(const SceneGraphMsg::SharedPtr& msg)
 void SceneGraphQueryNode::onManagedObjects(const ManagedObjectArray::SharedPtr& msg)
 {
   m_objects_freq->tick();
-  const std::scoped_lock LOCK{m_objects_mutex};
-  m_cached_objects.clear();
+  // Complete managed-object arrays are authoritative. Blocked legacy rows are
+  // not active. The membership epoch changes only when the active id set
+  // changes, so in-flight query results can be checked for staleness.
+  std::unordered_map<int64_t, ManagedObject> next;
   for (const auto& obj : msg->objects)
   {
-    m_cached_objects[obj.id] = obj;
+    if (!obj.is_blocked)
+    {
+      next[obj.id] = obj;
+    }
   }
+  const std::scoped_lock LOCK{m_objects_mutex};
+  bool changed = next.size() != m_cached_objects.size();
+  if (!changed)
+  {
+    for (const auto& [id, obj] : next)
+    {
+      if (!m_cached_objects.contains(id))
+      {
+        changed = true;
+        break;
+      }
+    }
+  }
+  if (changed)
+  {
+    ++m_objects_epoch;
+  }
+  m_cached_objects   = std::move(next);
+  m_objects_received = true;
 }
 
 // ── Shared helpers ──────────────────────────────────────────────────────────--
 
-std::expected<std::unique_ptr<fzi::semantic_scene_forests::SceneGraph>, std::string>
+std::expected<SceneGraphQueryNode::SceneSnapshot, std::string>
 SceneGraphQueryNode::snapshotGraph() const
 {
+  // Consistent capture: graph message and managed-object state are copied
+  // together under one scoped_lock, then the locks are released before any
+  // conversion, sanitization or IO below.
   SceneGraphMsg msg;
+  std::unordered_set<int64_t> active_ids;
+  bool received{false};
+  std::uint64_t epoch{0};
   {
-    const std::scoped_lock LOCK{m_graph_mutex};
+    const std::scoped_lock LOCK{m_objects_mutex, m_graph_mutex};
     if (!m_last_graph)
     {
       return std::unexpected{"no scene graph received yet"};
     }
-    msg = *m_last_graph;
+    msg      = *m_last_graph;
+    received = m_objects_received;
+    epoch    = m_objects_epoch;
+    active_ids.reserve(m_cached_objects.size());
+    for (const auto& [id, obj] : m_cached_objects)
+    {
+      active_ids.insert(id);
+    }
+  }
+  // Queries require an authoritative managed-object snapshot: fail clearly
+  // until one arrives. A confirmed empty array is a valid empty scene.
+  if (!received)
+  {
+    return std::unexpected{"no authoritative managed-object state received yet"};
   }
 
   auto graph = fzi::semantic_scene_forests::SceneGraph::fromMsg(msg);
@@ -257,7 +299,21 @@ SceneGraphQueryNode::snapshotGraph() const
     return std::unexpected{
       fmt::format("failed to build graph snapshot: {}", graph.error().message)};
   }
-  return std::move(*graph);
+  // Drop objects (and concepts unreachable from the retained ones) that are
+  // no longer active, so removals take effect even for a latched graph.
+  if (auto retained = (*graph)->retainObjectNodes(active_ids); !retained)
+  {
+    return std::unexpected{
+      fmt::format("failed to sanitize graph snapshot: {}", retained.error().message)};
+  }
+
+  std::unordered_set<int64_t> object_ids;
+  for (const auto& node : (*graph)->getObjectNodes())
+  {
+    object_ids.insert(node.id);
+  }
+  return SceneSnapshot{
+    .graph = std::move(*graph), .object_ids = std::move(object_ids), .epoch = epoch};
 }
 
 std::optional<ObjectInfo> SceneGraphQueryNode::lookupObject(int64_t id) const
@@ -279,18 +335,30 @@ std::optional<ObjectInfo> SceneGraphQueryNode::lookupObject(int64_t id) const
                     .size_z     = BBOX.size.z};
 }
 
-std::expected<std::string, std::string>
-SceneGraphQueryNode::inspectObjectVisual(int64_t id, std::string_view focus)
+std::expected<std::string, std::string> SceneGraphQueryNode::inspectObjectVisual(
+  int64_t id, std::string_view focus, const StopCheck& should_stop)
 {
   auto request        = std::make_shared<GetObjectVisuals::Request>();
   request->object_ids = {id};
 
-  auto future = m_visuals_client->async_send_request(request);
-  // NOTE: requires a multi-threaded executor (see launch file) — this blocks the
-  // action thread until the service responds.
-  if (future.wait_for(K_VISUALS_TIMEOUT) != std::future_status::ready)
+  // Poll the service future so the wait is bounded by the visuals timeout and
+  // an interruption or a timeout cannot leak a pending request.
+  const auto TIMEOUT =
+    std::chrono::seconds{std::max<int64_t>(1, m_params.visuals_request_timeout_seconds)};
+  auto future         = m_visuals_client->async_send_request(request);
+  const auto DEADLINE = std::chrono::steady_clock::now() + TIMEOUT;
+  while (future.wait_for(std::chrono::milliseconds{100}) != std::future_status::ready)
   {
-    return std::unexpected{fmt::format("/get_object_visuals timed out for object {}", id)};
+    if (should_stop && should_stop())
+    {
+      (void)m_visuals_client->remove_pending_request(future);
+      return std::unexpected{fmt::format("visual inspection of object {} interrupted", id)};
+    }
+    if (std::chrono::steady_clock::now() >= DEADLINE)
+    {
+      (void)m_visuals_client->remove_pending_request(future);
+      return std::unexpected{fmt::format("/get_object_visuals timed out for object {}", id)};
+    }
   }
   auto response = future.get();
   if (response->visuals.empty() || response->visuals.front().image_crops.empty())
@@ -387,17 +455,27 @@ SceneGraphQueryNode::renderObjectCatalog(const fzi::semantic_scene_forests::Scen
 
 oai::OpenAIClient SceneGraphQueryNode::makeClient() const
 {
+  // Production defaults: 5 s connect, 60 s request (see parameter schema).
+  const auto CONNECT_TIMEOUT =
+    std::chrono::seconds{std::max<int64_t>(1, m_params.llm_connect_timeout_seconds)};
+  const auto REQUEST_TIMEOUT =
+    std::chrono::seconds{std::max<int64_t>(1, m_params.llm_request_timeout_seconds)};
   return oai::ClientBuilder{}
     .baseUrl(m_params.server_url)
     .apiKey(m_params.api_key)
     .model(m_params.model)
     .temperature(static_cast<float>(m_params.temperature))
     .maxTokens(m_params.max_tokens)
+    .connectTimeout(CONNECT_TIMEOUT)
+    .requestTimeout(REQUEST_TIMEOUT)
     .build();
 }
 
-std::expected<SceneGraphQueryNode::AgentOutcome, std::string> SceneGraphQueryNode::runAgent(
-  const std::string& system_prompt_key, std::string_view request, const ExpandCallback& on_expand)
+std::expected<SceneGraphQueryNode::AgentOutcome, std::string>
+SceneGraphQueryNode::runAgent(const std::string& system_prompt_key,
+                              std::string_view request,
+                              const ExpandCallback& on_expand,
+                              const StopCheck& should_stop)
 {
   auto snapshot = snapshotGraph();
   if (!snapshot)
@@ -405,13 +483,16 @@ std::expected<SceneGraphQueryNode::AgentOutcome, std::string> SceneGraphQueryNod
     return std::unexpected{snapshot.error()};
   }
 
-  const std::string CATALOG = renderObjectCatalog(**snapshot);
+  const std::string CATALOG = renderObjectCatalog(*snapshot->graph);
 
   GraphAgentSession session(
-    std::move(*snapshot),
+    std::move(snapshot->graph),
     [this](int64_t id) { return lookupObject(id); },
-    [this](int64_t id, std::string_view focus) { return inspectObjectVisual(id, focus); },
+    [this, should_stop](int64_t id, std::string_view focus) {
+      return inspectObjectVisual(id, focus, should_stop);
+    },
     on_expand,
+    should_stop,
     [this](const std::string& line) { RCLCPP_INFO(get_logger(), "[agent] %s", line.c_str()); });
 
   auto agent = oai::AgentBuilder{}
@@ -431,7 +512,29 @@ std::expected<SceneGraphQueryNode::AgentOutcome, std::string> SceneGraphQueryNod
       fmt::format("LLM error ({}): {}", answer.error().http_status, answer.error().message)};
   }
   RCLCPP_INFO(get_logger(), "[agent] final answer: %s", answer->c_str());
-  return AgentOutcome{.text = std::move(*answer), .expanded = session.expandedNodes()};
+  return AgentOutcome{.text                = std::move(*answer),
+                      .expanded            = session.expandedNodes(),
+                      .snapshot_object_ids = std::move(snapshot->object_ids),
+                      .membership_epoch    = snapshot->epoch};
+}
+
+void SceneGraphQueryNode::guardedTerminal(const std::function<void()>& terminal)
+{
+  // Do not publish to an already-disposed context; contain the rclcpp_action
+  // exception when teardown races the call ("Asked to publish result for goal
+  // that does not exist").
+  if (!rclcpp::ok(get_node_base_interface()->get_context()))
+  {
+    return;
+  }
+  try
+  {
+    terminal();
+  }
+  catch (const std::exception& e)
+  {
+    RCLCPP_WARN(get_logger(), "terminal goal transition failed: %s", e.what());
+  }
 }
 
 // ── FindObject action ─────────────────────────────────────────────────────────
@@ -493,7 +596,15 @@ void SceneGraphQueryNode::handleFindObjectAccepted(
     result->success   = false;
     result->message   = "Node is shutting down";
     result->object_id = -1;
-    goal_handle->canceled(result);
+    // Only an accepted client cancellation may terminalize as canceled.
+    if (goal_handle->is_canceling())
+    {
+      guardedTerminal([&goal_handle, &result] { goal_handle->canceled(result); });
+    }
+    else
+    {
+      guardedTerminal([&goal_handle, &result] { goal_handle->abort(result); });
+    }
     return;
   }
   if (completed_worker.joinable())
@@ -509,17 +620,25 @@ void SceneGraphQueryNode::handleFindObjectAccepted(
     result->success      = false;
     result->message      = "Node is shutting down";
     result->object_id    = -1;
-    goal_handle->canceled(result);
+    if (goal_handle->is_canceling())
+    {
+      guardedTerminal([&goal_handle, &result] { goal_handle->canceled(result); });
+    }
+    else
+    {
+      guardedTerminal([&goal_handle, &result] { goal_handle->abort(result); });
+    }
     return;
   }
-  m_find_object_worker = std::jthread([this, goal_handle] {
-    executeFindObject(goal_handle);
+  m_find_object_worker = std::jthread([this, goal_handle](std::stop_token stop) {
+    executeFindObject(goal_handle, std::move(stop));
     const std::scoped_lock LOCK{m_find_object_mutex};
     m_find_object_active = false;
   });
 }
 
-void SceneGraphQueryNode::executeFindObject(const std::shared_ptr<FindObjectGoal>& goal_handle)
+void SceneGraphQueryNode::executeFindObject(const std::shared_ptr<FindObjectGoal>& goal_handle,
+                                            std::stop_token stop)
 {
   const auto GOAL = goal_handle->get_goal();
   RCLCPP_INFO(get_logger(), "FindObject: '%s'", GOAL->object_description.c_str());
@@ -531,50 +650,194 @@ void SceneGraphQueryNode::executeFindObject(const std::shared_ptr<FindObjectGoal
     goal_handle->publish_feedback(fb);
   };
 
-  auto outcome = runAgent("find_object/system_prompt", GOAL->object_description, ON_EXPAND);
+  // Both a client cancellation and a shutdown request interrupt the agent at
+  // the next tool boundary; only an accepted cancellation may end as canceled.
+  const StopCheck SHOULD_STOP = [goal_handle, &stop] {
+    return goal_handle->is_canceling() || stop.stop_requested();
+  };
 
-  auto result = std::make_shared<FindObjectAction::Result>();
-  if (!outcome)
-  {
-    m_action_errors.increment(outcome.error());
+  auto result      = std::make_shared<FindObjectAction::Result>();
+  const auto ABORT = [&](const std::string& message) {
     result->success   = false;
-    result->message   = outcome.error();
     result->object_id = -1;
-    goal_handle->abort(result);
-    RCLCPP_ERROR(get_logger(), "FindObject failed: %s", outcome.error().c_str());
-    return;
-  }
+    result->message   = message;
+    guardedTerminal([&] { goal_handle->abort(result); });
+    RCLCPP_WARN(get_logger(), "FindObject aborted: %s", message.c_str());
+  };
 
-  if (goal_handle->is_canceling())
+  try
+  {
+    // Cheap pre-flight: skip the paid LLM call when already cancelled/stopping.
+    if (SHOULD_STOP())
+    {
+      result->success   = false;
+      result->object_id = -1;
+      if (goal_handle->is_canceling())
+      {
+        result->message = "Cancelled";
+        guardedTerminal([&] { goal_handle->canceled(result); });
+      }
+      else
+      {
+        result->message = "node shutting down";
+        guardedTerminal([&] { goal_handle->abort(result); });
+      }
+      return;
+    }
+    auto outcome =
+      runAgent("find_object/system_prompt", GOAL->object_description, ON_EXPAND, SHOULD_STOP);
+    if (!outcome)
+    {
+      m_action_errors.increment(outcome.error());
+      ABORT(outcome.error());
+      return;
+    }
+
+    if (goal_handle->is_canceling())
+    {
+      result->success   = false;
+      result->object_id = -1;
+      result->message   = "Cancelled";
+      guardedTerminal([&] { goal_handle->canceled(result); });
+      return;
+    }
+    if (stop.stop_requested())
+    {
+      ABORT("node shutting down");
+      return;
+    }
+
+    auto validated = validateFindObjectAnswer(*outcome);
+    if (!validated)
+    {
+      ABORT(validated.error());
+      return;
+    }
+    guardedTerminal([&] { goal_handle->succeed(*validated); });
+    RCLCPP_INFO(get_logger(),
+                "FindObject done: success=%d object_id=%ld",
+                static_cast<int>((*validated)->success),
+                (*validated)->object_id);
+  }
+  catch (const AgentStopped&)
   {
     result->success   = false;
-    result->message   = "Cancelled";
     result->object_id = -1;
-    goal_handle->canceled(result);
-    return;
+    if (goal_handle->is_canceling())
+    {
+      result->message = "Cancelled";
+      guardedTerminal([&] { goal_handle->canceled(result); });
+    }
+    else
+    {
+      result->message = "Interrupted";
+      guardedTerminal([&] { goal_handle->abort(result); });
+    }
   }
+  catch (const std::exception& e)
+  {
+    ABORT(std::string{"internal error: "} + e.what());
+  }
+  catch (...)
+  {
+    ABORT("unknown internal error");
+  }
+}
 
-  // The model is instructed to answer with {"found": bool, "object_id": int, "message": str}.
-  const json PARSED = json::parse(extractJsonObject(outcome->text), nullptr, false);
+std::expected<SceneGraphQueryNode::FindObjectAction::Result::SharedPtr, std::string>
+SceneGraphQueryNode::validateFindObjectAnswer(const AgentOutcome& outcome) const
+{
+  // The model is instructed to answer with {"found": bool, "object_id": int,
+  // "message": str}. Validate strictly: malformed, fabricated or stale answers
+  // are ABORTED, never successful parses with defaulted fields.
+  const json PARSED = json::parse(extractJsonObject(outcome.text), nullptr, false);
   if (PARSED.is_discarded() || !PARSED.is_object())
   {
-    result->success   = false;
-    result->object_id = -1;
-    result->message   = "Could not parse model output: " + outcome->text;
+    return std::unexpected{"could not parse model output: " + outcome.text};
+  }
+
+  const auto FOUND_FIELD = PARSED.find("found");
+  if (FOUND_FIELD == PARSED.end() || !FOUND_FIELD->is_boolean())
+  {
+    return std::unexpected{"model output is missing a boolean 'found' field: " + outcome.text};
+  }
+  const bool FOUND = FOUND_FIELD->get<bool>();
+
+  // Receipt + epoch gate for BOTH positive and negative answers: any result
+  // computed against outdated membership is stale and must not terminalize.
+  {
+    const std::scoped_lock LOCK{m_objects_mutex};
+    if (!m_objects_received)
+    {
+      return std::unexpected{"no authoritative managed-object state received yet"};
+    }
+    if (m_objects_epoch != outcome.membership_epoch)
+    {
+      return std::unexpected{"object membership changed during the query (stale result)"};
+    }
+  }
+
+  auto result       = std::make_shared<FindObjectAction::Result>();
+  result->object_id = -1;
+  result->success   = false;
+  result->message   = outcome.text;
+  if (const auto MSG_FIELD = PARSED.find("message"); MSG_FIELD != PARSED.end())
+  {
+    if (!MSG_FIELD->is_string())
+    {
+      return std::unexpected{"model output has a non-string 'message' field: " + outcome.text};
+    }
+    result->message = MSG_FIELD->get<std::string>();
+  }
+
+  if (!FOUND)
+  {
+    // A genuine negative on unchanged membership is a completed, unsuccessful
+    // lookup.
+    return result;
+  }
+
+  const auto ID_FIELD = PARSED.find("object_id");
+  if (ID_FIELD == PARSED.end() || !ID_FIELD->is_number_integer())
+  {
+    return std::unexpected{"positive match without an integral 'object_id': " + outcome.text};
+  }
+  int64_t object_id = -1;
+  if (ID_FIELD->is_number_unsigned())
+  {
+    // Check the unsigned range BEFORE casting to a signed integer.
+    const auto AS_UNSIGNED = ID_FIELD->get<uint64_t>();
+    if (AS_UNSIGNED > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+    {
+      return std::unexpected{"'object_id' is not representable as a signed 64-bit integer"};
+    }
+    object_id = static_cast<int64_t>(AS_UNSIGNED);
   }
   else
   {
-    const bool FOUND = PARSED.value("found", false);
-    result->success  = FOUND;
-    result->object_id =
-      FOUND ? PARSED.value("object_id", static_cast<int64_t>(-1)) : static_cast<int64_t>(-1);
-    result->message = PARSED.value("message", outcome->text);
+    object_id = ID_FIELD->get<int64_t>();
   }
-  goal_handle->succeed(result);
-  RCLCPP_INFO(get_logger(),
-              "FindObject done: success=%d object_id=%ld",
-              static_cast<int>(result->success),
-              result->object_id);
+
+  // The selected id must have been an object in the captured snapshot and
+  // must still be active now (re-check under the objects mutex closes the
+  // snapshot-to-validation window).
+  if (!outcome.snapshot_object_ids.contains(object_id))
+  {
+    return std::unexpected{
+      fmt::format("model reported object {} which is not in the scene snapshot", object_id)};
+  }
+  {
+    const std::scoped_lock LOCK{m_objects_mutex};
+    if (!m_cached_objects.contains(object_id))
+    {
+      return std::unexpected{
+        fmt::format("model reported object {} which is no longer active", object_id)};
+    }
+  }
+
+  result->success   = true;
+  result->object_id = object_id;
+  return result;
 }
 
 // ── PromptLLM action ──────────────────────────────────────────────────────────
@@ -634,7 +897,14 @@ void SceneGraphQueryNode::handlePromptLLMAccepted(const std::shared_ptr<PromptLL
     auto result     = std::make_shared<PromptLLMAction::Result>();
     result->success = false;
     result->message = "Node is shutting down";
-    goal_handle->canceled(result);
+    if (goal_handle->is_canceling())
+    {
+      guardedTerminal([&goal_handle, &result] { goal_handle->canceled(result); });
+    }
+    else
+    {
+      guardedTerminal([&goal_handle, &result] { goal_handle->abort(result); });
+    }
     return;
   }
   if (completed_worker.joinable())
@@ -649,17 +919,25 @@ void SceneGraphQueryNode::handlePromptLLMAccepted(const std::shared_ptr<PromptLL
     auto result         = std::make_shared<PromptLLMAction::Result>();
     result->success     = false;
     result->message     = "Node is shutting down";
-    goal_handle->canceled(result);
+    if (goal_handle->is_canceling())
+    {
+      guardedTerminal([&goal_handle, &result] { goal_handle->canceled(result); });
+    }
+    else
+    {
+      guardedTerminal([&goal_handle, &result] { goal_handle->abort(result); });
+    }
     return;
   }
-  m_prompt_llm_worker = std::jthread([this, goal_handle] {
-    executePromptLLM(goal_handle);
+  m_prompt_llm_worker = std::jthread([this, goal_handle](std::stop_token stop) {
+    executePromptLLM(goal_handle, std::move(stop));
     const std::scoped_lock LOCK{m_prompt_llm_mutex};
     m_prompt_llm_active = false;
   });
 }
 
-void SceneGraphQueryNode::executePromptLLM(const std::shared_ptr<PromptLLMGoal>& goal_handle)
+void SceneGraphQueryNode::executePromptLLM(const std::shared_ptr<PromptLLMGoal>& goal_handle,
+                                           std::stop_token stop)
 {
   const auto GOAL = goal_handle->get_goal();
   RCLCPP_INFO(get_logger(), "PromptLLM: '%s'", GOAL->query.c_str());
@@ -671,32 +949,105 @@ void SceneGraphQueryNode::executePromptLLM(const std::shared_ptr<PromptLLMGoal>&
     goal_handle->publish_feedback(fb);
   };
 
-  auto outcome = runAgent("prompt_llm/system_prompt", GOAL->query, ON_EXPAND);
+  // Same interruption semantics as FindObject: cancel and shutdown both stop
+  // the agent; only an accepted cancellation may terminalize as canceled.
+  const StopCheck SHOULD_STOP = [goal_handle, &stop] {
+    return goal_handle->is_canceling() || stop.stop_requested();
+  };
 
   auto result = std::make_shared<PromptLLMAction::Result>();
-  if (!outcome)
+  try
   {
-    m_action_errors.increment(outcome.error());
-    result->success = false;
-    result->message = outcome.error();
-    goal_handle->abort(result);
-    RCLCPP_ERROR(get_logger(), "PromptLLM failed: %s", outcome.error().c_str());
-    return;
-  }
+    // Cheap pre-flight: skip the paid LLM call when already cancelled/stopping.
+    if (SHOULD_STOP())
+    {
+      result->success = false;
+      if (goal_handle->is_canceling())
+      {
+        result->message = "Cancelled";
+        guardedTerminal([&] { goal_handle->canceled(result); });
+      }
+      else
+      {
+        result->message = "Node shutting down";
+        guardedTerminal([&] { goal_handle->abort(result); });
+      }
+      return;
+    }
+    auto outcome = runAgent("prompt_llm/system_prompt", GOAL->query, ON_EXPAND, SHOULD_STOP);
+    if (!outcome)
+    {
+      m_action_errors.increment(outcome.error());
+      result->success = false;
+      result->message = outcome.error();
+      guardedTerminal([&] { goal_handle->abort(result); });
+      RCLCPP_ERROR(get_logger(), "PromptLLM failed: %s", outcome.error().c_str());
+      return;
+    }
 
-  if (goal_handle->is_canceling())
+    if (goal_handle->is_canceling())
+    {
+      result->success = false;
+      result->message = "Cancelled";
+      guardedTerminal([&] { goal_handle->canceled(result); });
+      return;
+    }
+    if (stop.stop_requested())
+    {
+      result->success = false;
+      result->message = "Node shutting down";
+      guardedTerminal([&] { goal_handle->abort(result); });
+      return;
+    }
+
+    // Reject free-form answers computed against outdated membership.
+    std::uint64_t epoch_now = 0;
+    {
+      const std::scoped_lock LOCK{m_objects_mutex};
+      epoch_now = m_objects_epoch;
+    }
+    if (epoch_now != outcome->membership_epoch)
+    {
+      result->success = false;
+      result->message = "object membership changed during the query (stale result)";
+      guardedTerminal([&] { goal_handle->abort(result); });
+      RCLCPP_WARN(get_logger(), "PromptLLM aborted: stale membership");
+      return;
+    }
+
+    result->success  = true;
+    result->message  = "ok";
+    result->response = outcome->text;
+    guardedTerminal([&] { goal_handle->succeed(result); });
+    RCLCPP_INFO(get_logger(), "PromptLLM done");
+  }
+  catch (const AgentStopped&)
   {
     result->success = false;
-    result->message = "Cancelled";
-    goal_handle->canceled(result);
-    return;
+    if (goal_handle->is_canceling())
+    {
+      result->message = "Cancelled";
+      guardedTerminal([&] { goal_handle->canceled(result); });
+    }
+    else
+    {
+      result->message = "Interrupted";
+      guardedTerminal([&] { goal_handle->abort(result); });
+    }
   }
-
-  result->success  = true;
-  result->message  = "ok";
-  result->response = outcome->text;
-  goal_handle->succeed(result);
-  RCLCPP_INFO(get_logger(), "PromptLLM done");
+  catch (const std::exception& e)
+  {
+    result->success = false;
+    result->message = std::string{"internal error: "} + e.what();
+    guardedTerminal([&] { goal_handle->abort(result); });
+    RCLCPP_ERROR(get_logger(), "PromptLLM internal error: %s", e.what());
+  }
+  catch (...)
+  {
+    result->success = false;
+    result->message = "unknown internal error";
+    guardedTerminal([&] { goal_handle->abort(result); });
+  }
 }
 
 void SceneGraphQueryNode::onConnectivityDiagnostic(

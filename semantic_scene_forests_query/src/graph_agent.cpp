@@ -84,13 +84,23 @@ GraphAgentSession::GraphAgentSession(std::unique_ptr<fzi::semantic_scene_forests
                                      ObjectLookup object_lookup,
                                      VisualInspector inspect,
                                      ExpandCallback on_expand,
+                                     StopCheck should_stop,
                                      LogCallback on_log)
   : m_graph(std::move(graph))
   , m_object_lookup(std::move(object_lookup))
   , m_inspect(std::move(inspect))
   , m_on_expand(std::move(on_expand))
+  , m_should_stop(std::move(should_stop))
   , m_on_log(std::move(on_log))
 {
+}
+
+void GraphAgentSession::throwIfStopping() const
+{
+  if (m_should_stop && m_should_stop())
+  {
+    throw AgentStopped{"agent interrupted between steps"};
+  }
 }
 
 void GraphAgentSession::logTool(std::string_view name,
@@ -166,6 +176,7 @@ std::optional<std::string> GraphAgentSession::nodeName(int64_t id) const
 
 std::expected<std::string, std::string> GraphAgentSession::toolListObjects()
 {
+  throwIfStopping();
   bool grew = false;
   json out  = json::array();
   for (const auto& obj : m_graph->getObjectNodes())
@@ -190,6 +201,7 @@ std::expected<std::string, std::string> GraphAgentSession::toolListObjects()
 
 std::expected<std::string, std::string> GraphAgentSession::toolListRootConcepts()
 {
+  throwIfStopping();
   // Top-down entry points: concept nodes with no outgoing edges sit at the top of
   // the concept hierarchy (e.g. "color", "material"). From here the agent walks
   // DOWN via get_children.
@@ -213,6 +225,7 @@ std::expected<std::string, std::string> GraphAgentSession::toolListRootConcepts(
 
 std::expected<std::string, std::string> GraphAgentSession::toolGetChildren(std::string_view args)
 {
+  throwIfStopping();
   const auto ID = parseId(args);
   if (!ID)
   {
@@ -250,6 +263,7 @@ std::expected<std::string, std::string> GraphAgentSession::toolGetChildren(std::
 
 std::expected<std::string, std::string> GraphAgentSession::toolGetParents(std::string_view args)
 {
+  throwIfStopping();
   const auto ID = parseId(args);
   if (!ID)
   {
@@ -285,6 +299,7 @@ std::expected<std::string, std::string> GraphAgentSession::toolGetParents(std::s
 
 std::expected<std::string, std::string> GraphAgentSession::toolGetObjectInfo(std::string_view args)
 {
+  throwIfStopping();
   const auto ID = parseId(args);
   if (!ID)
   {
@@ -320,6 +335,7 @@ std::expected<std::string, std::string> GraphAgentSession::toolGetObjectInfo(std
 std::expected<std::string, std::string>
 GraphAgentSession::toolInspectObjectVisual(std::string_view args)
 {
+  throwIfStopping();
   const auto ID = parseId(args);
   if (!ID)
   {

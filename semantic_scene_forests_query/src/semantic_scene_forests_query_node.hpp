@@ -30,13 +30,16 @@
 
 #include <cstdint>
 #include <expected>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
@@ -110,6 +113,10 @@ private:
   std::optional<SceneGraphMsg> m_last_graph;
   mutable std::mutex m_objects_mutex;
   std::unordered_map<int64_t, ManagedObject> m_cached_objects;
+  // Whether an authoritative managed-object snapshot has arrived, and the
+  // membership epoch which changes whenever the active object-id set changes.
+  bool m_objects_received{false};
+  std::uint64_t m_objects_epoch{0};
 
   // ── Action workers ──────────────────────────────────────────────────────
   // One in-flight jthread per action type: a new goal of the same type is
@@ -145,16 +152,29 @@ private:
   void onConnectivityDiagnostic(diagnostic_updater::DiagnosticStatusWrapper& stat);
 
   // ── Shared helpers ──────────────────────────────────────────────────────--
+  // Immutable scene state captured for one agent run: the sanitized graph, the
+  // object ids present in it, and the membership epoch at capture time.
+  struct SceneSnapshot
+  {
+    std::unique_ptr<fzi::semantic_scene_forests::SceneGraph> graph;
+    std::unordered_set<int64_t> object_ids;
+    std::uint64_t epoch{0};
+  };
+
   // Build an independent SceneGraph snapshot from the latest received message.
-  [[nodiscard]] std::expected<std::unique_ptr<fzi::semantic_scene_forests::SceneGraph>, std::string>
-  snapshotGraph() const;
+  // Sanitizes it against the current managed-object membership (when an
+  // authoritative managed-object array has been received) so removed objects
+  // are invisible to the agent.
+  [[nodiscard]] std::expected<SceneSnapshot, std::string> snapshotGraph() const;
 
   // Object-manager lookup bound into the agent session.
   [[nodiscard]] std::optional<ObjectInfo> lookupObject(int64_t id) const;
 
   // Vision sub-completion over an object's crops (via /get_object_visuals).
-  [[nodiscard]] std::expected<std::string, std::string> inspectObjectVisual(int64_t id,
-                                                                            std::string_view focus);
+  // Polls the service future so the wait is bounded by the visuals timeout and
+  // aborts promptly when `should_stop` fires; pending requests are cleaned up.
+  [[nodiscard]] std::expected<std::string, std::string>
+  inspectObjectVisual(int64_t id, std::string_view focus, const StopCheck& should_stop);
 
   // Render a system prompt template, falling back to a built-in default.
   [[nodiscard]] std::string renderSystemPrompt(const std::string& template_key) const;
@@ -171,24 +191,43 @@ private:
   {
     std::string text;
     std::vector<int64_t> expanded;
+    // Object ids present in the captured snapshot (post-sanitization) and the
+    // membership epoch at capture time; used to reject fabricated or stale answers.
+    std::unordered_set<int64_t> snapshot_object_ids;
+    std::uint64_t membership_epoch{0};
   };
 
   // Shared agent driver for both actions: snapshot the graph, build the session
   // and agent, run it, and stream expanded-node feedback through `on_expand`.
-  // `request` is the user's natural-language goal text.
+  // `request` is the user's natural-language goal text. `should_stop` is checked
+  // between agent steps so a shutdown interrupts the run promptly.
   [[nodiscard]] std::expected<AgentOutcome, std::string>
   runAgent(const std::string& system_prompt_key,
            std::string_view request,
-           const ExpandCallback& on_expand);
+           const ExpandCallback& on_expand,
+           const StopCheck& should_stop);
 
   // ── FindObject action ─────────────────────────────────────────────────────
+  // Run a terminal goal transition (succeed/abort/canceled) guarded against
+  // shutdown races: skip it when the context is shutting down, and contain
+  // rclcpp_action exceptions when teardown races the call ("Asked to publish
+  // result for goal that does not exist").
+  void guardedTerminal(const std::function<void()>& terminal);
+
+  // Strictly validate the model's FindObject answer against the captured
+  // snapshot and the current membership epoch. Returns the terminal result on
+  // success, or the abort reason when the answer is malformed, fabricated or
+  // stale.
+  [[nodiscard]] std::expected<FindObjectAction::Result::SharedPtr, std::string>
+  validateFindObjectAnswer(const AgentOutcome& outcome) const;
+
   rclcpp_action::GoalResponse
   handleFindObjectGoal(const rclcpp_action::GoalUUID& uuid,
                        std::shared_ptr<const FindObjectAction::Goal> goal);
   rclcpp_action::CancelResponse
   handleFindObjectCancel(const std::shared_ptr<FindObjectGoal>& goal_handle);
   void handleFindObjectAccepted(const std::shared_ptr<FindObjectGoal>& goal_handle);
-  void executeFindObject(const std::shared_ptr<FindObjectGoal>& goal_handle);
+  void executeFindObject(const std::shared_ptr<FindObjectGoal>& goal_handle, std::stop_token stop);
 
   // ── PromptLLM action ────────────────────────────────────────────────────--
   rclcpp_action::GoalResponse
@@ -197,7 +236,7 @@ private:
   rclcpp_action::CancelResponse
   handlePromptLLMCancel(const std::shared_ptr<PromptLLMGoal>& goal_handle);
   void handlePromptLLMAccepted(const std::shared_ptr<PromptLLMGoal>& goal_handle);
-  void executePromptLLM(const std::shared_ptr<PromptLLMGoal>& goal_handle);
+  void executePromptLLM(const std::shared_ptr<PromptLLMGoal>& goal_handle, std::stop_token stop);
 };
 
 } // namespace semantic_scene_forests_query
