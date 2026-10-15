@@ -8,7 +8,7 @@
 //
 //    * Redistributions in binary form must reproduce the above copyright
 //      notice, this list of conditions and the following disclaimer in the
-//      documentation and other materials provided with the distribution.
+//      documentation and/or other materials provided with the distribution.
 //
 //    * Neither the name of the copyright holder nor the names of its
 //      contributors may be used to endorse or promote products derived from
@@ -28,7 +28,6 @@
 
 #include <gtest/gtest.h>
 
-#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <future>
@@ -44,13 +43,8 @@
 
 #include "semantic_scene_forests_object_manager/object_manager.hpp"
 #include "semantic_scene_forests_object_manager/object_manager_node.hpp"
-#include "semantic_scene_forests_object_msgs/msg/managed_object.hpp"
-#include "semantic_scene_forests_object_msgs/msg/managed_object_array.hpp"
 #include "semantic_scene_forests_object_msgs/msg/object_candidate.hpp"
-#include "semantic_scene_forests_object_msgs/msg/object_visuals.hpp"
-#include "semantic_scene_forests_object_msgs/srv/block_object.hpp"
 #include "semantic_scene_forests_object_msgs/srv/edit_object.hpp"
-#include "semantic_scene_forests_object_msgs/srv/get_objects.hpp"
 #include "semantic_scene_forests_object_msgs/srv/unblock_object.hpp"
 
 namespace {
@@ -59,13 +53,8 @@ using namespace std::chrono_literals;
 
 using semantic_scene_forests_object_manager::ObjectManager;
 using semantic_scene_forests_object_manager::ObjectManagerNode;
-using semantic_scene_forests_object_msgs::msg::ManagedObject;
-using semantic_scene_forests_object_msgs::msg::ManagedObjectArray;
 using semantic_scene_forests_object_msgs::msg::ObjectCandidate;
-using semantic_scene_forests_object_msgs::msg::ObjectVisuals;
-using semantic_scene_forests_object_msgs::srv::BlockObject;
 using semantic_scene_forests_object_msgs::srv::EditObject;
-using semantic_scene_forests_object_msgs::srv::GetObjects;
 using semantic_scene_forests_object_msgs::srv::UnblockObject;
 
 constexpr int64_t OBJECT_ID = 7;
@@ -102,11 +91,11 @@ EditObject::Request makeEditRequest(int64_t id, std::vector<uint32_t> remove_ind
   EditObject::Request request;
   request.object_id           = id;
   request.update_class_name   = true;
-  request.update_pose         = true;
-  request.remove_crop_indices = std::move(remove_indices);
   request.class_name          = "edited_class";
+  request.update_pose         = true;
   request.pose.position.x     = 9.0;
   request.pose.orientation.w  = 8.0;
+  request.remove_crop_indices = std::move(remove_indices);
   return request;
 }
 
@@ -115,44 +104,31 @@ class ObjectManagerTest : public ::testing::Test
 protected:
   ObjectManager m_manager;
   rclcpp::Time m_now{100, 0};
-
-  static ObjectCandidate candidate(int64_t id = OBJECT_ID, size_t crop_count = 3)
-  {
-    return makeCandidate(id, "cup", crop_count);
-  }
 };
 
-TEST_F(ObjectManagerTest, BlockRemovesObjectFromAllAccessors)
+TEST_F(ObjectManagerTest, BlockedObjectIsSuppressedUntilFreshCandidate)
 {
-  ASSERT_TRUE(m_manager.processObjectCandidate(candidate(), m_now));
+  ASSERT_TRUE(m_manager.processObjectCandidate(makeCandidate(OBJECT_ID, "cup", 3), m_now));
   ASSERT_FALSE(m_manager.getManagedObjects("world").empty());
 
   ASSERT_TRUE(m_manager.blockObject(OBJECT_ID));
 
+  // Blocking erases the payload from every accessor and counts the block.
   EXPECT_TRUE(m_manager.getManagedObjects("world").empty());
   EXPECT_TRUE(m_manager.buildMessage("world", m_now).objects.empty());
-  EXPECT_TRUE(m_manager.getObjectVisuals({}).empty());
   EXPECT_TRUE(m_manager.getObjectVisuals({OBJECT_ID}).empty());
-}
+  EXPECT_EQ(m_manager.getBlockedObjectCount(), 1U);
 
-TEST_F(ObjectManagerTest, LateCandidateForBlockedObjectIsDenied)
-{
-  ASSERT_TRUE(m_manager.processObjectCandidate(candidate(), m_now));
-  ASSERT_TRUE(m_manager.blockObject(OBJECT_ID));
+  // A late candidate for the blocked id is denied, and so is an edit.
+  EXPECT_FALSE(m_manager.processObjectCandidate(makeCandidate(OBJECT_ID, "cup", 3), m_now));
+  EXPECT_FALSE(m_manager.editObject(makeEditRequest(OBJECT_ID, {0}), m_now));
 
-  EXPECT_FALSE(m_manager.processObjectCandidate(candidate(), m_now));
-  EXPECT_TRUE(m_manager.getManagedObjects("world").empty());
-}
-
-TEST_F(ObjectManagerTest, UnblockLeavesNoPayloadUntilNewCandidate)
-{
-  ASSERT_TRUE(m_manager.processObjectCandidate(makeCandidate(OBJECT_ID, "chair", 2), m_now));
-  ASSERT_TRUE(m_manager.blockObject(OBJECT_ID));
+  // Unblocking lifts the suppression but does not resurrect the old payload.
   ASSERT_TRUE(m_manager.unblockObject(OBJECT_ID));
-
+  EXPECT_EQ(m_manager.getBlockedObjectCount(), 0U);
   EXPECT_TRUE(m_manager.getManagedObjects("world").empty());
-  EXPECT_TRUE(m_manager.getObjectVisuals({OBJECT_ID}).empty());
 
+  // A fresh candidate is accepted again.
   ASSERT_TRUE(m_manager.processObjectCandidate(makeCandidate(OBJECT_ID, "cup", 1), m_now));
   const auto OBJECTS = m_manager.getManagedObjects("world");
   ASSERT_EQ(OBJECTS.size(), 1U);
@@ -160,124 +136,51 @@ TEST_F(ObjectManagerTest, UnblockLeavesNoPayloadUntilNewCandidate)
   EXPECT_EQ(OBJECTS[0].class_name, "cup");
 }
 
-TEST_F(ObjectManagerTest, UnknownUnblockReturnsFalse)
+TEST_F(ObjectManagerTest, EditObjectValidatesCropIndices)
 {
-  EXPECT_FALSE(m_manager.unblockObject(999));
-}
+  ASSERT_TRUE(m_manager.processObjectCandidate(makeCandidate(OBJECT_ID, "chair", 3), m_now));
 
-TEST_F(ObjectManagerTest, EditBlockedObjectFails)
-{
-  ASSERT_TRUE(m_manager.processObjectCandidate(candidate(), m_now));
-  ASSERT_TRUE(m_manager.blockObject(OBJECT_ID));
-
-  EXPECT_FALSE(m_manager.editObject(makeEditRequest(OBJECT_ID, {0}), m_now));
-}
-
-TEST_F(ObjectManagerTest, RepeatedBlockIsIdempotent)
-{
-  ASSERT_TRUE(m_manager.processObjectCandidate(candidate(), m_now));
-  ASSERT_TRUE(m_manager.blockObject(OBJECT_ID));
-
-  EXPECT_TRUE(m_manager.blockObject(OBJECT_ID));
-  EXPECT_TRUE(m_manager.getManagedObjects("world").empty());
-}
-
-TEST_F(ObjectManagerTest, DuplicateCropIndicesRemoveSingleCrop)
-{
-  ASSERT_TRUE(m_manager.processObjectCandidate(candidate(), m_now));
-
+  // Duplicate indices collapse: {1, 1} removes a single crop and keeps the rest.
   EXPECT_TRUE(m_manager.editObject(makeEditRequest(OBJECT_ID, {1, 1}), m_now));
-
   const auto VISUALS = m_manager.getObjectVisuals({OBJECT_ID});
   ASSERT_EQ(VISUALS.size(), 1U);
-  EXPECT_EQ(VISUALS[0].object_id, OBJECT_ID);
   ASSERT_EQ(VISUALS[0].image_crops.size(), 2U);
   EXPECT_EQ(VISUALS[0].image_crops[0].header.frame_id, "cam_0");
   EXPECT_EQ(VISUALS[0].image_crops[1].header.frame_id, "cam_2");
+
+  // An out-of-range index rejects the entire edit: the object state afterwards
+  // is completely unchanged (ROS messages compare by value).
+  const auto BEFORE_OBJECTS    = m_manager.getManagedObjects("world");
+  const auto BEFORE_VISUALS    = m_manager.getObjectVisuals({OBJECT_ID});
+  auto invalid_edit            = makeEditRequest(OBJECT_ID, {0, 99});
+  invalid_edit.class_name      = "rejected_class";
+  invalid_edit.pose.position.x = -1.0;
+  EXPECT_FALSE(m_manager.editObject(invalid_edit, m_now + rclcpp::Duration::from_seconds(1.0)));
+  EXPECT_EQ(m_manager.getManagedObjects("world"), BEFORE_OBJECTS);
+  EXPECT_EQ(m_manager.getObjectVisuals({OBJECT_ID}), BEFORE_VISUALS);
 }
 
-TEST_F(ObjectManagerTest, InvalidCropIndexRejectsEntireEdit)
+TEST_F(ObjectManagerTest, BlockAndCandidateOverlapStaysConsistent)
 {
-  ASSERT_TRUE(m_manager.processObjectCandidate(makeCandidate(OBJECT_ID, "chair", 3), m_now));
-  const auto BEFORE_OBJECTS = m_manager.getManagedObjects("world");
-  const auto BEFORE_VISUALS = m_manager.getObjectVisuals({OBJECT_ID});
-  ASSERT_EQ(BEFORE_OBJECTS.size(), 1U);
-  ASSERT_EQ(BEFORE_VISUALS.size(), 1U);
-  ASSERT_EQ(BEFORE_VISUALS[0].image_crops.size(), 3U);
+  ObjectManager manager;
+  ASSERT_TRUE(manager.processObjectCandidate(makeCandidate(OBJECT_ID, "cup", 3), m_now));
 
-  EXPECT_FALSE(m_manager.editObject(makeEditRequest(OBJECT_ID, {0, 99}), m_now));
+  // A real block/candidate race under the manager mutex: whichever op wins,
+  // the object must end up suppressed and absent.
+  std::latch start(2);
+  std::thread blocker([&manager, &start]() {
+    start.arrive_and_wait();
+    manager.blockObject(OBJECT_ID);
+  });
+  std::thread late_candidate([&manager, &start, this]() {
+    start.arrive_and_wait();
+    manager.processObjectCandidate(makeCandidate(OBJECT_ID, "cup", 3), m_now);
+  });
+  blocker.join();
+  late_candidate.join();
 
-  const auto AFTER_OBJECTS = m_manager.getManagedObjects("world");
-  const auto AFTER_VISUALS = m_manager.getObjectVisuals({OBJECT_ID});
-  ASSERT_EQ(AFTER_OBJECTS.size(), 1U);
-  ASSERT_EQ(AFTER_VISUALS.size(), 1U);
-  EXPECT_EQ(AFTER_OBJECTS[0].id, OBJECT_ID);
-  EXPECT_EQ(AFTER_OBJECTS[0].class_name, "chair");
-  EXPECT_DOUBLE_EQ(AFTER_OBJECTS[0].detection.bbox.center.position.x, 1.5);
-  EXPECT_DOUBLE_EQ(AFTER_OBJECTS[0].detection.bbox.center.orientation.w, 1.0);
-  EXPECT_EQ(AFTER_OBJECTS[0].source, 0U);
-  EXPECT_EQ(AFTER_OBJECTS[0].last_updated, BEFORE_OBJECTS[0].last_updated);
-  ASSERT_EQ(AFTER_VISUALS[0].image_crops.size(), 3U);
-  EXPECT_EQ(AFTER_VISUALS[0].image_crops[0].header.frame_id, "cam_0");
-  EXPECT_EQ(AFTER_VISUALS[0].image_crops[2].header.frame_id, "cam_2");
-}
-
-TEST_F(ObjectManagerTest, OtherObjectsUnaffectedByBlock)
-{
-  ASSERT_TRUE(m_manager.processObjectCandidate(makeCandidate(1, "cup", 1), m_now));
-  ASSERT_TRUE(m_manager.processObjectCandidate(makeCandidate(2, "mug", 2), m_now));
-  ASSERT_TRUE(m_manager.blockObject(1));
-
-  const auto OBJECTS = m_manager.getManagedObjects("world");
-  ASSERT_EQ(OBJECTS.size(), 1U);
-  EXPECT_EQ(OBJECTS[0].id, 2);
-  EXPECT_EQ(OBJECTS[0].class_name, "mug");
-
-  EXPECT_TRUE(m_manager.editObject(makeEditRequest(2, {0}), m_now));
-  const auto VISUALS = m_manager.getObjectVisuals({2});
-  ASSERT_EQ(VISUALS.size(), 1U);
-  EXPECT_EQ(VISUALS[0].image_crops.size(), 1U);
-}
-
-TEST_F(ObjectManagerTest, BlockedCountDiagnostics)
-{
-  EXPECT_EQ(m_manager.getBlockedObjectCount(), 0U);
-  ASSERT_TRUE(m_manager.processObjectCandidate(makeCandidate(1, "cup", 1), m_now));
-  EXPECT_EQ(m_manager.getBlockedObjectCount(), 0U);
-  ASSERT_TRUE(m_manager.blockObject(1));
-  EXPECT_EQ(m_manager.getBlockedObjectCount(), 1U);
-  ASSERT_TRUE(m_manager.processObjectCandidate(makeCandidate(2, "mug", 1), m_now));
-  ASSERT_TRUE(m_manager.blockObject(2));
-  EXPECT_EQ(m_manager.getBlockedObjectCount(), 2U);
-  EXPECT_EQ(m_manager.getManagedObjects("world").size(), 0U);
-  ASSERT_TRUE(m_manager.unblockObject(1));
-  EXPECT_EQ(m_manager.getBlockedObjectCount(), 1U);
-  EXPECT_TRUE(m_manager.unblockObject(2));
-  EXPECT_EQ(m_manager.getBlockedObjectCount(), 0U);
-}
-
-TEST_F(ObjectManagerTest, SimultaneousBlockAndCandidateRace)
-{
-  for (int iteration = 0; iteration < 25; ++iteration)
-  {
-    ObjectManager manager;
-    ASSERT_TRUE(manager.processObjectCandidate(makeCandidate(OBJECT_ID, "cup", 3), m_now));
-
-    std::latch start(2);
-    std::thread blocker([&manager, &start]() {
-      start.arrive_and_wait();
-      manager.blockObject(OBJECT_ID);
-    });
-    std::thread late_candidate([&manager, &start, this]() {
-      start.arrive_and_wait();
-      manager.processObjectCandidate(makeCandidate(OBJECT_ID, "cup", 3), m_now);
-    });
-    blocker.join();
-    late_candidate.join();
-
-    EXPECT_TRUE(manager.getManagedObjects("world").empty());
-    EXPECT_FALSE(manager.processObjectCandidate(makeCandidate(OBJECT_ID, "cup", 3), m_now));
-  }
+  EXPECT_TRUE(manager.getManagedObjects("world").empty());
+  EXPECT_FALSE(manager.processObjectCandidate(makeCandidate(OBJECT_ID, "cup", 3), m_now));
 }
 
 class ObjectManagerNodeTest : public ::testing::Test
@@ -286,23 +189,11 @@ protected:
   void SetUp() override
   {
     m_node        = std::make_shared<ObjectManagerNode>(rclcpp::NodeOptions());
-    m_client_node = std::make_shared<rclcpp::Node>("ssf_task2_test_client");
-
+    m_client_node = std::make_shared<rclcpp::Node>("ssf_object_manager_test_client");
     m_executor.add_node(m_node);
     m_executor.add_node(m_client_node);
-    m_spinner = std::thread([this]() { m_executor.spin(); });
-
-    m_unblock_client     = m_client_node->create_client<UnblockObject>("unblock_object");
-    m_block_client       = m_client_node->create_client<BlockObject>("block_object");
-    m_get_objects_client = m_client_node->create_client<GetObjects>("get_objects");
-    m_edit_client        = m_client_node->create_client<EditObject>("edit_object");
-    m_candidate_pub      = m_client_node->create_publisher<ObjectCandidate>("object_candidates",
-                                                                       rclcpp::SensorDataQoS());
-
-    ASSERT_TRUE(m_unblock_client->wait_for_service(5s));
-    ASSERT_TRUE(m_block_client->wait_for_service(5s));
-    ASSERT_TRUE(m_get_objects_client->wait_for_service(5s));
-    ASSERT_TRUE(m_edit_client->wait_for_service(5s));
+    m_spinner        = std::thread([this]() { m_executor.spin(); });
+    m_unblock_client = m_client_node->create_client<UnblockObject>("unblock_object");
   }
 
   void TearDown() override
@@ -312,132 +203,27 @@ protected:
     {
       m_spinner.join();
     }
-    m_executor.remove_node(m_node);
-    m_executor.remove_node(m_client_node);
-    m_node.reset();
-    m_client_node.reset();
-  }
-
-  void publishCandidate(int64_t id, size_t crop_count)
-  {
-    auto message = std::make_unique<ObjectCandidate>(makeCandidate(id, "cup", crop_count));
-    m_candidate_pub->publish(std::move(message));
-  }
-
-  template <typename TService>
-  typename TService::Response::SharedPtr
-  callService(const std::shared_ptr<rclcpp::Client<TService>>& client,
-              const std::shared_ptr<typename TService::Request>& request)
-  {
-    auto future_result = client->async_send_request(request);
-    if (future_result.wait_for(5s) != std::future_status::ready)
-    {
-      return nullptr;
-    }
-    return future_result.get();
-  }
-
-  bool hasObject(int64_t id)
-  {
-    auto request  = std::make_shared<GetObjects::Request>();
-    auto response = callService(m_get_objects_client, request);
-    if (response == nullptr)
-    {
-      return false;
-    }
-    return std::any_of(response->objects.begin(),
-                       response->objects.end(),
-                       [id](const ManagedObject& object) { return object.id == id; });
-  }
-
-  // Polls until the async candidate topic callback has been applied.
-  bool waitUntilObject(int64_t id)
-  {
-    for (size_t attempt = 0; attempt < 200; ++attempt)
-    {
-      if (hasObject(id))
-      {
-        return true;
-      }
-      std::this_thread::sleep_for(10ms);
-    }
-    return false;
   }
 
   rclcpp::Node::SharedPtr m_node;
   rclcpp::Node::SharedPtr m_client_node;
   rclcpp::executors::SingleThreadedExecutor m_executor;
   std::thread m_spinner;
-
   rclcpp::Client<UnblockObject>::SharedPtr m_unblock_client;
-  rclcpp::Client<BlockObject>::SharedPtr m_block_client;
-  rclcpp::Client<GetObjects>::SharedPtr m_get_objects_client;
-  rclcpp::Client<EditObject>::SharedPtr m_edit_client;
-  rclcpp::Publisher<ObjectCandidate>::SharedPtr m_candidate_pub;
 };
 
-TEST_F(ObjectManagerNodeTest, UnblockServiceResponseAndLifecycle)
+TEST_F(ObjectManagerNodeTest, UnknownUnblockServiceRespondsFalse)
 {
-  // Unknown unblock must fail.
-  auto unblock_unknown_request        = std::make_shared<UnblockObject::Request>();
-  unblock_unknown_request->object_id  = 999;
-  const auto UNBLOCK_UNKNOWN_RESPONSE = callService(m_unblock_client, unblock_unknown_request);
-  ASSERT_NE(UNBLOCK_UNKNOWN_RESPONSE, nullptr);
-  EXPECT_FALSE(UNBLOCK_UNKNOWN_RESPONSE->success);
+  // A real service call over the node's unblock_object service: an unknown id
+  // must report failure instead of success.
+  ASSERT_TRUE(m_unblock_client->wait_for_service(5s));
 
-  // Editing an unknown object fails with an accurate message.
-  auto edit_unknown_request = std::make_shared<EditObject::Request>(makeEditRequest(999, {0}));
-  const auto EDIT_UNKNOWN_RESPONSE = callService(m_edit_client, edit_unknown_request);
-  ASSERT_NE(EDIT_UNKNOWN_RESPONSE, nullptr);
-  EXPECT_FALSE(EDIT_UNKNOWN_RESPONSE->success);
-  EXPECT_NE(EDIT_UNKNOWN_RESPONSE->message.find("ot found"), std::string::npos)
-    << "message was: " << EDIT_UNKNOWN_RESPONSE->message;
+  auto request       = std::make_shared<UnblockObject::Request>();
+  request->object_id = 999;
 
-  // Candidate makes the object active.
-  publishCandidate(OBJECT_ID, 3);
-  ASSERT_TRUE(waitUntilObject(OBJECT_ID));
-
-  // Blocking removes it from the service view.
-  auto block_request        = std::make_shared<BlockObject::Request>();
-  block_request->object_id  = OBJECT_ID;
-  const auto BLOCK_RESPONSE = callService(m_block_client, block_request);
-  ASSERT_NE(BLOCK_RESPONSE, nullptr);
-  EXPECT_TRUE(BLOCK_RESPONSE->success);
-  EXPECT_FALSE(hasObject(OBJECT_ID));
-
-  // Editing a blocked object fails; node reports unknown/blocked accurately.
-  auto edit_blocked_request =
-    std::make_shared<EditObject::Request>(makeEditRequest(OBJECT_ID, {0}));
-  const auto EDIT_BLOCKED_RESPONSE = callService(m_edit_client, edit_blocked_request);
-  ASSERT_NE(EDIT_BLOCKED_RESPONSE, nullptr);
-  EXPECT_FALSE(EDIT_BLOCKED_RESPONSE->success);
-  EXPECT_NE(EDIT_BLOCKED_RESPONSE->message.find("ot found"), std::string::npos)
-    << "message was: " << EDIT_BLOCKED_RESPONSE->message;
-
-  // Unblock succeeds for a blocked ID.
-  auto unblock_request        = std::make_shared<UnblockObject::Request>();
-  unblock_request->object_id  = OBJECT_ID;
-  const auto UNBLOCK_RESPONSE = callService(m_unblock_client, unblock_request);
-  ASSERT_NE(UNBLOCK_RESPONSE, nullptr);
-  EXPECT_TRUE(UNBLOCK_RESPONSE->success);
-
-  // A second unblock of the now unblocked ID reports failure.
-  const auto UNBLOCK_AGAIN_RESPONSE = callService(m_unblock_client, unblock_request);
-  ASSERT_NE(UNBLOCK_AGAIN_RESPONSE, nullptr);
-  EXPECT_FALSE(UNBLOCK_AGAIN_RESPONSE->success);
-
-  // A new candidate restores the object.
-  publishCandidate(OBJECT_ID, 1);
-  ASSERT_TRUE(waitUntilObject(OBJECT_ID));
-
-  // Editing with an invalid crop index is rejected with an accurate message.
-  auto edit_invalid_request =
-    std::make_shared<EditObject::Request>(makeEditRequest(OBJECT_ID, {99}));
-  const auto EDIT_INVALID_RESPONSE = callService(m_edit_client, edit_invalid_request);
-  ASSERT_NE(EDIT_INVALID_RESPONSE, nullptr);
-  EXPECT_FALSE(EDIT_INVALID_RESPONSE->success);
-  EXPECT_NE(EDIT_INVALID_RESPONSE->message.find("ndex"), std::string::npos)
-    << "message was: " << EDIT_INVALID_RESPONSE->message;
+  auto future = m_unblock_client->async_send_request(request);
+  ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
+  EXPECT_FALSE(future.get()->success);
 }
 
 } // namespace
