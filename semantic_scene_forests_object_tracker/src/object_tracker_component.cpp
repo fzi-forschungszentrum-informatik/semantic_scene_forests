@@ -28,6 +28,8 @@
 
 #include "semantic_scene_forests_object_tracker/object_tracker_component.hpp"
 
+#include "tracker_geometry.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -302,13 +304,18 @@ void ObjectTrackerComponent::syncedCallbackVision(
                                     det3d_msg->header.stamp,
                                     rclcpp::Duration::from_seconds(0.1));
 
-      geometry_msgs::msg::PointStamped input_point;
-      geometry_msgs::msg::PointStamped output_point;
-      input_point.header = det3d_msg->header;
-      input_point.point  = combined.det3d->bbox.center.position;
-      tf2::doTransform(input_point, output_point, transform);
+      // Whole-box world transform; invalid geometry is skipped with a warning.
+      auto world_bbox = detail::transformBoundingBoxToFrame(combined.det3d->bbox, transform);
+      if (!world_bbox)
+      {
+        RCLCPP_WARN(this->get_logger(),
+                    "Non-finite or degenerate bbox geometry - skipping detection ID: %s",
+                    combined.id().c_str());
+        continue;
+      }
 
-      trans_det.det3d.bbox.center.position = output_point.point;
+      trans_det.det3d.bbox            = *world_bbox;
+      trans_det.det3d.header.frame_id = m_world_frame;
     }
     catch (const tf2::TransformException& ex)
     {

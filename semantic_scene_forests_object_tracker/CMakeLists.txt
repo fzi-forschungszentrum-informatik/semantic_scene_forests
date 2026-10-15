@@ -34,6 +34,7 @@ generate_parameter_library(object_tracker_parameters
 add_library(object_tracker_component SHARED
   src/object_tracker_component.cpp
   src/tracked_object.cpp
+  src/tracker_geometry.cpp
 )
 target_include_directories(object_tracker_component PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -79,8 +80,9 @@ install(DIRECTORY launch config
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
-  ament_add_gtest(test_object_tracker_merge test/test_object_tracker_merge.cpp)
-  target_link_libraries(test_object_tracker_merge object_tracker_component)
+  ament_add_gtest(test_bbox_transform test/test_bbox_transform.cpp)
+  target_link_libraries(test_bbox_transform object_tracker_component)
+  target_include_directories(test_bbox_transform PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 endif()
 
 ament_package()
