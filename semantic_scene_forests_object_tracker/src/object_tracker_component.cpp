@@ -492,9 +492,10 @@ void ObjectTrackerComponent::syncedCallbackVision(
     m_next_track_id++;
   }
 
-  mergeOverlappingTracks();
-
-  // Crop images for matched confirmed tracks
+  // Crop images for matched confirmed tracks. This must run before
+  // mergeOverlappingTracks(): det_to_track stores indices into the
+  // pre-compaction m_tracked_objects vector, and TrackedObject::mergeFrom()
+  // carries the crops into the surviving track.
   for (size_t d = 0; d < detections.size(); ++d)
   {
     int obj_idx = det_to_track[d];
@@ -515,6 +516,8 @@ void ObjectTrackerComponent::syncedCallbackVision(
       obj->addCrop(*crop);
     }
   }
+
+  mergeOverlappingTracks();
 
   {
     size_t confirmed_count   = 0;
