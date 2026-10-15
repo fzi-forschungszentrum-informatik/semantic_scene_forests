@@ -1,3 +1,13 @@
+# Research Scope & Testing
+
+This is research code, not a product. Keep the codebase small and focus on the core problem.
+
+- A comprehensive test suite is not required. Test common use cases, obvious invalid configurations that occur frequently, and concise regressions for observed bugs.
+- Avoid exhaustive edge-case matrices, duplicate coverage, and elaborate test infrastructure without a concrete need.
+- Implement the smallest clear change that solves the requested problem; do not try to cover every possible angle or hypothetical future use.
+- For speculative edge cases or possible unintended behavior outside the core scope, first add a short, specific TODO or note describing the limitation and when it should be addressed, rather than adding defensive machinery or abstractions immediately.
+- Keep validation and error handling needed for common failures, data integrity, safety, and correct hardware/calibration behavior. Documenting a limitation is not a substitute for fixing a known core bug.
+
 # Code Style & Formatting
 
 This project uses existing style configuration files. Always follow these when writing or modifying code:
