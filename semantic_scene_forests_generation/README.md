@@ -30,6 +30,12 @@ The graph is published at 1 Hz with reliable, transient-local QoS.
   `visuals_request_timeout_seconds`.
 - Cancellation is checked between external requests. An in-flight LLM request completes or times
   out before the goal can finish cancellation.
+- When the managed-object array changes, the graph is pruned to the retained objects: absent
+  objects, their incident edges, and concepts no longer reachable from any retained object are
+  removed, while concepts shared with retained objects and their transitive ancestors survive.
+  An empty managed array empties the graph.
+- In-flight updates are rejected if object membership changes during inference; paid LLM
+  work is not retried automatically.
 
 ## Exported Components
 

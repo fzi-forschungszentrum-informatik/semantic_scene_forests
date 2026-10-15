@@ -58,9 +58,15 @@ rclcpp_components_register_nodes(object_manager_component
 
 install(TARGETS
   object_manager_component
+  object_manager_parameters
+  EXPORT ${PROJECT_NAME}Targets
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
+)
+
+install(DIRECTORY include/
+  DESTINATION include
 )
 
 install(DIRECTORY launch config
@@ -74,12 +80,19 @@ if(BUILD_TESTING)
   target_link_libraries(test_object_manager object_manager_component)
 endif()
 
+ament_export_targets(${PROJECT_NAME}Targets HAS_LIBRARY_TARGET)
 ament_export_dependencies(
   rclcpp
   rclcpp_components
-  diagnostic_updater
   diagnostic_msgs
+  diagnostic_updater
+  geometry_msgs
+  semantic_scene_forests_msgs
+  semantic_scene_forests_object_msgs
   semantic_scene_forests_utils
+  sensor_msgs
+  std_msgs
+  vision_msgs
 )
 
 ament_package()

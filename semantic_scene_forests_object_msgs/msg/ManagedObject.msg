@@ -10,7 +10,9 @@ vision_msgs/Detection3D detection
 # Header for timestamping and frame reference
 std_msgs/Header header
 
-# Indicates if object is manually blocked (not published when true)
+# Manual blocking deletes the payload and keeps only a process-local suppression
+# ID; blocked objects are not published. Unblocking waits for a fresh candidate
+# rather than restoring old state.
 bool is_blocked
 
 # Source of object: 0=tracker, 1=manual_edit
