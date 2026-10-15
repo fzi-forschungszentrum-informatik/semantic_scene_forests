@@ -27,6 +27,10 @@
 // POSSIBILITY OF SUCH DAMAGE.
 
 #include <algorithm>
+#include <limits>
+#include <set>
+#include <tuple>
+#include <unordered_set>
 #include <utility>
 
 #include <semantic_scene_forests/scene_graph.hpp>
@@ -56,7 +60,11 @@ std::expected<int64_t, SceneGraphError> SceneGraph::addObjectNodeWithId(
     return std::unexpected(SceneGraphError::nodeAlreadyExists(id));
   }
 
-  this->m_next_object_id = std::max(this->m_next_object_id, id + 1);
+  // INT64_MAX is the last allocatable object id; anything beyond would wrap.
+  if (id != std::numeric_limits<int64_t>::max())
+  {
+    this->m_next_object_id = std::max(this->m_next_object_id, id + 1);
+  }
   auto object_node =
     ObjectNode{.id = id, .class_name = class_name, .detection = detection, .visuals = visuals};
 
@@ -74,9 +82,9 @@ SceneGraph::addObjectNode(const std::string& class_name,
                           const vision_msgs::msg::Detection3D::SharedPtr& detection,
                           const std::array<sensor_msgs::msg::Image::SharedPtr, 5>& visuals) noexcept
 {
-  const int64_t NODE_ID = this->m_next_object_id;
-  this->m_next_object_id += 1;
-  return addObjectNodeWithId(NODE_ID, class_name, detection, visuals);
+  // Draw the next free id; addObjectNodeWithId advances the counter without
+  // overflow, and the final id simply fails as already existing when reused.
+  return addObjectNodeWithId(this->m_next_object_id, class_name, detection, visuals);
 }
 
 std::expected<int64_t, SceneGraphError>
@@ -87,8 +95,12 @@ SceneGraph::addConceptNodeWithId(int64_t id, const std::string& label) noexcept
     return std::unexpected(SceneGraphError::nodeAlreadyExists(id));
   }
 
-  this->m_next_concept_id = std::min(this->m_next_concept_id, id - 1);
-  auto concept_node       = ConceptNode{.id = id, .concept_name = label};
+  // INT64_MIN is the last allocatable concept id; anything beyond would wrap.
+  if (id != std::numeric_limits<int64_t>::min())
+  {
+    this->m_next_concept_id = std::min(this->m_next_concept_id, id - 1);
+  }
+  auto concept_node = ConceptNode{.id = id, .concept_name = label};
 
   const SceneGraphNode GRAPH_NODE(std::in_place_type<ConceptNode>, std::move(concept_node));
 
@@ -102,9 +114,9 @@ SceneGraph::addConceptNodeWithId(int64_t id, const std::string& label) noexcept
 std::expected<int64_t, SceneGraphError>
 SceneGraph::addConceptNode(const std::string& label) noexcept
 {
-  const int64_t NODE_ID = this->m_next_concept_id;
-  this->m_next_concept_id -= 1;
-  return addConceptNodeWithId(NODE_ID, label);
+  // Draw the next free id; addConceptNodeWithId decrements the counter without
+  // overflow, and the final id simply fails as already existing when reused.
+  return addConceptNodeWithId(this->m_next_concept_id, label);
 }
 
 std::expected<SceneGraphNode, SceneGraphError> SceneGraph::removeNode(const int64_t id) noexcept
@@ -679,13 +691,33 @@ void SceneGraph::swap(SceneGraph& other) noexcept
   m_graph.swap(other.m_graph);
   std::swap(m_next_object_id, other.m_next_object_id);
   std::swap(m_next_concept_id, other.m_next_concept_id);
+
+  // boost::adjacency_list::swap copies: every vertex descriptor is recreated,
+  // so both id maps must be rebuilt from the (swapped) vertex properties.
+  auto remap = [](SceneGraph& graph) {
+    graph.m_id_map.clear();
+    for (auto [it, end] = boost::vertices(graph.m_graph); it != end; ++it)
+    {
+      const auto ID = std::visit([](const auto& node) { return node.id; }, graph.m_graph[*it]);
+      graph.m_id_map.insert({ID, *it});
+    }
+  };
+  remap(*this);
+  remap(other);
 }
 
 std::expected<void, SceneGraphError> SceneGraph::updateObjectNodeFromMsg(
   const semantic_scene_forests_msgs::msg::ObjectNode& object_msg) noexcept
 {
-  if (this->m_id_map.left.count(object_msg.id) > 0)
+  const auto IT = this->m_id_map.left.find(object_msg.id);
+  if (IT != this->m_id_map.left.end())
   {
+    // An existing node of the wrong kind is a collision the caller must see.
+    if (!std::holds_alternative<ObjectNode>(this->m_graph[IT->second]))
+    {
+      return std::unexpected(SceneGraphError::nodeAlreadyExists(object_msg.id));
+    }
+
     // ObjectNode.msg carries no class_name/detection/visuals — nothing to merge, and
     // replacing the node here would discard its real detection/visuals data.
     return {};
@@ -703,53 +735,232 @@ std::expected<void, SceneGraphError> SceneGraph::updateObjectNodeFromMsg(
 std::expected<void, SceneGraphError> SceneGraph::updateConceptNodeFromMsg(
   const semantic_scene_forests_msgs::msg::ConceptNode& concept_msg) noexcept
 {
-  if (this->m_id_map.left.count(concept_msg.id) > 0)
+  const auto IT = this->m_id_map.left.find(concept_msg.id);
+  if (IT != this->m_id_map.left.end())
   {
+    // An existing node of the wrong kind is a collision the caller must see.
+    if (!std::holds_alternative<ConceptNode>(this->m_graph[IT->second]))
+    {
+      return std::unexpected(SceneGraphError::nodeAlreadyExists(concept_msg.id));
+    }
+
     ConceptNode concept_node{.id = concept_msg.id, .concept_name = concept_msg.class_name};
     SceneGraphNode node(std::in_place_type<ConceptNode>, std::move(concept_node));
+    this->m_graph[IT->second] = std::move(node);
+    return {};
+  }
 
-    if (const auto IT = this->m_id_map.left.find(concept_msg.id); IT != this->m_id_map.left.end())
+  if (auto result = addConceptNodeWithId(concept_msg.id, concept_msg.class_name); !result)
+  {
+    return std::unexpected(result.error());
+  }
+  return {};
+}
+
+std::expected<std::unique_ptr<SceneGraph>, SceneGraphError> SceneGraph::makeStagingCopy() const
+{
+  auto staging = std::make_unique<SceneGraph>();
+
+  for (const auto& [id, vertex_desc] : this->m_id_map.left)
+  {
+    const auto& node = this->m_graph[vertex_desc];
+    if (const auto* object = std::get_if<ObjectNode>(&node))
     {
-      this->m_graph[IT->second] = std::move(node);
+      // Share the payload shared_ptrs: staging must not deep-copy detections or
+      // visuals, so a swapped-in graph keeps the exact messages it held before.
+      if (auto result = staging->addObjectNodeWithId(
+            id, object->class_name, object->detection, object->visuals);
+          !result)
+      {
+        return std::unexpected(result.error());
+      }
+    }
+    else if (const auto* concept_node = std::get_if<ConceptNode>(&node))
+    {
+      if (auto result = staging->addConceptNodeWithId(id, concept_node->concept_name); !result)
+      {
+        return std::unexpected(result.error());
+      }
     }
   }
-  else
+
+  for (const auto& [source_id, target_id, edge] : getEdges())
   {
-    if (auto result = addConceptNodeWithId(concept_msg.id, concept_msg.class_name); !result)
+    if (auto result = staging->addEdge(source_id, target_id, edge.label); !result)
     {
       return std::unexpected(result.error());
     }
   }
-  return {};
+
+  staging->m_next_object_id  = this->m_next_object_id;
+  staging->m_next_concept_id = this->m_next_concept_id;
+  return staging;
 }
 
 std::expected<void, SceneGraphError> SceneGraph::updateSceneGraphFromMsg(
   const semantic_scene_forests_msgs::msg::SceneGraph& msg) noexcept
 {
-  std::unordered_set<int64_t> valid_node_ids;
+  // Reject duplicate node ids inside the message before anything is staged.
+  std::unordered_set<int64_t> message_node_ids;
+  for (const auto& object_msg : msg.object_nodes)
+  {
+    if (!message_node_ids.insert(object_msg.id).second)
+    {
+      return std::unexpected(SceneGraphError::nodeAlreadyExists(object_msg.id));
+    }
+  }
+  for (const auto& concept_msg : msg.concept_nodes)
+  {
+    if (!message_node_ids.insert(concept_msg.id).second)
+    {
+      return std::unexpected(SceneGraphError::nodeAlreadyExists(concept_msg.id));
+    }
+  }
+
+  // Reject duplicate edges inside the message.
+  std::set<std::tuple<int64_t, int64_t, std::string>> message_edges;
+  for (const auto& edge_msg : msg.edges)
+  {
+    if (!message_edges.emplace(edge_msg.source_id, edge_msg.target_id, edge_msg.label).second)
+    {
+      return std::unexpected(
+        SceneGraphError::edgeAlreadyExists(edge_msg.source_id, edge_msg.target_id));
+    }
+  }
+
+  // Apply to a staging copy first: any failure below leaves *this untouched.
+  auto staging_result = makeStagingCopy();
+  if (!staging_result)
+  {
+    return std::unexpected(staging_result.error());
+  }
+  auto& staging = *staging_result.value();
 
   for (const auto& object_msg : msg.object_nodes)
   {
-    valid_node_ids.insert(object_msg.id);
-    if (auto result = updateObjectNodeFromMsg(object_msg); !result)
+    if (auto result = staging.updateObjectNodeFromMsg(object_msg); !result)
+    {
+      return result;
+    }
+  }
+  for (const auto& concept_msg : msg.concept_nodes)
+  {
+    if (auto result = staging.updateConceptNodeFromMsg(concept_msg); !result)
     {
       return result;
     }
   }
 
-  for (const auto& concept_msg : msg.concept_nodes)
+  // Nodes absent from the message disappear; explicitly supplied isolated
+  // concepts stay because they are listed.
+  std::vector<int64_t> nodes_to_remove;
+  for (const auto& [id, vertex_desc] : staging.m_id_map.left)
   {
-    valid_node_ids.insert(concept_msg.id);
-    if (auto result = updateConceptNodeFromMsg(concept_msg); !result)
+    if (!message_node_ids.contains(id))
     {
-      return result;
+      nodes_to_remove.push_back(id);
+    }
+  }
+  for (const int64_t ID : nodes_to_remove)
+  {
+    if (auto result = staging.removeNode(ID); !result)
+    {
+      return std::unexpected(result.error());
+    }
+  }
+
+  // Reconcile edges: drop every edge absent from the message before adding the
+  // new ones, so a reversed edge cannot trip cycle detection on its old self.
+  if (auto result = reconcileEdgesFromMsg(msg, staging, message_edges); !result)
+  {
+    return result;
+  }
+
+  this->swap(staging);
+  return {};
+}
+
+std::expected<void, SceneGraphError> SceneGraph::reconcileEdgesFromMsg(
+  const semantic_scene_forests_msgs::msg::SceneGraph& msg,
+  SceneGraph& staging,
+  const std::set<std::tuple<int64_t, int64_t, std::string>>& message_edges) noexcept
+{
+  const auto CURRENT_EDGES = staging.getEdges();
+  std::set<std::tuple<int64_t, int64_t, std::string>> current_edge_set;
+  for (const auto& [source_id, target_id, edge] : CURRENT_EDGES)
+  {
+    current_edge_set.emplace(source_id, target_id, edge.label);
+  }
+  for (const auto& [source_id, target_id, edge] : CURRENT_EDGES)
+  {
+    if (!message_edges.contains({source_id, target_id, edge.label}))
+    {
+      if (auto result = staging.removeEdge(source_id, target_id, edge.label); !result)
+      {
+        return std::unexpected(result.error());
+      }
+    }
+  }
+  for (const auto& edge_msg : msg.edges)
+  {
+    if (!current_edge_set.contains({edge_msg.source_id, edge_msg.target_id, edge_msg.label}))
+    {
+      if (auto result = staging.addEdge(edge_msg.source_id, edge_msg.target_id, edge_msg.label);
+          !result)
+      {
+        return std::unexpected(result.error());
+      }
+    }
+  }
+  return {};
+}
+
+std::expected<void, SceneGraphError>
+SceneGraph::retainObjectNodes(const std::unordered_set<int64_t>& active_ids) noexcept
+{
+  std::unordered_set<int64_t> keep;
+  std::vector<SceneGraphAdjList::vertex_descriptor> pending;
+
+  for (const int64_t ID : active_ids)
+  {
+    const auto IT = this->m_id_map.left.find(ID);
+    if (IT == this->m_id_map.left.end())
+    {
+      continue;
+    }
+    if (const auto& node = this->m_graph[IT->second]; std::holds_alternative<ObjectNode>(node))
+    {
+      keep.insert(ID);
+      pending.push_back(IT->second);
+    }
+  }
+
+  // Follow outgoing edges transitively: shared concepts and concept ancestry
+  // reachable from a surviving object stay; everything else goes.
+  while (!pending.empty())
+  {
+    auto* const VERTEX_DESC = pending.back();
+    pending.pop_back();
+
+    using OutEdgeIter = boost::graph_traits<SceneGraphAdjList>::out_edge_iterator;
+    OutEdgeIter ei;
+    OutEdgeIter ei_end;
+    for (boost::tie(ei, ei_end) = boost::out_edges(VERTEX_DESC, this->m_graph); ei != ei_end; ++ei)
+    {
+      auto* const TARGET_VERTEX = boost::target(*ei, this->m_graph);
+      const auto TARGET_ID_IT   = this->m_id_map.right.find(TARGET_VERTEX);
+      if (TARGET_ID_IT != this->m_id_map.right.end() && !keep.contains(TARGET_ID_IT->second))
+      {
+        keep.insert(TARGET_ID_IT->second);
+        pending.push_back(TARGET_VERTEX);
+      }
     }
   }
 
   std::vector<int64_t> to_remove;
   for (const auto& [id, vertex_desc] : this->m_id_map.left)
   {
-    if (!valid_node_ids.contains(id))
+    if (!keep.contains(id))
     {
       to_remove.push_back(id);
     }
@@ -760,17 +971,6 @@ std::expected<void, SceneGraphError> SceneGraph::updateSceneGraphFromMsg(
     if (auto result = removeNode(ID); !result)
     {
       return std::unexpected(result.error());
-    }
-  }
-
-  for (const auto& edge_msg : msg.edges)
-  {
-    if (!hasEdge(edge_msg.source_id, edge_msg.target_id, edge_msg.label))
-    {
-      if (auto result = addEdge(edge_msg.source_id, edge_msg.target_id, edge_msg.label); !result)
-      {
-        return std::unexpected(result.error());
-      }
     }
   }
 

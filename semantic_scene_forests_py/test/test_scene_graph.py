@@ -28,6 +28,7 @@
 
 import pytest
 from sensor_msgs.msg import Image
+from semantic_scene_forests_msgs.msg import ConceptNode as SceneGraphConceptNodeMsg
 from vision_msgs.msg import Detection3D
 
 from semantic_scene_forests import (
@@ -181,6 +182,77 @@ def test_ros_message_conversion_preserves_current_wire_format() -> None:
     assert loaded_object.detection.id == ""
     assert loaded.has_edge(object_id, concept_id, "relation")
 
-    graph.update_from_msg(message)
+
+def test_update_from_msg_reconciles_edges_and_rejects_collisions() -> None:
+    graph = SceneGraph()
+    detection, visuals = make_payload()
+    object_id = graph.add_object_node_with_id(10, "cup", detection, visuals)
+    concept_id = graph.add_concept_node_with_id(-10, "on")
+    graph.add_edge(object_id, concept_id, "relation")
+
+    # An edge missing from the message disappears.
+    trimmed = graph.to_msg()
+    trimmed.edges.clear()
+    graph.update_from_msg(trimmed)
+    assert graph.edges == []
     assert graph.has_node(object_id)
     assert graph.has_node(concept_id)
+
+    # A reversed edge replaces the original without tripping cycle detection.
+    # Objects can never receive edges, so the reversal uses two concept nodes.
+    first = graph.add_concept_node_with_id(-20, "first")
+    second = graph.add_concept_node_with_id(-21, "second")
+    graph.add_edge(first, second, "rel")
+    reversed_message = graph.to_msg()
+    for edge in reversed_message.edges:
+        if edge.source_id == first and edge.target_id == second and edge.label == "rel":
+            edge.source_id = second
+            edge.target_id = first
+    graph.update_from_msg(reversed_message)
+    assert graph.has_edge(second, first, "rel")
+    assert not graph.has_edge(first, second, "rel")
+
+    # A concept node reusing an existing object id must be rejected and leave
+    # the original graph unchanged.
+    collision_message = graph.to_msg()
+    imposter = SceneGraphConceptNodeMsg()
+    imposter.id = object_id
+    imposter.class_name = "imposter"
+    collision_message.concept_nodes.append(imposter)
+
+    with pytest.raises(GraphError) as collision:
+        graph.update_from_msg(collision_message)
+    assert collision.value.kind == GraphErrorKind.NODE_ALREADY_EXISTS
+
+    preserved = graph.find_node(object_id)
+    assert isinstance(preserved, ObjectNode)
+    assert preserved.detection is not None
+    assert preserved.detection.id == "cup-detection"
+    assert preserved.visuals[0].header.frame_id == "camera"
+
+
+def test_retain_object_nodes_python_parity() -> None:
+    graph = SceneGraph()
+    detection, visuals = make_payload()
+    object1 = graph.add_object_node_with_id(1, "cup", detection, visuals)
+    object2 = graph.add_object_node_with_id(2, "plate", detection, visuals)
+    shared = graph.add_concept_node_with_id(-1, "shared")
+    exclusive = graph.add_concept_node_with_id(-2, "exclusive")
+    ancestor = graph.add_concept_node_with_id(-3, "ancestor")
+
+    graph.add_edge(object1, shared, "rel")
+    graph.add_edge(object2, shared, "rel")
+    graph.add_edge(object1, exclusive, "rel")
+    graph.add_edge(shared, ancestor, "rel")
+
+    graph.retain_object_nodes({object2})
+
+    assert graph.has_node(object2)
+    assert graph.has_node(shared)
+    assert graph.has_node(ancestor)
+    assert not graph.has_node(object1)
+    assert not graph.has_node(exclusive)
+
+    graph.retain_object_nodes(set())
+    assert len(graph.nodes) == 0
+    assert len(graph.edges) == 0

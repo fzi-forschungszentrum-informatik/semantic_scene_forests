@@ -33,6 +33,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <utility>
 
 #include <pybind11/operators.h>
@@ -123,7 +124,7 @@ py::object messageToPython(const TMessage& message, const char* module_name, con
 
   const auto& raw_message = serialized_message.get_rcl_serialized_message();
   const auto SERIALIZED   = py::bytes(reinterpret_cast<const char*>(raw_message.buffer),
-                                      static_cast<py::ssize_t>(raw_message.buffer_length));
+                                    static_cast<py::ssize_t>(raw_message.buffer_length));
   return py::module_::import("rclpy.serialization")
     .attr("deserialize_message")(SERIALIZED, messageClass(module_name, class_name));
 }
@@ -359,6 +360,12 @@ PYBIND11_MODULE(_semantic_scene_forests, module)
              messageFromPython<semantic_scene_forests_msgs::msg::SceneGraph>(
                message, "semantic_scene_forests_msgs.msg", "SceneGraph")));
          })
+    .def(
+      "retain_object_nodes",
+      [](SceneGraph& graph, const std::unordered_set<int64_t>& active_ids) {
+        unwrap(graph.retainObjectNodes(active_ids));
+      },
+      py::arg("active_ids"))
     .def("clone", [](const SceneGraph& graph) { return unwrap(graph.clone()); })
     .def("swap", &SceneGraph::swap, py::arg("other"));
 }
