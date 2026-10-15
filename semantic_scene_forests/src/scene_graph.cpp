@@ -757,95 +757,22 @@ std::expected<void, SceneGraphError> SceneGraph::updateConceptNodeFromMsg(
   return {};
 }
 
-std::expected<std::unique_ptr<SceneGraph>, SceneGraphError> SceneGraph::makeStagingCopy() const
-{
-  auto staging = std::make_unique<SceneGraph>();
-
-  for (const auto& [id, vertex_desc] : this->m_id_map.left)
-  {
-    const auto& node = this->m_graph[vertex_desc];
-    if (const auto* object = std::get_if<ObjectNode>(&node))
-    {
-      // Share the payload shared_ptrs: staging must not deep-copy detections or
-      // visuals, so a swapped-in graph keeps the exact messages it held before.
-      if (auto result = staging->addObjectNodeWithId(
-            id, object->class_name, object->detection, object->visuals);
-          !result)
-      {
-        return std::unexpected(result.error());
-      }
-    }
-    else if (const auto* concept_node = std::get_if<ConceptNode>(&node))
-    {
-      if (auto result = staging->addConceptNodeWithId(id, concept_node->concept_name); !result)
-      {
-        return std::unexpected(result.error());
-      }
-    }
-  }
-
-  for (const auto& [source_id, target_id, edge] : getEdges())
-  {
-    if (auto result = staging->addEdge(source_id, target_id, edge.label); !result)
-    {
-      return std::unexpected(result.error());
-    }
-  }
-
-  staging->m_next_object_id  = this->m_next_object_id;
-  staging->m_next_concept_id = this->m_next_concept_id;
-  return staging;
-}
-
 std::expected<void, SceneGraphError> SceneGraph::updateSceneGraphFromMsg(
   const semantic_scene_forests_msgs::msg::SceneGraph& msg) noexcept
 {
-  // Reject duplicate node ids inside the message before anything is staged.
-  std::unordered_set<int64_t> message_node_ids;
+  // The live graph is edited in place: every operation that succeeds before an
+  // invalid one keeps its effect, and only the offending operation is rejected
+  // (its low-level check runs before any mutation).
   for (const auto& object_msg : msg.object_nodes)
   {
-    if (!message_node_ids.insert(object_msg.id).second)
-    {
-      return std::unexpected(SceneGraphError::nodeAlreadyExists(object_msg.id));
-    }
-  }
-  for (const auto& concept_msg : msg.concept_nodes)
-  {
-    if (!message_node_ids.insert(concept_msg.id).second)
-    {
-      return std::unexpected(SceneGraphError::nodeAlreadyExists(concept_msg.id));
-    }
-  }
-
-  // Reject duplicate edges inside the message.
-  std::set<std::tuple<int64_t, int64_t, std::string>> message_edges;
-  for (const auto& edge_msg : msg.edges)
-  {
-    if (!message_edges.emplace(edge_msg.source_id, edge_msg.target_id, edge_msg.label).second)
-    {
-      return std::unexpected(
-        SceneGraphError::edgeAlreadyExists(edge_msg.source_id, edge_msg.target_id));
-    }
-  }
-
-  // Apply to a staging copy first: any failure below leaves *this untouched.
-  auto staging_result = makeStagingCopy();
-  if (!staging_result)
-  {
-    return std::unexpected(staging_result.error());
-  }
-  auto& staging = *staging_result.value();
-
-  for (const auto& object_msg : msg.object_nodes)
-  {
-    if (auto result = staging.updateObjectNodeFromMsg(object_msg); !result)
+    if (auto result = updateObjectNodeFromMsg(object_msg); !result)
     {
       return result;
     }
   }
   for (const auto& concept_msg : msg.concept_nodes)
   {
-    if (auto result = staging.updateConceptNodeFromMsg(concept_msg); !result)
+    if (auto result = updateConceptNodeFromMsg(concept_msg); !result)
     {
       return result;
     }
@@ -853,8 +780,18 @@ std::expected<void, SceneGraphError> SceneGraph::updateSceneGraphFromMsg(
 
   // Nodes absent from the message disappear; explicitly supplied isolated
   // concepts stay because they are listed.
+  std::unordered_set<int64_t> message_node_ids;
+  for (const auto& object_msg : msg.object_nodes)
+  {
+    message_node_ids.insert(object_msg.id);
+  }
+  for (const auto& concept_msg : msg.concept_nodes)
+  {
+    message_node_ids.insert(concept_msg.id);
+  }
+
   std::vector<int64_t> nodes_to_remove;
-  for (const auto& [id, vertex_desc] : staging.m_id_map.left)
+  for (const auto& [id, vertex_desc] : m_id_map.left)
   {
     if (!message_node_ids.contains(id))
     {
@@ -863,50 +800,57 @@ std::expected<void, SceneGraphError> SceneGraph::updateSceneGraphFromMsg(
   }
   for (const int64_t ID : nodes_to_remove)
   {
-    if (auto result = staging.removeNode(ID); !result)
+    if (auto result = removeNode(ID); !result)
     {
       return std::unexpected(result.error());
     }
   }
 
-  // Reconcile edges: drop every edge absent from the message before adding the
-  // new ones, so a reversed edge cannot trip cycle detection on its old self.
-  if (auto result = reconcileEdgesFromMsg(msg, staging, message_edges); !result)
+  // Reconcile edges: drop every current edge absent from the message before
+  // adding the new ones, so a reversed edge cannot trip cycle detection on its
+  // old self.
+  if (auto result = reconcileEdgesFromMsg(msg); !result)
   {
     return result;
   }
 
-  this->swap(staging);
   return {};
 }
 
-std::expected<void, SceneGraphError> SceneGraph::reconcileEdgesFromMsg(
-  const semantic_scene_forests_msgs::msg::SceneGraph& msg,
-  SceneGraph& staging,
-  const std::set<std::tuple<int64_t, int64_t, std::string>>& message_edges) noexcept
+std::expected<void, SceneGraphError>
+SceneGraph::reconcileEdgesFromMsg(const semantic_scene_forests_msgs::msg::SceneGraph& msg) noexcept
 {
-  const auto CURRENT_EDGES = staging.getEdges();
+  const auto CURRENT_EDGES = getEdges();
+
   std::set<std::tuple<int64_t, int64_t, std::string>> current_edge_set;
+  std::set<std::tuple<int64_t, int64_t, std::string>> message_edges;
   for (const auto& [source_id, target_id, edge] : CURRENT_EDGES)
   {
     current_edge_set.emplace(source_id, target_id, edge.label);
   }
+  for (const auto& edge_msg : msg.edges)
+  {
+    message_edges.emplace(edge_msg.source_id, edge_msg.target_id, edge_msg.label);
+  }
+
   for (const auto& [source_id, target_id, edge] : CURRENT_EDGES)
   {
     if (!message_edges.contains({source_id, target_id, edge.label}))
     {
-      if (auto result = staging.removeEdge(source_id, target_id, edge.label); !result)
+      if (auto result = removeEdge(source_id, target_id, edge.label); !result)
       {
         return std::unexpected(result.error());
       }
     }
   }
+
+  // Add only edges the graph did not already hold before this update;
+  // addEdge rejects an invalid edge before mutating anything.
   for (const auto& edge_msg : msg.edges)
   {
     if (!current_edge_set.contains({edge_msg.source_id, edge_msg.target_id, edge_msg.label}))
     {
-      if (auto result = staging.addEdge(edge_msg.source_id, edge_msg.target_id, edge_msg.label);
-          !result)
+      if (auto result = addEdge(edge_msg.source_id, edge_msg.target_id, edge_msg.label); !result)
       {
         return std::unexpected(result.error());
       }

@@ -30,7 +30,6 @@
 
 #include <expected>
 #include <memory>
-#include <set>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -152,6 +151,7 @@ public:
   // Exchanges graph storage and its descriptor-to-id mapping atomically at the caller level.
   SEMANTIC_SCENE_FORESTS_PUBLIC void swap(SceneGraph& other) noexcept;
 
+  // Updates in place; on the first error, earlier successful changes remain.
   [[nodiscard]] SEMANTIC_SCENE_FORESTS_PUBLIC std::expected<void, SceneGraphError>
   updateSceneGraphFromMsg(const semantic_scene_forests_msgs::msg::SceneGraph& msg) noexcept;
 
@@ -174,16 +174,9 @@ private:
   std::expected<void, SceneGraphError> updateConceptNodeFromMsg(
     const semantic_scene_forests_msgs::msg::ConceptNode& concept_msg) noexcept;
 
-  // Builds a staging copy that shares object payload shared_ptrs with this graph;
-  // updateSceneGraphFromMsg applies message changes to it and only swaps it in
-  // after the whole message validated, so failures roll back completely.
-  [[nodiscard]] std::expected<std::unique_ptr<SceneGraph>, SceneGraphError> makeStagingCopy() const;
-
-  // Drops every staging edge absent from the message before adding the new ones,
-  // so a reversed edge cannot trip cycle detection on its old self.
-  static std::expected<void, SceneGraphError> reconcileEdgesFromMsg(
-    const semantic_scene_forests_msgs::msg::SceneGraph& msg,
-    SceneGraph& staging,
-    const std::set<std::tuple<int64_t, int64_t, std::string>>& message_edges) noexcept;
+  // Drops every edge absent from the message before adding the new ones, so a
+  // reversed edge cannot trip cycle detection on its old self.
+  std::expected<void, SceneGraphError>
+  reconcileEdgesFromMsg(const semantic_scene_forests_msgs::msg::SceneGraph& msg) noexcept;
 };
 } // namespace fzi::semantic_scene_forests
