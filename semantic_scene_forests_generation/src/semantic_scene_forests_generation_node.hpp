@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <expected>
 #include <memory>
 #include <mutex>
@@ -107,6 +108,10 @@ private:
     m_cached_objects;
   std::mutex m_graph_mutex;
   fzi::semantic_scene_forests::SceneGraph m_scene_graph;
+  // Authoritative managed-object membership epoch, guarded by m_graph_mutex.
+  // Incremented whenever the active object id set changes so inference work
+  // snapshotted against an older membership is rejected at commit time.
+  std::uint64_t m_membership_revision{0};
 
   // One update owns the LLM clients and graph commit path at a time.
   std::mutex m_goal_mutex;
@@ -153,9 +158,22 @@ private:
   void executePhase2(const std::shared_ptr<GoalHandle>& goal_handle,
                      const std::stop_token& stop_token);
 
-  [[nodiscard]] std::expected<std::unique_ptr<fzi::semantic_scene_forests::SceneGraph>, std::string>
-  snapshotGraph();
-  void commitGraph(fzi::semantic_scene_forests::SceneGraph& graph);
+  // One consistent capture of graph, managed objects, and membership epoch.
+  struct StateSnapshot
+  {
+    std::unique_ptr<fzi::semantic_scene_forests::SceneGraph> graph;
+    std::vector<semantic_scene_forests_object_msgs::msg::ManagedObject> objects;
+    std::uint64_t revision{0};
+  };
+
+  [[nodiscard]] std::expected<StateSnapshot, std::string> snapshotState();
+
+  // Swaps the candidate into the live graph only when the membership epoch is
+  // still the one the candidate was built against. The candidate is reconciled
+  // against the authoritative object membership first, so plugin-added
+  // unmanaged objects and unreachable concepts cannot enter the live graph.
+  [[nodiscard]] std::expected<void, std::string>
+  commitGraph(fzi::semantic_scene_forests::SceneGraph& candidate, std::uint64_t expected_revision);
   void clearActiveGoal();
 };
 

@@ -30,11 +30,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_set>
 
 #include <ament_index_cpp/get_package_share_path.hpp>
 
@@ -231,11 +233,64 @@ void SceneGraphGenerationNode::loadPlugins()
 void SceneGraphGenerationNode::onManagedObjects(const ManagedObjectArray::SharedPtr& msg)
 {
   m_objects_freq->tick();
-  std::scoped_lock lock{m_objects_mutex};
-  m_cached_objects.clear();
+
+  // The array is authoritative: rebuild the cache from its rows. Legacy
+  // managers may still publish rows marked blocked; treat those as absent.
+  std::unordered_map<int64_t, semantic_scene_forests_object_msgs::msg::ManagedObject> next_objects;
   for (const auto& obj : msg->objects)
   {
-    m_cached_objects[obj.id] = obj;
+    if (obj.is_blocked)
+    {
+      continue;
+    }
+    next_objects.emplace(obj.id, obj);
+  }
+
+  std::unordered_set<int64_t> active_ids;
+  for (const auto& [id, object] : next_objects)
+  {
+    (void)object;
+    active_ids.insert(id);
+  }
+
+  bool membership_changed = false;
+  {
+    std::scoped_lock lock{m_objects_mutex, m_graph_mutex};
+    membership_changed = m_cached_objects.size() != next_objects.size();
+    if (!membership_changed)
+    {
+      for (const auto& [id, object] : m_cached_objects)
+      {
+        (void)object;
+        if (!next_objects.contains(id))
+        {
+          membership_changed = true;
+          break;
+        }
+      }
+    }
+
+    m_cached_objects = std::move(next_objects);
+    if (membership_changed)
+    {
+      // Eagerly remove absent objects and everything that became unreachable
+      // from the retained objects; pose-only refreshes never enter here.
+      ++m_membership_revision;
+      if (auto retained = m_scene_graph.retainObjectNodes(active_ids); !retained)
+      {
+        // TODO: a failed live reconcile leaves removed nodes published until the
+        // next membership change retries it; commit-time reconciliation and the
+        // revision bump above still keep stale inference out of the live graph.
+        RCLCPP_ERROR(get_logger(),
+                     "Failed to reconcile the live graph with the active objects: %s",
+                     retained.error().message.c_str());
+      }
+    }
+  }
+  if (membership_changed)
+  {
+    // Removals must become visible immediately, not at the next 1 Hz tick.
+    publishSceneGraph();
   }
 }
 
@@ -424,15 +479,14 @@ void SceneGraphGenerationNode::executePhase1(const std::shared_ptr<GoalHandle>& 
   };
 
   // Snapshot the current object cache
-  std::vector<semantic_scene_forests_object_msgs::msg::ManagedObject> objects;
+  auto initial_state = snapshotState();
+  if (!initial_state)
   {
-    std::scoped_lock lock{m_objects_mutex};
-    objects.reserve(m_cached_objects.size());
-    for (const auto& [id, obj] : m_cached_objects)
-    {
-      objects.push_back(obj);
-    }
+    abort("Phase 1 failed to snapshot the scene state: " + initial_state.error());
+    return;
   }
+  std::vector<semantic_scene_forests_object_msgs::msg::ManagedObject> objects =
+    std::move(initial_state->objects);
 
   auto feedback           = std::make_shared<UpdateSceneGraphAction::Feedback>();
   feedback->total_objects = static_cast<uint32_t>(objects.size());
@@ -469,6 +523,22 @@ void SceneGraphGenerationNode::executePhase1(const std::shared_ptr<GoalHandle>& 
     feedback->current_object = processed;
     feedback->status = "Processing object " + std::to_string(obj.id) + " (" + obj.class_name + ")";
     goal_handle->publish_feedback(feedback);
+
+    // Capture the graph and membership revision before any external IO so
+    // the whole per-object call window is covered by the commit-time guard.
+    auto state_snapshot = snapshotState();
+    if (!state_snapshot)
+    {
+      abort("Phase 1 failed to snapshot the scene state: " + state_snapshot.error());
+      return;
+    }
+    if (state_snapshot->revision != initial_state->revision)
+    {
+      abort("Phase 1 failed: scene membership changed since the phase started (revision " +
+            std::to_string(state_snapshot->revision) +
+            " != " + std::to_string(initial_state->revision) + ")");
+      return;
+    }
 
     // ── Fetch image crops ────────────────────────────────────────────────
     auto request        = std::make_shared<GetObjectVisuals::Request>();
@@ -585,13 +655,7 @@ void SceneGraphGenerationNode::executePhase1(const std::shared_ptr<GoalHandle>& 
     }
     history.push_back(std::move(*acknowledgement));
 
-    auto graph_snapshot = snapshotGraph();
-    if (!graph_snapshot)
-    {
-      abort("Phase 1 failed to snapshot the scene graph: " + graph_snapshot.error());
-      return;
-    }
-    auto& graph = **graph_snapshot;
+    auto& graph = *state_snapshot->graph;
     if (const auto existing = graph.findNode(obj.id); existing)
     {
       if (!std::holds_alternative<fzi::semantic_scene_forests::ObjectNode>(*existing))
@@ -637,7 +701,11 @@ void SceneGraphGenerationNode::executePhase1(const std::shared_ptr<GoalHandle>& 
       cancel();
       return;
     }
-    commitGraph(graph);
+    if (auto committed = commitGraph(*state_snapshot->graph, state_snapshot->revision); !committed)
+    {
+      abort("Phase 1 failed to commit the scene graph: " + committed.error());
+      return;
+    }
     ++processed;
     ++updated;
   }
@@ -689,13 +757,13 @@ void SceneGraphGenerationNode::executePhase2(const std::shared_ptr<GoalHandle>& 
     return;
   }
 
-  auto graph_snapshot = snapshotGraph();
-  if (!graph_snapshot)
+  auto state_snapshot = snapshotState();
+  if (!state_snapshot)
   {
-    abort("Phase 2 failed to snapshot the scene graph: " + graph_snapshot.error());
+    abort("Phase 2 failed to snapshot the scene state: " + state_snapshot.error());
     return;
   }
-  auto& graph         = **graph_snapshot;
+  auto& graph         = *state_snapshot->graph;
   const auto CONCEPTS = graph.getConceptNodes();
   if (CONCEPTS.empty())
   {
@@ -782,7 +850,11 @@ void SceneGraphGenerationNode::executePhase2(const std::shared_ptr<GoalHandle>& 
     cancel();
     return;
   }
-  commitGraph(graph);
+  if (auto committed = commitGraph(*state_snapshot->graph, state_snapshot->revision); !committed)
+  {
+    abort("Phase 2 failed to commit the scene graph: " + committed.error());
+    return;
+  }
 
   auto result     = std::make_shared<UpdateSceneGraphAction::Result>();
   result->success = true;
@@ -791,22 +863,57 @@ void SceneGraphGenerationNode::executePhase2(const std::shared_ptr<GoalHandle>& 
   RCLCPP_INFO(get_logger(), "Phase 2 complete");
 }
 
-std::expected<std::unique_ptr<fzi::semantic_scene_forests::SceneGraph>, std::string>
-SceneGraphGenerationNode::snapshotGraph()
+std::expected<SceneGraphGenerationNode::StateSnapshot, std::string>
+SceneGraphGenerationNode::snapshotState()
 {
-  std::scoped_lock lock{m_graph_mutex};
+  std::scoped_lock lock{m_objects_mutex, m_graph_mutex};
+
   auto snapshot = m_scene_graph.clone();
   if (!snapshot)
   {
     return std::unexpected(snapshot.error().message);
   }
-  return std::move(*snapshot);
+
+  StateSnapshot state;
+  state.graph    = std::move(*snapshot);
+  state.revision = m_membership_revision;
+  state.objects.reserve(m_cached_objects.size());
+  for (const auto& [id, object] : m_cached_objects)
+  {
+    (void)id;
+    state.objects.push_back(object);
+  }
+  return state;
 }
 
-void SceneGraphGenerationNode::commitGraph(fzi::semantic_scene_forests::SceneGraph& graph)
+std::expected<void, std::string>
+SceneGraphGenerationNode::commitGraph(fzi::semantic_scene_forests::SceneGraph& candidate,
+                                      const std::uint64_t expected_revision)
 {
-  std::scoped_lock lock{m_graph_mutex};
-  m_scene_graph.swap(graph);
+  std::scoped_lock lock{m_objects_mutex, m_graph_mutex};
+
+  if (m_membership_revision != expected_revision)
+  {
+    return std::unexpected("scene graph membership changed since the snapshot (revision " +
+                           std::to_string(expected_revision) +
+                           " != " + std::to_string(m_membership_revision) + ")");
+  }
+
+  std::unordered_set<int64_t> active_ids;
+  active_ids.reserve(m_cached_objects.size());
+  for (const auto& [id, object] : m_cached_objects)
+  {
+    (void)object;
+    active_ids.insert(id);
+  }
+  if (auto retained = candidate.retainObjectNodes(active_ids); !retained)
+  {
+    return std::unexpected("failed to reconcile the candidate against the active objects: " +
+                           retained.error().message);
+  }
+
+  m_scene_graph.swap(candidate);
+  return {};
 }
 
 void SceneGraphGenerationNode::clearActiveGoal()
