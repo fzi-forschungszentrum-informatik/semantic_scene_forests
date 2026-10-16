@@ -575,59 +575,26 @@ SceneGraphQueryNode::handleFindObjectCancel(const std::shared_ptr<FindObjectGoal
 void SceneGraphQueryNode::handleFindObjectAccepted(
   const std::shared_ptr<FindObjectGoal>& goal_handle)
 {
+  // Join the preceding worker outside the action mutex before replacing it.
   std::jthread completed_worker;
-  bool cancel_goal = false;
   {
     const std::scoped_lock LOCK{m_find_object_mutex};
-    if (m_find_object_stopping)
-    {
-      m_find_object_active = false;
-      cancel_goal          = true;
-    }
-    else
+    if (!m_find_object_stopping)
     {
       completed_worker = std::move(m_find_object_worker);
     }
-  }
-
-  if (cancel_goal)
-  {
-    auto result       = std::make_shared<FindObjectAction::Result>();
-    result->success   = false;
-    result->message   = "Node is shutting down";
-    result->object_id = -1;
-    // Only an accepted client cancellation may terminalize as canceled.
-    if (goal_handle->is_canceling())
-    {
-      guardedTerminal([&goal_handle, &result] { goal_handle->canceled(result); });
-    }
-    else
-    {
-      guardedTerminal([&goal_handle, &result] { goal_handle->abort(result); });
-    }
-    return;
   }
   if (completed_worker.joinable())
   {
     completed_worker.join();
   }
 
+  // Final locked stop check before replacement: a goal caught during teardown
+  // clears the active flag and receives no result.
   const std::scoped_lock LOCK{m_find_object_mutex};
   if (m_find_object_stopping)
   {
     m_find_object_active = false;
-    auto result          = std::make_shared<FindObjectAction::Result>();
-    result->success      = false;
-    result->message      = "Node is shutting down";
-    result->object_id    = -1;
-    if (goal_handle->is_canceling())
-    {
-      guardedTerminal([&goal_handle, &result] { goal_handle->canceled(result); });
-    }
-    else
-    {
-      guardedTerminal([&goal_handle, &result] { goal_handle->abort(result); });
-    }
     return;
   }
   m_find_object_worker = std::jthread([this, goal_handle](std::stop_token stop) {
@@ -656,92 +623,91 @@ void SceneGraphQueryNode::executeFindObject(const std::shared_ptr<FindObjectGoal
     return goal_handle->is_canceling() || stop.stop_requested();
   };
 
-  auto result      = std::make_shared<FindObjectAction::Result>();
-  const auto ABORT = [&](const std::string& message) {
-    result->success   = false;
-    result->object_id = -1;
-    result->message   = message;
-    guardedTerminal([&] { goal_handle->abort(result); });
-    RCLCPP_WARN(get_logger(), "FindObject aborted: %s", message.c_str());
+  // Explicit completion outcome: distinguishes an abort from a valid
+  // not-found answer, which still SUCCEEDS with success=false and object_id=-1.
+  enum class Completion : std::uint8_t
+  {
+    SUCCEED,
+    ABORT
   };
+
+  auto result       = std::make_shared<FindObjectAction::Result>();
+  result->object_id = -1;
+
+  Completion completion = Completion::ABORT;
+  std::string abort_reason;
 
   try
   {
     // Cheap pre-flight: skip the paid LLM call when already cancelled/stopping.
-    if (SHOULD_STOP())
+    if (!SHOULD_STOP())
     {
-      result->success   = false;
-      result->object_id = -1;
-      if (goal_handle->is_canceling())
+      auto outcome =
+        runAgent("find_object/system_prompt", GOAL->object_description, ON_EXPAND, SHOULD_STOP);
+      if (outcome)
       {
-        result->message = "Cancelled";
-        guardedTerminal([&] { goal_handle->canceled(result); });
+        auto validated = validateFindObjectAnswer(*outcome);
+        if (validated)
+        {
+          result     = *validated;
+          completion = Completion::SUCCEED;
+        }
+        else
+        {
+          abort_reason = validated.error();
+        }
       }
       else
       {
-        result->message = "node shutting down";
-        guardedTerminal([&] { goal_handle->abort(result); });
+        m_action_errors.increment(outcome.error());
+        abort_reason = outcome.error();
       }
-      return;
     }
-    auto outcome =
-      runAgent("find_object/system_prompt", GOAL->object_description, ON_EXPAND, SHOULD_STOP);
-    if (!outcome)
-    {
-      m_action_errors.increment(outcome.error());
-      ABORT(outcome.error());
-      return;
-    }
-
-    if (goal_handle->is_canceling())
-    {
-      result->success   = false;
-      result->object_id = -1;
-      result->message   = "Cancelled";
-      guardedTerminal([&] { goal_handle->canceled(result); });
-      return;
-    }
-    if (stop.stop_requested())
-    {
-      ABORT("node shutting down");
-      return;
-    }
-
-    auto validated = validateFindObjectAnswer(*outcome);
-    if (!validated)
-    {
-      ABORT(validated.error());
-      return;
-    }
-    guardedTerminal([&] { goal_handle->succeed(*validated); });
-    RCLCPP_INFO(get_logger(),
-                "FindObject done: success=%d object_id=%ld",
-                static_cast<int>((*validated)->success),
-                (*validated)->object_id);
   }
   catch (const AgentStopped&)
   {
-    result->success   = false;
-    result->object_id = -1;
-    if (goal_handle->is_canceling())
-    {
-      result->message = "Cancelled";
-      guardedTerminal([&] { goal_handle->canceled(result); });
-    }
-    else
-    {
-      result->message = "Interrupted";
-      guardedTerminal([&] { goal_handle->abort(result); });
-    }
+    // The agent stopped at a tool boundary; the completion point below decides
+    // whether that is a client cancellation or a silent teardown.
+    abort_reason = "Interrupted";
   }
   catch (const std::exception& e)
   {
-    ABORT(std::string{"internal error: "} + e.what());
+    abort_reason = std::string{"internal error: "} + e.what();
   }
   catch (...)
   {
-    ABORT("unknown internal error");
+    abort_reason = "unknown internal error";
   }
+
+  // Single completion point: shutdown/context-gone delivers no result, an
+  // accepted client cancellation ends as canceled, a computation or validation
+  // failure aborts, and otherwise the answer succeeds.
+  if (stop.stop_requested() || !rclcpp::ok(get_node_base_interface()->get_context()))
+  {
+    return;
+  }
+  if (goal_handle->is_canceling())
+  {
+    // Uniform cancel payload: no computed-success fields may leak into a
+    // CANCELED result.
+    result->success   = false;
+    result->object_id = -1;
+    result->message   = "Cancelled";
+    guardedTerminal([&] { goal_handle->canceled(result); });
+    return;
+  }
+  if (completion == Completion::ABORT)
+  {
+    result->message = abort_reason;
+    guardedTerminal([&] { goal_handle->abort(result); });
+    RCLCPP_WARN(get_logger(), "FindObject aborted: %s", abort_reason.c_str());
+    return;
+  }
+  guardedTerminal([&] { goal_handle->succeed(result); });
+  RCLCPP_INFO(get_logger(),
+              "FindObject done: success=%d object_id=%ld",
+              static_cast<int>(result->success),
+              result->object_id);
 }
 
 std::expected<SceneGraphQueryNode::FindObjectAction::Result::SharedPtr, std::string>
@@ -877,56 +843,26 @@ SceneGraphQueryNode::handlePromptLLMCancel(const std::shared_ptr<PromptLLMGoal>&
 
 void SceneGraphQueryNode::handlePromptLLMAccepted(const std::shared_ptr<PromptLLMGoal>& goal_handle)
 {
+  // Join the preceding worker outside the action mutex before replacing it.
   std::jthread completed_worker;
-  bool cancel_goal = false;
   {
     const std::scoped_lock LOCK{m_prompt_llm_mutex};
-    if (m_prompt_llm_stopping)
-    {
-      m_prompt_llm_active = false;
-      cancel_goal         = true;
-    }
-    else
+    if (!m_prompt_llm_stopping)
     {
       completed_worker = std::move(m_prompt_llm_worker);
     }
-  }
-
-  if (cancel_goal)
-  {
-    auto result     = std::make_shared<PromptLLMAction::Result>();
-    result->success = false;
-    result->message = "Node is shutting down";
-    if (goal_handle->is_canceling())
-    {
-      guardedTerminal([&goal_handle, &result] { goal_handle->canceled(result); });
-    }
-    else
-    {
-      guardedTerminal([&goal_handle, &result] { goal_handle->abort(result); });
-    }
-    return;
   }
   if (completed_worker.joinable())
   {
     completed_worker.join();
   }
 
+  // Final locked stop check before replacement: a goal caught during teardown
+  // clears the active flag and receives no result.
   const std::scoped_lock LOCK{m_prompt_llm_mutex};
   if (m_prompt_llm_stopping)
   {
     m_prompt_llm_active = false;
-    auto result         = std::make_shared<PromptLLMAction::Result>();
-    result->success     = false;
-    result->message     = "Node is shutting down";
-    if (goal_handle->is_canceling())
-    {
-      guardedTerminal([&goal_handle, &result] { goal_handle->canceled(result); });
-    }
-    else
-    {
-      guardedTerminal([&goal_handle, &result] { goal_handle->abort(result); });
-    }
     return;
   }
   m_prompt_llm_worker = std::jthread([this, goal_handle](std::stop_token stop) {
@@ -955,99 +891,91 @@ void SceneGraphQueryNode::executePromptLLM(const std::shared_ptr<PromptLLMGoal>&
     return goal_handle->is_canceling() || stop.stop_requested();
   };
 
+  // Explicit completion outcome (see executeFindObject): computing the answer
+  // is separate from the one terminal decision at the completion point below.
+  enum class Completion : std::uint8_t
+  {
+    SUCCEED,
+    ABORT
+  };
+
   auto result = std::make_shared<PromptLLMAction::Result>();
+
+  Completion completion = Completion::ABORT;
+  std::string abort_reason;
+
   try
   {
     // Cheap pre-flight: skip the paid LLM call when already cancelled/stopping.
-    if (SHOULD_STOP())
+    if (!SHOULD_STOP())
     {
-      result->success = false;
-      if (goal_handle->is_canceling())
+      auto outcome = runAgent("prompt_llm/system_prompt", GOAL->query, ON_EXPAND, SHOULD_STOP);
+      if (outcome)
       {
-        result->message = "Cancelled";
-        guardedTerminal([&] { goal_handle->canceled(result); });
+        // Reject free-form answers computed against outdated membership.
+        std::uint64_t epoch_now = 0;
+        {
+          const std::scoped_lock LOCK{m_objects_mutex};
+          epoch_now = m_objects_epoch;
+        }
+        if (epoch_now == outcome->membership_epoch)
+        {
+          result->success  = true;
+          result->message  = "ok";
+          result->response = outcome->text;
+          completion       = Completion::SUCCEED;
+        }
+        else
+        {
+          abort_reason = "object membership changed during the query (stale result)";
+        }
       }
       else
       {
-        result->message = "Node shutting down";
-        guardedTerminal([&] { goal_handle->abort(result); });
+        m_action_errors.increment(outcome.error());
+        abort_reason = outcome.error();
       }
-      return;
     }
-    auto outcome = runAgent("prompt_llm/system_prompt", GOAL->query, ON_EXPAND, SHOULD_STOP);
-    if (!outcome)
-    {
-      m_action_errors.increment(outcome.error());
-      result->success = false;
-      result->message = outcome.error();
-      guardedTerminal([&] { goal_handle->abort(result); });
-      RCLCPP_ERROR(get_logger(), "PromptLLM failed: %s", outcome.error().c_str());
-      return;
-    }
-
-    if (goal_handle->is_canceling())
-    {
-      result->success = false;
-      result->message = "Cancelled";
-      guardedTerminal([&] { goal_handle->canceled(result); });
-      return;
-    }
-    if (stop.stop_requested())
-    {
-      result->success = false;
-      result->message = "Node shutting down";
-      guardedTerminal([&] { goal_handle->abort(result); });
-      return;
-    }
-
-    // Reject free-form answers computed against outdated membership.
-    std::uint64_t epoch_now = 0;
-    {
-      const std::scoped_lock LOCK{m_objects_mutex};
-      epoch_now = m_objects_epoch;
-    }
-    if (epoch_now != outcome->membership_epoch)
-    {
-      result->success = false;
-      result->message = "object membership changed during the query (stale result)";
-      guardedTerminal([&] { goal_handle->abort(result); });
-      RCLCPP_WARN(get_logger(), "PromptLLM aborted: stale membership");
-      return;
-    }
-
-    result->success  = true;
-    result->message  = "ok";
-    result->response = outcome->text;
-    guardedTerminal([&] { goal_handle->succeed(result); });
-    RCLCPP_INFO(get_logger(), "PromptLLM done");
   }
   catch (const AgentStopped&)
   {
-    result->success = false;
-    if (goal_handle->is_canceling())
-    {
-      result->message = "Cancelled";
-      guardedTerminal([&] { goal_handle->canceled(result); });
-    }
-    else
-    {
-      result->message = "Interrupted";
-      guardedTerminal([&] { goal_handle->abort(result); });
-    }
+    // The agent stopped at a tool boundary; the completion point below decides
+    // whether that is a client cancellation or a silent teardown.
+    abort_reason = "Interrupted";
   }
   catch (const std::exception& e)
   {
-    result->success = false;
-    result->message = std::string{"internal error: "} + e.what();
-    guardedTerminal([&] { goal_handle->abort(result); });
-    RCLCPP_ERROR(get_logger(), "PromptLLM internal error: %s", e.what());
+    abort_reason = std::string{"internal error: "} + e.what();
   }
   catch (...)
   {
-    result->success = false;
-    result->message = "unknown internal error";
-    guardedTerminal([&] { goal_handle->abort(result); });
+    abort_reason = "unknown internal error";
   }
+
+  // Single completion point (see executeFindObject).
+  if (stop.stop_requested() || !rclcpp::ok(get_node_base_interface()->get_context()))
+  {
+    return;
+  }
+  if (goal_handle->is_canceling())
+  {
+    // Uniform cancel payload (see executeFindObject): no computed-success
+    // fields may leak into a CANCELED result.
+    result->success = false;
+    result->response.clear();
+    result->message = "Cancelled";
+    guardedTerminal([&] { goal_handle->canceled(result); });
+    return;
+  }
+  if (completion == Completion::ABORT)
+  {
+    result->message = abort_reason;
+    guardedTerminal([&] { goal_handle->abort(result); });
+    RCLCPP_WARN(get_logger(), "PromptLLM aborted: %s", abort_reason.c_str());
+    return;
+  }
+  guardedTerminal([&] { goal_handle->succeed(result); });
+  RCLCPP_INFO(get_logger(), "PromptLLM done");
 }
 
 void SceneGraphQueryNode::onConnectivityDiagnostic(
