@@ -168,6 +168,16 @@ private:
 
   [[nodiscard]] std::expected<StateSnapshot, std::string> snapshotState();
 
+  // ── Contained terminal goal transitions ──────────────────────────────────
+  // rclcpp_action throws on illegal transitions (canceled() only with a
+  // pending client cancel) and on a shut-down context; an escaping exception
+  // would abort the node, so each helper skips or contains and logs it.
+  void abortGoal(const std::shared_ptr<GoalHandle>& goal_handle, const std::string& message);
+  void succeedGoal(const std::shared_ptr<GoalHandle>& goal_handle, const std::string& message);
+  // A stop request alone never authorizes canceled(); only an actual client
+  // cancellation does, so a bare stop must abort the goal instead.
+  void stopGoal(const std::shared_ptr<GoalHandle>& goal_handle);
+
   // Swaps the candidate into the live graph only when the membership epoch is
   // still the one the candidate was built against. The candidate is reconciled
   // against the authoritative object membership first, so plugin-added
