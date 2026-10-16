@@ -82,7 +82,8 @@ Jinja2 templates live in `resources/{instance,meta}/*.j2`. At runtime they are l
 
 ## Update Execution
 
-- **Goals are serialized**: the node accepts one `/update_scene_graph` goal at a time and owns its worker with `std::jthread`, so component shutdown waits for bounded in-flight work instead of leaving a detached thread behind.
+- **Goals are serialized**: the node accepts one `/update_scene_graph` goal at a time on an owned `std::jthread` worker; admission is reject-while-busy, and a goal caught in teardown receives no terminal result.
+- **Cooperative stopping**: the worker checks a stop token at existing checkpoints (before external calls, per task, and before commit). Teardown requests stop, lets the current blocking call finish, then joins; waiting is bounded by the per-call timeouts, not by a whole-goal shutdown deadline.
 - **Graph snapshots isolate long-running work**: LLM tasks operate on a private graph snapshot. The live graph mutex is held only to clone or commit a graph, so publishing and diagnostics remain responsive during inference.
 - **Bounded external calls**: LLM connection/request timeouts and object-visuals request timeouts are parameters. Cancellation is checked between external calls; an in-flight HTTP request cannot be force-cancelled but is bounded by the request timeout.
 

@@ -30,6 +30,8 @@ The graph is published at 1 Hz with reliable, transient-local QoS.
   `visuals_request_timeout_seconds`.
 - Cancellation is checked at worker checkpoints. An in-flight HTTP call or plugin task must
   return before the goal can finish cancellation.
+- Teardown stops the worker cooperatively at the next checkpoint and waits for the current
+  blocking call; a goal caught in teardown receives no terminal result.
 - When the managed-object array changes, the graph is pruned to the retained objects: absent
   objects, their incident edges, and concepts no longer reachable from any retained object are
   removed, while concepts shared with retained objects and their transitive ancestors survive.
@@ -55,7 +57,7 @@ The graph is published at 1 Hz with reliable, transient-local QoS.
 - Launch file: `launch/semantic_scene_forests_generation.launch.xml`
 - Plugin description: `semantic_scene_forests_generation_plugins.xml`
 
-## Known Shutdown Limitation
+## Limitations
 
-Action-result requests racing ROS shutdown can still trigger an upstream `rclcpp_action`
-executor exception. Worker cleanup does not guarantee delivery of a final result after shutdown.
+- Action-result requests racing ROS shutdown can still trigger an upstream `rclcpp_action`
+  executor exception; no final result is delivered after shutdown.

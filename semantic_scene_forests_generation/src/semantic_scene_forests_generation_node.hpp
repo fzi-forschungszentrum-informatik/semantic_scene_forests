@@ -30,6 +30,7 @@
 
 #include <cstdint>
 #include <expected>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <stop_token>
@@ -168,15 +169,20 @@ private:
 
   [[nodiscard]] std::expected<StateSnapshot, std::string> snapshotState();
 
-  // ── Contained terminal goal transitions ──────────────────────────────────
-  // rclcpp_action throws on illegal transitions (canceled() only with a
-  // pending client cancel) and on a shut-down context; an escaping exception
-  // would abort the node, so each helper skips or contains and logs it.
+  // ── Terminal goal transitions ──────────────────────────────────────────────
+  // Single terminal guard following the query pattern: skip on a shut-down
+  // context and contain rclcpp_action exceptions when teardown races the call,
+  // so helpers stay deduplicated.
+  void guardedTerminal(const std::function<void()>& terminal);
+
+  // Each helper publishes only through guardedTerminal; a computation
+  // exception while running still aborts with a failure message so the goal
+  // never stays nonterminal.
   void abortGoal(const std::shared_ptr<GoalHandle>& goal_handle, const std::string& message);
   void succeedGoal(const std::shared_ptr<GoalHandle>& goal_handle, const std::string& message);
-  // A stop request alone never authorizes canceled(); only an actual client
-  // cancellation does, so a bare stop must abort the goal instead.
-  void stopGoal(const std::shared_ptr<GoalHandle>& goal_handle);
+  // Publishes canceled() only for an actual accepted client cancellation; a
+  // requested stop token (teardown) publishes nothing.
+  void stopGoal(const std::shared_ptr<GoalHandle>& goal_handle, const std::stop_token& stop_token);
 
   // Swaps the candidate into the live graph only when the membership epoch is
   // still the one the candidate was built against. The candidate is reconciled

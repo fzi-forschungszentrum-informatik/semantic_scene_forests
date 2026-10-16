@@ -339,59 +339,30 @@ SceneGraphGenerationNode::handleCancel(const std::shared_ptr<GoalHandle>& /*goal
 
 void SceneGraphGenerationNode::handleAccepted(const std::shared_ptr<GoalHandle>& goal_handle)
 {
+  // Join the preceding worker outside the action mutex before replacing it.
   std::jthread completed_worker;
-  bool cancel_goal = false;
   {
     std::scoped_lock lock{m_goal_mutex};
-    if (m_stopping)
-    {
-      m_goal_active = false;
-      cancel_goal   = true;
-    }
-    else
+    if (!m_stopping)
     {
       completed_worker = std::move(m_goal_worker);
     }
-  }
-
-  if (cancel_goal)
-  {
-    stopGoal(goal_handle);
-    return;
   }
   if (completed_worker.joinable())
   {
     completed_worker.join();
   }
 
-  try
+  // Final locked stop check before installing a worker: a goal caught during
+  // teardown clears its reservation and receives no result.
+  std::scoped_lock lock{m_goal_mutex};
+  if (m_stopping)
   {
-    {
-      std::scoped_lock lock{m_goal_mutex};
-      if (m_stopping)
-      {
-        m_goal_active = false;
-        cancel_goal   = true;
-      }
-      else
-      {
-        m_goal_worker = std::jthread([this, goal_handle](std::stop_token stop_token) {
-          executeGoal(goal_handle, stop_token);
-        });
-      }
-    }
-  }
-  catch (const std::exception& e)
-  {
-    clearActiveGoal();
-    abortGoal(goal_handle, "Failed to start scene graph update: " + std::string(e.what()));
+    m_goal_active = false;
     return;
   }
-
-  if (cancel_goal)
-  {
-    stopGoal(goal_handle);
-  }
+  m_goal_worker = std::jthread(
+    [this, goal_handle](std::stop_token stop_token) { executeGoal(goal_handle, stop_token); });
 }
 
 void SceneGraphGenerationNode::executeGoal(const std::shared_ptr<GoalHandle>& goal_handle,
@@ -401,7 +372,7 @@ void SceneGraphGenerationNode::executeGoal(const std::shared_ptr<GoalHandle>& go
   {
     if (stop_token.stop_requested() || goal_handle->is_canceling())
     {
-      stopGoal(goal_handle);
+      stopGoal(goal_handle, stop_token);
     }
     else
     {
@@ -423,14 +394,15 @@ void SceneGraphGenerationNode::executeGoal(const std::shared_ptr<GoalHandle>& go
   }
   catch (const std::exception& e)
   {
+    // A computation exception while running must still abort with a failure
+    // result; guardedTerminal contains teardown races without retrying.
     const std::string message = "Scene graph update failed: " + std::string(e.what());
     m_llm_errors.increment(message);
     abortGoal(goal_handle, message);
   }
   catch (...)
   {
-    // A pluginlib-loaded task can throw a type that isn't a std::exception; without this
-    // catch-all it would escape the jthread body uncaught and call std::terminate().
+    // A pluginlib-loaded task can throw a type that is not a std::exception.
     const std::string message = "Scene graph update failed: unknown exception";
     m_llm_errors.increment(message);
     abortGoal(goal_handle, message);
@@ -438,85 +410,65 @@ void SceneGraphGenerationNode::executeGoal(const std::shared_ptr<GoalHandle>& go
   clearActiveGoal();
 }
 
-// ── Contained terminal goal transitions ──────────────────────────────────────
+// ── Terminal goal transitions ────────────────────────────────────────────────
 
-void SceneGraphGenerationNode::abortGoal(const std::shared_ptr<GoalHandle>& goal_handle,
-                                         const std::string& message)
+void SceneGraphGenerationNode::guardedTerminal(const std::function<void()>& terminal)
 {
   // Do not publish to an already-disposed context; contain the rclcpp_action
-  // exception when teardown races the call.
+  // exception when teardown races the call ("Asked to publish result for goal
+  // that does not exist").
   if (!rclcpp::ok(get_node_base_interface()->get_context()))
   {
-    RCLCPP_WARN(get_logger(), "Skipping goal abort, context is shut down: %s", message.c_str());
     return;
   }
   try
   {
-    auto result     = std::make_shared<UpdateSceneGraphAction::Result>();
-    result->success = false;
-    result->message = message;
-    goal_handle->abort(result);
+    terminal();
   }
   catch (const std::exception& e)
   {
-    RCLCPP_ERROR(get_logger(), "Failed to abort the active goal: %s", e.what());
+    RCLCPP_WARN(get_logger(), "terminal goal transition failed: %s", e.what());
   }
+}
+
+void SceneGraphGenerationNode::abortGoal(const std::shared_ptr<GoalHandle>& goal_handle,
+                                         const std::string& message)
+{
+  auto result     = std::make_shared<UpdateSceneGraphAction::Result>();
+  result->success = false;
+  result->message = message;
+  guardedTerminal([&] { goal_handle->abort(result); });
   RCLCPP_ERROR(get_logger(), "%s", message.c_str());
 }
 
 void SceneGraphGenerationNode::succeedGoal(const std::shared_ptr<GoalHandle>& goal_handle,
                                            const std::string& message)
 {
-  // Do not publish to an already-disposed context; contain the rclcpp_action
-  // exception when teardown races the call.
-  if (!rclcpp::ok(get_node_base_interface()->get_context()))
-  {
-    RCLCPP_WARN(get_logger(), "Skipping goal succeed, context is shut down: %s", message.c_str());
-    return;
-  }
-  try
-  {
-    auto result     = std::make_shared<UpdateSceneGraphAction::Result>();
-    result->success = true;
-    result->message = message;
-    goal_handle->succeed(result);
-    RCLCPP_INFO(get_logger(), "%s", message.c_str());
-  }
-  catch (const std::exception& e)
-  {
-    RCLCPP_ERROR(get_logger(), "Failed to succeed the active goal: %s", e.what());
-  }
+  auto result     = std::make_shared<UpdateSceneGraphAction::Result>();
+  result->success = true;
+  result->message = message;
+  guardedTerminal([&] { goal_handle->succeed(result); });
+  RCLCPP_INFO(get_logger(), "%s", message.c_str());
 }
 
-void SceneGraphGenerationNode::stopGoal(const std::shared_ptr<GoalHandle>& goal_handle)
+void SceneGraphGenerationNode::stopGoal(const std::shared_ptr<GoalHandle>& goal_handle,
+                                        const std::stop_token& stop_token)
 {
-  // Only a pending client cancellation authorizes canceled(); a bare stop must abort.
-  auto result     = std::make_shared<UpdateSceneGraphAction::Result>();
-  result->success = false;
-  result->message = goal_handle->is_canceling() ? "Cancelled" : "Node is shutting down";
-  // Do not publish to an already-disposed context; contain the rclcpp_action
-  // exception when teardown races the call.
-  if (!rclcpp::ok(get_node_base_interface()->get_context()))
+  // A requested stop token means teardown: no result delivery, even for a
+  // client cancellation. Otherwise only an actual accepted client
+  // cancellation may terminalize as canceled.
+  if (stop_token.stop_requested() || !rclcpp::ok(get_node_base_interface()->get_context()))
   {
-    RCLCPP_WARN(
-      get_logger(), "Skipping goal stop (%s), context is shut down", result->message.c_str());
     return;
   }
-  try
+  if (!goal_handle->is_canceling())
   {
-    if (goal_handle->is_canceling())
-    {
-      goal_handle->canceled(result);
-    }
-    else
-    {
-      goal_handle->abort(result);
-    }
+    return;
   }
-  catch (const std::exception& e)
-  {
-    RCLCPP_ERROR(get_logger(), "Failed to stop the active goal: %s", e.what());
-  }
+  auto result     = std::make_shared<UpdateSceneGraphAction::Result>();
+  result->success = false;
+  result->message = "Cancelled";
+  guardedTerminal([&] { goal_handle->canceled(result); });
 }
 
 // ── Phase 1 ───────────────────────────────────────────────────────────────────
@@ -524,7 +476,7 @@ void SceneGraphGenerationNode::stopGoal(const std::shared_ptr<GoalHandle>& goal_
 void SceneGraphGenerationNode::executePhase1(const std::shared_ptr<GoalHandle>& goal_handle,
                                              const std::stop_token& stop_token)
 {
-  const auto cancel = [this, &goal_handle]() { stopGoal(goal_handle); };
+  const auto cancel = [this, &goal_handle, &stop_token]() { stopGoal(goal_handle, stop_token); };
   const auto abort  = [this, &goal_handle](const std::string& message) {
     abortGoal(goal_handle, message);
   };
@@ -771,7 +723,7 @@ void SceneGraphGenerationNode::executePhase1(const std::shared_ptr<GoalHandle>& 
 void SceneGraphGenerationNode::executePhase2(const std::shared_ptr<GoalHandle>& goal_handle,
                                              const std::stop_token& stop_token)
 {
-  const auto cancel = [this, &goal_handle]() { stopGoal(goal_handle); };
+  const auto cancel = [this, &goal_handle, &stop_token]() { stopGoal(goal_handle, stop_token); };
   const auto abort  = [this, &goal_handle](const std::string& message) {
     abortGoal(goal_handle, message);
   };
