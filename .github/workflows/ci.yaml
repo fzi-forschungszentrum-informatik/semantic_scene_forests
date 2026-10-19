@@ -50,6 +50,8 @@ jobs:
           ADDITIONAL_DEBS: libssl-dev libcurl4-openssl-dev
           BASEDIR: ${{ github.workspace }}/.build
           UPSTREAM_WORKSPACE: upstream_workspace.yaml
+          # Built upstream as plain CMake; rosdep cannot discover it as an ament package.
+          ROSDEP_SKIP_KEYS: oai_api
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v7
