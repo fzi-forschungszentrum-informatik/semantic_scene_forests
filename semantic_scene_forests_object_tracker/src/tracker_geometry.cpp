@@ -46,14 +46,14 @@ transformBoundingBoxToFrame(const vision_msgs::msg::BoundingBox3D& bbox,
   const auto& size            = bbox.size;
   const auto& box_orientation = bbox.center.orientation;
 
-  bool inputs_finite = std::isfinite(center.x) && std::isfinite(center.y) &&
-                       std::isfinite(center.z) && std::isfinite(size.x) && std::isfinite(size.y) &&
-                       std::isfinite(size.z) && std::isfinite(translation.x) &&
-                       std::isfinite(translation.y) && std::isfinite(translation.z) &&
-                       std::isfinite(rotation.x) && std::isfinite(rotation.y) &&
-                       std::isfinite(rotation.z) && std::isfinite(rotation.w) &&
-                       std::isfinite(box_orientation.x) && std::isfinite(box_orientation.y) &&
-                       std::isfinite(box_orientation.z) && std::isfinite(box_orientation.w);
+  bool inputs_finite  = std::isfinite(center.x) && std::isfinite(center.y) &&
+                        std::isfinite(center.z) && std::isfinite(size.x) && std::isfinite(size.y) &&
+                        std::isfinite(size.z) && std::isfinite(translation.x) &&
+                        std::isfinite(translation.y) && std::isfinite(translation.z) &&
+                        std::isfinite(rotation.x) && std::isfinite(rotation.y) &&
+                        std::isfinite(rotation.z) && std::isfinite(rotation.w) &&
+                        std::isfinite(box_orientation.x) && std::isfinite(box_orientation.y) &&
+                        std::isfinite(box_orientation.z) && std::isfinite(box_orientation.w);
   bool sizes_positive = size.x > 0.0 && size.y > 0.0 && size.z > 0.0;
 
   if (!inputs_finite || !sizes_positive)
@@ -94,8 +94,8 @@ transformBoundingBoxToFrame(const vision_msgs::msg::BoundingBox3D& bbox,
   {
     const tf2::Vector3& composed_row = r_composed.getRow(row);
     world_extents[row]               = (std::abs(composed_row.x()) * box_size.x()) +
-                         (std::abs(composed_row.y()) * box_size.y()) +
-                         (std::abs(composed_row.z()) * box_size.z());
+                                       (std::abs(composed_row.y()) * box_size.y()) +
+                                       (std::abs(composed_row.z()) * box_size.z());
   }
 
   tf2::Vector3 box_center(center.x, center.y, center.z);

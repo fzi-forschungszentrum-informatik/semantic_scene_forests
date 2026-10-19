@@ -124,7 +124,7 @@ py::object messageToPython(const TMessage& message, const char* module_name, con
 
   const auto& raw_message = serialized_message.get_rcl_serialized_message();
   const auto SERIALIZED   = py::bytes(reinterpret_cast<const char*>(raw_message.buffer),
-                                    static_cast<py::ssize_t>(raw_message.buffer_length));
+                                      static_cast<py::ssize_t>(raw_message.buffer_length));
   return py::module_::import("rclpy.serialization")
     .attr("deserialize_message")(SERIALIZED, messageClass(module_name, class_name));
 }
