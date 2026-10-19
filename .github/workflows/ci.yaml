@@ -46,6 +46,8 @@ jobs:
         env:
           ROS_DISTRO: ${{ matrix.distro }}
           ROS_REPO: main
+          # oai-api/CPR needs development headers, not just the curl executable.
+          ADDITIONAL_DEBS: libssl-dev libcurl4-openssl-dev
           BASEDIR: ${{ github.workspace }}/.build
           UPSTREAM_WORKSPACE: upstream_workspace.yaml
       - name: Upload test results
