@@ -1,0 +1,61 @@
+name: Verify, Build & Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "04 23 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PRE_COMMIT_HOME: ${{ github.workspace }}/.cache/pre-commit
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cache pre-commit environments
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.PRE_COMMIT_HOME }}
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+      - name: Install pre-commit
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pre-commit
+      - name: Run pre-commit
+        run: pre-commit run --all-files --show-diff-on-failure
+
+  industrial_ci:
+    needs: pre-commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [jazzy, kilted, lyrical]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build and test
+        uses: ros-industrial/industrial_ci@master
+        env:
+          ROS_DISTRO: ${{ matrix.distro }}
+          ROS_REPO: main
+          BASEDIR: ${{ github.workspace }}/.build
+          UPSTREAM_WORKSPACE: upstream_workspace.yaml
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Test Results (ROS ${{ matrix.distro }})
+          path: |
+            .build/target_ws/build/**/test_results/**/*.xml
+            .build/target_ws/build/**/pytest.xml
+            .build/target_ws/build/**/*xunit.xml
+          include-hidden-files: true
+          if-no-files-found: warn

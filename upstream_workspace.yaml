@@ -1,5 +1,5 @@
 repositories:
   oai-api:
     type: git
-    url: https://codeberg.org/doberacker/oai-api.git
+    url: https://github.com/Oberacda/oai-api.git
     version: main
