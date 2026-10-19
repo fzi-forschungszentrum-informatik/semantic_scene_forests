@@ -52,7 +52,7 @@ ManagedObject::toMessage(const std::string& frame_id) const
   msg.id              = id;
   msg.class_name      = class_name;
   msg.detection       = detection;
-  msg.is_blocked      = false;
+  msg.is_blocked      = is_blocked;
   msg.source          = source;
   msg.last_updated    = last_updated;
   msg.header.stamp    = last_updated;

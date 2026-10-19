@@ -59,6 +59,35 @@ TEST(SceneGraphTest, AddObjectNodeWithId)
   EXPECT_TRUE(graph.hasNode(10));
 }
 
+TEST(SceneGraphTest, UpdateObjectNodeExistingIdIsNoOp)
+{
+  SceneGraph graph;
+  auto detection             = std::make_shared<vision_msgs::msg::Detection3D>();
+  detection->header.frame_id = "camera";
+  std::array<sensor_msgs::msg::Image::SharedPtr, 5> visuals{};
+  visuals[0] = std::make_shared<sensor_msgs::msg::Image>();
+
+  auto obj = graph.addObjectNodeWithId(10, "cup", detection, visuals).value();
+
+  auto msg = std::make_unique<semantic_scene_forests_msgs::msg::SceneGraph>();
+  semantic_scene_forests_msgs::msg::ObjectNode object_msg;
+  object_msg.id = obj;
+  msg->object_nodes.push_back(object_msg);
+
+  auto result = graph.updateSceneGraphFromMsg(*msg);
+  ASSERT_TRUE(result.has_value());
+
+  auto node = graph.findNode(obj);
+  ASSERT_TRUE(node.has_value());
+  ASSERT_TRUE(std::holds_alternative<ObjectNode>(node.value()));
+
+  const auto& object_node = std::get<ObjectNode>(node.value());
+  EXPECT_EQ(object_node.class_name, "cup");
+  ASSERT_NE(object_node.detection, nullptr);
+  EXPECT_EQ(object_node.detection->header.frame_id, "camera");
+  EXPECT_NE(object_node.visuals[0], nullptr);
+}
+
 TEST(SceneGraphTest, AddConceptNode)
 {
   SceneGraph graph;
@@ -499,4 +528,215 @@ TEST(SceneGraphTest, SwapKeepsIdMappingsValid)
   EXPECT_TRUE(second.hasNode(first_id));
   ASSERT_TRUE(first.addConceptNode("third").has_value());
   ASSERT_TRUE(second.addConceptNode("fourth").has_value());
+}
+
+// ---------------------------------------------------------------------------
+// update_from_msg regressions: exact edge reconciliation and reversal, kind
+// collision rejection, in-place partial failure semantics, and payload
+// preservation across updates.
+// ---------------------------------------------------------------------------
+
+TEST(SceneGraphTest, UpdateFromMsgRemovesEdgesAbsentFromMessage)
+{
+  SceneGraph graph;
+  auto detection = std::make_shared<vision_msgs::msg::Detection3D>();
+  std::array<sensor_msgs::msg::Image::SharedPtr, 5> visuals{};
+  const auto object_id  = graph.addObjectNodeWithId(1, "cup", detection, visuals).value();
+  const auto concept_id = graph.addConceptNodeWithId(-1, "on").value();
+  ASSERT_TRUE(graph.addEdge(object_id, concept_id, "rel").has_value());
+
+  // Snapshot with the edge dropped: the update must remove it from the graph.
+  auto msg = graph.toMsg();
+  msg->edges.clear();
+  ASSERT_TRUE(graph.updateSceneGraphFromMsg(*msg).has_value());
+
+  EXPECT_TRUE(graph.hasNode(object_id));
+  EXPECT_TRUE(graph.hasNode(concept_id));
+  EXPECT_FALSE(graph.hasEdge(object_id, concept_id, "rel"));
+  EXPECT_TRUE(graph.getEdges().empty());
+}
+
+TEST(SceneGraphTest, UpdateFromMsgReplacesReversedEdgeWithoutFalseCycle)
+{
+  SceneGraph graph;
+  const auto first_id  = graph.addConceptNodeWithId(-1, "first").value();
+  const auto second_id = graph.addConceptNodeWithId(-2, "second").value();
+  ASSERT_TRUE(graph.addEdge(first_id, second_id, "rel").has_value());
+
+  // Snapshot with the edge reversed: replacing an edge by its own opposite
+  // direction must not trip cycle detection on the old edge.
+  auto msg = graph.toMsg();
+  for (auto& edge : msg->edges)
+  {
+    if (edge.source_id == first_id && edge.target_id == second_id)
+    {
+      edge.source_id = second_id;
+      edge.target_id = first_id;
+    }
+  }
+
+  ASSERT_TRUE(graph.updateSceneGraphFromMsg(*msg).has_value());
+
+  EXPECT_FALSE(graph.hasEdge(first_id, second_id, "rel"));
+  EXPECT_TRUE(graph.hasEdge(second_id, first_id, "rel"));
+  ASSERT_EQ(graph.getEdges().size(), 1U);
+}
+
+TEST(SceneGraphTest, UpdateFromMsgRejectsNodeIdKindCollisions)
+{
+  SceneGraph graph;
+  auto detection = std::make_shared<vision_msgs::msg::Detection3D>();
+  std::array<sensor_msgs::msg::Image::SharedPtr, 5> visuals{};
+  const auto object_id = graph.addObjectNodeWithId(5, "cup", detection, visuals).value();
+
+  // A concept reusing an existing object id collides and is rejected; the
+  // object keeps its payload and the graph is otherwise untouched.
+  auto msg = std::make_unique<semantic_scene_forests_msgs::msg::SceneGraph>();
+  semantic_scene_forests_msgs::msg::ConceptNode concept_msg;
+  concept_msg.id         = object_id;
+  concept_msg.class_name = "imposter";
+  msg->concept_nodes.push_back(concept_msg);
+
+  const auto result = graph.updateSceneGraphFromMsg(*msg);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().kind, SceneGraphErrorKind::NODE_ALREADY_EXISTS);
+
+  const auto node = graph.findNode(object_id);
+  ASSERT_TRUE(node.has_value());
+  const auto& object = std::get<ObjectNode>(*node);
+  EXPECT_EQ(object.class_name, "cup");
+  EXPECT_EQ(object.detection, detection);
+  EXPECT_TRUE(graph.getConceptNodes().empty());
+  EXPECT_TRUE(graph.getEdges().empty());
+
+  // The mirror case: an object message reusing an existing concept id.
+  SceneGraph other;
+  const auto other_concept_id = other.addConceptNodeWithId(-7, "on").value();
+  auto object_collision       = std::make_unique<semantic_scene_forests_msgs::msg::SceneGraph>();
+  semantic_scene_forests_msgs::msg::ObjectNode object_msg;
+  object_msg.id = other_concept_id;
+  object_collision->object_nodes.push_back(object_msg);
+
+  const auto collision = other.updateSceneGraphFromMsg(*object_collision);
+  ASSERT_FALSE(collision.has_value());
+  EXPECT_EQ(collision.error().kind, SceneGraphErrorKind::NODE_ALREADY_EXISTS);
+  EXPECT_TRUE(other.getObjectNodes().empty());
+  EXPECT_TRUE(other.hasNode(other_concept_id));
+}
+
+TEST(SceneGraphTest, UpdateFromMsgAppliesValidChangesBeforeFailingEdge)
+{
+  SceneGraph graph;
+  auto detection = std::make_shared<vision_msgs::msg::Detection3D>();
+  std::array<sensor_msgs::msg::Image::SharedPtr, 5> visuals{};
+  const auto object_id  = graph.addObjectNodeWithId(1, "cup", detection, visuals).value();
+  const auto concept_id = graph.addConceptNodeWithId(-1, "on").value();
+  ASSERT_TRUE(graph.addEdge(object_id, concept_id, "rel").has_value());
+
+  // Snapshot plus a new concept with a valid edge, followed by an invalid edge
+  // (its target is an object, which can never receive edges).
+  auto msg = graph.toMsg();
+  semantic_scene_forests_msgs::msg::ConceptNode new_concept;
+  new_concept.id         = -3;
+  new_concept.class_name = "new";
+  msg->concept_nodes.push_back(new_concept);
+  semantic_scene_forests_msgs::msg::Edge good_edge;
+  good_edge.source_id = object_id;
+  good_edge.target_id = -3;
+  good_edge.label     = "rel";
+  msg->edges.push_back(good_edge);
+  semantic_scene_forests_msgs::msg::Edge bad_edge;
+  bad_edge.source_id = -3;
+  bad_edge.target_id = object_id;
+  bad_edge.label     = "invalid";
+  msg->edges.push_back(bad_edge);
+
+  // The invalid edge fails the update with an error, but every change the
+  // message applied beforehand stays: the graph is edited in place, and only
+  // the offending operation has no effect.
+  const auto result = graph.updateSceneGraphFromMsg(*msg);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().kind, SceneGraphErrorKind::INVALID_EDGE);
+
+  EXPECT_TRUE(graph.hasNode(-3));
+  EXPECT_TRUE(graph.hasEdge(object_id, -3, "rel"));
+  EXPECT_TRUE(graph.hasEdge(object_id, concept_id, "rel"));
+  EXPECT_FALSE(graph.hasEdge(-3, object_id, "invalid"));
+
+  // The graph remains fully usable after the partial failure.
+  auto followup = graph.toMsg();
+  followup->edges.clear();
+  ASSERT_TRUE(graph.updateSceneGraphFromMsg(*followup).has_value());
+  EXPECT_TRUE(graph.getEdges().empty());
+  EXPECT_TRUE(graph.hasNode(object_id));
+}
+
+TEST(SceneGraphTest, UpdateFromMsgPreservesObjectPayloadIdentity)
+{
+  SceneGraph graph;
+  auto detection             = std::make_shared<vision_msgs::msg::Detection3D>();
+  detection->header.frame_id = "camera";
+  detection->id              = "cup-detection";
+  std::array<sensor_msgs::msg::Image::SharedPtr, 5> visuals{};
+  visuals[0]                  = std::make_shared<sensor_msgs::msg::Image>();
+  visuals[0]->header.frame_id = "visual_frame";
+  const auto object_id        = graph.addObjectNodeWithId(10, "cup", detection, visuals).value();
+
+  auto msg = std::make_unique<semantic_scene_forests_msgs::msg::SceneGraph>();
+  semantic_scene_forests_msgs::msg::ObjectNode object_msg;
+  object_msg.id = object_id;
+  msg->object_nodes.push_back(object_msg);
+
+  ASSERT_TRUE(graph.updateSceneGraphFromMsg(*msg).has_value());
+
+  const auto node = graph.findNode(object_id);
+  ASSERT_TRUE(node.has_value());
+  const auto& object = std::get<ObjectNode>(*node);
+  EXPECT_EQ(object.detection, detection);
+  EXPECT_EQ(object.visuals[0], visuals[0]);
+  EXPECT_EQ(object.detection->id, "cup-detection");
+  EXPECT_EQ(object.visuals[0]->header.frame_id, "visual_frame");
+}
+
+TEST(SceneGraphTest, RetainObjectNodesKeepsConceptsReachableFromRetainedObjects)
+{
+  SceneGraph graph;
+  auto detection = std::make_shared<vision_msgs::msg::Detection3D>();
+  std::array<sensor_msgs::msg::Image::SharedPtr, 5> visuals{};
+
+  const auto object1   = graph.addObjectNodeWithId(1, "cup", detection, visuals).value();
+  const auto object2   = graph.addObjectNodeWithId(2, "plate", detection, visuals).value();
+  const auto shared    = graph.addConceptNodeWithId(-1, "shared").value();
+  const auto exclusive = graph.addConceptNodeWithId(-2, "exclusive").value();
+  const auto ancestor  = graph.addConceptNodeWithId(-3, "ancestor").value();
+
+  ASSERT_TRUE(graph.addEdge(object1, shared, "rel").has_value());
+  ASSERT_TRUE(graph.addEdge(object2, shared, "rel").has_value());
+  ASSERT_TRUE(graph.addEdge(object1, exclusive, "rel").has_value());
+  ASSERT_TRUE(graph.addEdge(shared, ancestor, "rel").has_value());
+
+  const auto result = graph.retainObjectNodes({object2});
+  ASSERT_TRUE(result.has_value());
+
+  EXPECT_TRUE(graph.hasNode(object2));
+  EXPECT_TRUE(graph.hasNode(shared));
+  EXPECT_TRUE(graph.hasNode(ancestor));
+  EXPECT_FALSE(graph.hasNode(object1));
+  EXPECT_FALSE(graph.hasNode(exclusive));
+}
+
+TEST(SceneGraphTest, RetainObjectNodesEmptyActiveSetEmptiesGraph)
+{
+  SceneGraph graph;
+  auto detection = std::make_shared<vision_msgs::msg::Detection3D>();
+  std::array<sensor_msgs::msg::Image::SharedPtr, 5> visuals{};
+  const auto object_id  = graph.addObjectNodeWithId(1, "cup", detection, visuals).value();
+  const auto concept_id = graph.addConceptNodeWithId(-1, "on").value();
+  ASSERT_TRUE(graph.addEdge(object_id, concept_id, "rel").has_value());
+
+  const auto result = graph.retainObjectNodes({});
+  ASSERT_TRUE(result.has_value());
+
+  EXPECT_TRUE(graph.getNodes().empty());
+  EXPECT_TRUE(graph.getEdges().empty());
 }

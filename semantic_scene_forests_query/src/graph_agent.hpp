@@ -33,6 +33,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -81,6 +82,20 @@ using ExpandCallback = std::function<void(const std::vector<int64_t>&)>;
 // node surface what the agent is doing via the ROS logger.
 using LogCallback = std::function<void(const std::string&)>;
 
+// Checked by session tools between agent steps (see AgentStopped). Return true
+// to request interruption; the next tool call then throws AgentStopped, which
+// escapes oai::Agent::run (ToolRegistry::invoke propagates handler exceptions)
+// so the owning action worker can terminalize its goal promptly.
+using StopCheck = std::function<bool()>;
+
+// Thrown by GraphAgentSession tools when the stop check fires between agent
+// steps. Must be caught by the action worker that owns the session.
+class AgentStopped : public std::runtime_error
+{
+public:
+  using std::runtime_error::runtime_error;
+};
+
 // ---------------------------------------------------------------------------
 // GraphAgentSession
 //
@@ -96,6 +111,7 @@ public:
                     ObjectLookup object_lookup,
                     VisualInspector inspect,
                     ExpandCallback on_expand,
+                    StopCheck should_stop,
                     LogCallback on_log = {});
 
   // Build the tool registry bound to this session. The returned tools capture
@@ -111,6 +127,10 @@ private:
   // Add `id` to the expanded set WITHOUT firing the callback; returns true if the
   // set grew. Used to batch a parent + all its neighbours into a single callback.
   bool recordExpanded(int64_t id);
+
+  // Stop-checkpoint for the owned tools: throws AgentStopped when the host
+  // requested interruption between agent steps.
+  void throwIfStopping() const;
 
   // Emit a one-line trace for a finished tool call (no-op if no log sink).
   void logTool(std::string_view name,
@@ -140,6 +160,7 @@ private:
   ObjectLookup m_object_lookup;
   VisualInspector m_inspect;
   ExpandCallback m_on_expand;
+  StopCheck m_should_stop;
   LogCallback m_on_log;
   std::vector<int64_t> m_expanded;
 };

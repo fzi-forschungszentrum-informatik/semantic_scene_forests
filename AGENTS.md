@@ -1,3 +1,20 @@
+# Research Scope & Testing
+
+This is research code, not a product. Keep the codebase small and focus on the core problem.
+
+- A comprehensive test suite is not required. Test common use cases, obvious invalid configurations that occur frequently, and concise regressions for observed bugs.
+- Avoid exhaustive edge-case matrices, duplicate coverage, and elaborate test infrastructure without a concrete need.
+- Implement the smallest clear change that solves the requested problem; do not try to cover every possible angle or hypothetical future use.
+- For speculative edge cases or possible unintended behavior outside the core scope, first add a short, specific TODO or note describing the limitation and when it should be addressed, rather than adding defensive machinery or abstractions immediately.
+- Keep validation and error handling needed for common failures, data integrity, safety, and correct hardware/calibration behavior. Documenting a limitation is not a substitute for fixing a known core bug.
+
+# Worker Threading Policy
+
+- Action goals run on owned, joined worker threads (`std::jthread`); never detach.
+- Workers stop cooperatively at existing tool/step boundaries via stop tokens; a blocking HTTP call may finish before the stop is observed. Blocking calls are accepted as-is.
+- Admission uses the existing per-action mutexes plus active/stopping flags: reject-while-busy, no queuing, no shutdown-delivery or result-retry machinery.
+- A goal caught during node teardown receives no result; ordinary client cancellation still terminalizes as `canceled()`.
+
 # Code Style & Formatting
 
 This project uses existing style configuration files. Always follow these when writing or modifying code:

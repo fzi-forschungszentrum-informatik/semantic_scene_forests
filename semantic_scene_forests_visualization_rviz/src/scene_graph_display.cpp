@@ -258,6 +258,7 @@ void SceneGraphDisplay::clearVisuals()
   m_object_labels.clear();
 
   // Clear object visuals map (selection handlers are shared_ptr, will be cleaned up)
+  const std::scoped_lock LOCK{m_object_visuals_mutex};
   m_object_visuals.clear();
 }
 
@@ -375,7 +376,10 @@ void SceneGraphDisplay::updateObjectNodes(
     // Register the pick color on the Ogre entity so pick() can identify it
     rviz_common::interaction::SelectionManager::setPickHandle(ov.selection_handler->getHandle(),
                                                               m_object_shapes[obj.id]->getEntity());
-    m_object_visuals[obj.id] = std::move(ov);
+    {
+      const std::scoped_lock LOCK{m_object_visuals_mutex};
+      m_object_visuals[obj.id] = std::move(ov);
+    }
 
     success_count++;
 
@@ -809,8 +813,13 @@ void SceneGraphDisplay::onManagedObjects(
   RCLCPP_DEBUG(
     ros_node->get_logger(), "Received managed objects: %zu objects", msg->objects.size());
 
-  clearVisuals();
-  updateObjectNodes(msg->objects);
+  QMetaObject::invokeMethod(
+    this,
+    [this, objects = msg->objects]() {
+      clearVisuals();
+      updateObjectNodes(objects);
+    },
+    Qt::QueuedConnection);
 
   const size_t object_count = msg->objects.size();
   QMetaObject::invokeMethod(
@@ -906,7 +915,12 @@ void SceneGraphDisplay::onSceneGraph(
 
 void SceneGraphDisplay::requestObjectVisuals(int64_t object_id)
 {
-  auto ros_node = context_->getRosNodeAbstraction().lock()->get_raw_node();
+  auto ros_node_abstraction = context_->getRosNodeAbstraction().lock();
+  if (!ros_node_abstraction)
+  {
+    return;
+  }
+  auto ros_node = ros_node_abstraction->get_raw_node();
 
   if (!m_get_visuals_client->wait_for_service(std::chrono::seconds(2)))
   {
@@ -927,7 +941,12 @@ void SceneGraphDisplay::requestObjectVisuals(int64_t object_id)
 void SceneGraphDisplay::onObjectVisualsResponse(
   rclcpp::Client<semantic_scene_forests_object_msgs::srv::GetObjectVisuals>::SharedFuture result)
 {
-  auto ros_node = context_->getRosNodeAbstraction().lock()->get_raw_node();
+  auto ros_node_abstraction = context_->getRosNodeAbstraction().lock();
+  if (!ros_node_abstraction)
+  {
+    return;
+  }
+  auto ros_node = ros_node_abstraction->get_raw_node();
 
   try
   {
@@ -941,6 +960,7 @@ void SceneGraphDisplay::onObjectVisualsResponse(
     // Find the object in our cache and update it
     for (const auto& visual : response->visuals)
     {
+      const std::scoped_lock LOCK{m_object_visuals_mutex};
       auto it = m_object_visuals.find(visual.object_id);
       if (it != m_object_visuals.end())
       {
@@ -1036,22 +1056,26 @@ bool SceneGraphDisplay::handleContextMenu(const QPoint& pos)
   }
 
   const int64_t object_id = sg_handler->getObjectId();
-  auto it                 = m_object_visuals.find(object_id);
-  if (it == m_object_visuals.end())
+  ObjectVisual visual;
   {
-    return false;
+    const std::scoped_lock LOCK{m_object_visuals_mutex};
+    auto it = m_object_visuals.find(object_id);
+    if (it == m_object_visuals.end())
+    {
+      return false;
+    }
+    visual = it->second;
   }
 
   auto menu = std::make_shared<QMenu>();
 
   // Image actions
-  if (!it->second.images.empty())
+  if (!visual.images.empty())
   {
     QAction* action =
-      menu->addAction(QString("Show Images (%1)").arg(static_cast<int>(it->second.images.size())));
-    const ObjectVisual VISUAL_COPY = it->second;
-    connect(action, &QAction::triggered, [this, object_id, VISUAL_COPY]() {
-      showImageDialog(object_id, VISUAL_COPY);
+      menu->addAction(QString("Show Images (%1)").arg(static_cast<int>(visual.images.size())));
+    connect(action, &QAction::triggered, [this, object_id, visual]() {
+      showImageDialog(object_id, visual);
     });
   }
   else
@@ -1066,7 +1090,7 @@ bool SceneGraphDisplay::handleContextMenu(const QPoint& pos)
   // Block object action — shows images for confirmation and calls the service
   QAction* block_action = menu->addAction(QString("Block Object %1").arg(object_id));
   block_action->setToolTip("Block this object and show its images");
-  connect(block_action, &QAction::triggered, [this, object_id, visual = it->second]() {
+  connect(block_action, &QAction::triggered, [this, object_id, visual]() {
     blockObject(object_id);
     if (!visual.images.empty())
     {
@@ -1143,8 +1167,13 @@ void SceneGraphDisplay::showImageDialog(int64_t id, const ObjectVisual& visual)
 {
   if (visual.images.empty())
   {
-    auto ros_node = context_->getRosNodeAbstraction().lock()->get_raw_node();
-    RCLCPP_WARN(ros_node->get_logger(), "No images available for object %ld", id);
+    auto ros_node_abstraction = context_->getRosNodeAbstraction().lock();
+    if (ros_node_abstraction)
+    {
+      RCLCPP_WARN(ros_node_abstraction->get_raw_node()->get_logger(),
+                  "No images available for object %ld",
+                  id);
+    }
     return;
   }
 

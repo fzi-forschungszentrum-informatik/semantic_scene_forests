@@ -151,8 +151,15 @@ public:
   // Exchanges graph storage and its descriptor-to-id mapping atomically at the caller level.
   SEMANTIC_SCENE_FORESTS_PUBLIC void swap(SceneGraph& other) noexcept;
 
+  // Updates in place; on the first error, earlier successful changes remain.
   [[nodiscard]] SEMANTIC_SCENE_FORESTS_PUBLIC std::expected<void, SceneGraphError>
   updateSceneGraphFromMsg(const semantic_scene_forests_msgs::msg::SceneGraph& msg) noexcept;
+
+  // Retains the objects named in active_ids (ids that are not existing objects are ignored)
+  // together with every node reachable from them through outgoing edges, and removes
+  // everything else. An empty active set empties the graph.
+  [[nodiscard]] SEMANTIC_SCENE_FORESTS_PUBLIC std::expected<void, SceneGraphError>
+  retainObjectNodes(const std::unordered_set<int64_t>& active_ids) noexcept;
 
 private:
   using IdVertexBimap = boost::bimap<int64_t, SceneGraphAdjList::vertex_descriptor>;
@@ -166,5 +173,10 @@ private:
 
   std::expected<void, SceneGraphError> updateConceptNodeFromMsg(
     const semantic_scene_forests_msgs::msg::ConceptNode& concept_msg) noexcept;
+
+  // Drops every edge absent from the message before adding the new ones, so a
+  // reversed edge cannot trip cycle detection on its old self.
+  std::expected<void, SceneGraphError>
+  reconcileEdgesFromMsg(const semantic_scene_forests_msgs::msg::SceneGraph& msg) noexcept;
 };
 } // namespace fzi::semantic_scene_forests

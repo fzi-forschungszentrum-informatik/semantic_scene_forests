@@ -197,6 +197,11 @@ void TrackedObject::mergeFrom(const TrackedObject& other)
     }
   }
 
+  for (const auto& crop : other.getCrops())
+  {
+    addCrop(crop);
+  }
+
   observation_count = std::max(observation_count, other.observation_count);
 
   int max_count = 0;

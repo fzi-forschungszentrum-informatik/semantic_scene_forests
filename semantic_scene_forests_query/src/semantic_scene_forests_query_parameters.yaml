@@ -33,3 +33,15 @@ semantic_scene_forests_query:
     type: string
     default_value: ""
     description: "Directory containing the .j2 Jinja2 prompt templates. Defaults to the package share/resources directory when empty."
+  llm_connect_timeout_seconds:
+    type: int
+    default_value: 5
+    description: "Maximum time allowed to establish an LLM HTTP connection."
+  llm_request_timeout_seconds:
+    type: int
+    default_value: 60
+    description: "Maximum time allowed for an LLM HTTP request, including inference."
+  visuals_request_timeout_seconds:
+    type: int
+    default_value: 10
+    description: "Maximum time allowed for one /get_object_visuals service call."

@@ -23,7 +23,9 @@ Core C++ library for representing and serializing semantic scene graphs.
   - add/remove object and concept nodes
   - add/remove labeled edges
   - query nodes and edges
-   - `toMsg()` and `fromMsg()` for ROS message conversion
+  - `toMsg()` and `fromMsg()` for ROS message conversion
+  - `updateSceneGraphFromMsg` applies updates in place; on the first invalid operation,
+    earlier valid changes remain (partial success, not a transaction)
 
 ## Python Bindings
 

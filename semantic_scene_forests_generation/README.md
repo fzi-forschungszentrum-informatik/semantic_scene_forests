@@ -28,8 +28,16 @@ The graph is published at 1 Hz with reliable, transient-local QoS.
 - LLM connection, LLM request, and object-visuals request timeouts are configurable through
   `llm_connect_timeout_seconds`, `llm_request_timeout_seconds`, and
   `visuals_request_timeout_seconds`.
-- Cancellation is checked between external requests. An in-flight LLM request completes or times
-  out before the goal can finish cancellation.
+- Cancellation is checked at worker checkpoints. An in-flight HTTP call or plugin task must
+  return before the goal can finish cancellation.
+- Teardown stops the worker cooperatively at the next checkpoint and waits for the current
+  blocking call; a goal caught in teardown receives no terminal result.
+- When the managed-object array changes, the graph is pruned to the retained objects: absent
+  objects, their incident edges, and concepts no longer reachable from any retained object are
+  removed, while concepts shared with retained objects and their transitive ancestors survive.
+  An empty managed array empties the graph.
+- In-flight updates are rejected if object membership changes during inference; paid LLM
+  work is not retried automatically.
 
 ## Exported Components
 
@@ -48,3 +56,8 @@ The graph is published at 1 Hz with reliable, transient-local QoS.
 
 - Launch file: `launch/semantic_scene_forests_generation.launch.xml`
 - Plugin description: `semantic_scene_forests_generation_plugins.xml`
+
+## Limitations
+
+- Action-result requests racing ROS shutdown can still trigger an upstream `rclcpp_action`
+  executor exception; no final result is delivered after shutdown.

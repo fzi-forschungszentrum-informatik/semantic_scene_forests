@@ -29,6 +29,7 @@
 #include "semantic_scene_forests_object_manager/object_manager.hpp"
 
 #include <algorithm>
+#include <ranges>
 
 namespace semantic_scene_forests_object_manager {
 
@@ -36,6 +37,7 @@ bool ObjectManager::processObjectCandidate(
   const semantic_scene_forests_object_msgs::msg::ObjectCandidate& candidate,
   const rclcpp::Time& now)
 {
+  const std::scoped_lock LOCK{m_objects_mutex};
   if (m_blocked_ids.contains(candidate.id))
   {
     return false;
@@ -46,33 +48,60 @@ bool ObjectManager::processObjectCandidate(
 
 bool ObjectManager::blockObject(int64_t id)
 {
-  auto it = m_objects.find(id);
-  if (it == m_objects.end())
+  const std::scoped_lock LOCK{m_objects_mutex};
+  if (m_blocked_ids.contains(id))
+  {
+    return true;
+  }
+  if (m_objects.erase(id) == 0U)
   {
     return false;
   }
-  m_objects.erase(it);
   m_blocked_ids.insert(id);
   return true;
 }
 
 bool ObjectManager::unblockObject(int64_t id)
 {
-  m_blocked_ids.erase(id);
-  return true;
+  const std::scoped_lock LOCK{m_objects_mutex};
+  return m_blocked_ids.erase(id) > 0;
 }
 
 bool ObjectManager::editObject(
   const semantic_scene_forests_object_msgs::srv::EditObject::Request& request,
   const rclcpp::Time& now)
 {
+  EditFailure failure;
+  return editObject(request, now, failure);
+}
+
+bool ObjectManager::editObject(
+  const semantic_scene_forests_object_msgs::srv::EditObject::Request& request,
+  const rclcpp::Time& now,
+  EditFailure& failure)
+{
+  const std::scoped_lock LOCK{m_objects_mutex};
   auto it = m_objects.find(request.object_id);
   if (it == m_objects.end())
   {
+    failure = EditFailure::UNKNOWN_OBJECT;
     return false;
   }
 
   ManagedObject& obj = it->second;
+
+  auto indices = request.remove_crop_indices;
+  std::ranges::sort(indices);
+  const auto REMOVED = std::ranges::unique(indices);
+  indices.erase(REMOVED.begin(), REMOVED.end());
+  for (const uint32_t IDX : indices)
+  {
+    if (static_cast<size_t>(IDX) >= obj.image_crops.size())
+    {
+      failure = EditFailure::INVALID_CROP_INDEX;
+      return false;
+    }
+  }
 
   if (request.update_class_name)
   {
@@ -85,24 +114,21 @@ bool ObjectManager::editObject(
     obj.detection.bbox.center.orientation = request.pose.orientation;
   }
 
-  auto indices = request.remove_crop_indices;
-  std::ranges::sort(indices, std::greater<uint32_t>());
-  for (const uint32_t IDX : indices)
+  for (const uint32_t IDX : std::views::reverse(indices))
   {
-    if (static_cast<size_t>(IDX) < obj.image_crops.size())
-    {
-      obj.image_crops.erase(obj.image_crops.begin() + static_cast<std::ptrdiff_t>(IDX));
-    }
+    obj.image_crops.erase(obj.image_crops.begin() + static_cast<std::ptrdiff_t>(IDX));
   }
 
   obj.source       = 1;
   obj.last_updated = now;
+  failure          = EditFailure::SUCCESS;
   return true;
 }
 
 std::vector<semantic_scene_forests_object_msgs::msg::ManagedObject>
 ObjectManager::getManagedObjects(const std::string& frame_id) const
 {
+  const std::scoped_lock LOCK{m_objects_mutex};
   std::vector<semantic_scene_forests_object_msgs::msg::ManagedObject> result;
   result.reserve(m_objects.size());
   for (const auto& [id, obj] : m_objects)
@@ -115,6 +141,7 @@ ObjectManager::getManagedObjects(const std::string& frame_id) const
 std::vector<semantic_scene_forests_object_msgs::msg::ObjectVisuals>
 ObjectManager::getObjectVisuals(const std::vector<int64_t>& ids) const
 {
+  const std::scoped_lock LOCK{m_objects_mutex};
   std::vector<semantic_scene_forests_object_msgs::msg::ObjectVisuals> result;
   const auto LOOKUP = [&](int64_t id) {
     auto it = m_objects.find(id);
@@ -153,6 +180,12 @@ ObjectManager::buildMessage(const std::string& frame_id, const rclcpp::Time& now
   msg.header.frame_id = frame_id;
   msg.objects         = getManagedObjects(frame_id);
   return msg;
+}
+
+size_t ObjectManager::getBlockedObjectCount() const
+{
+  const std::scoped_lock LOCK{m_objects_mutex};
+  return m_blocked_ids.size();
 }
 
 } // namespace semantic_scene_forests_object_manager

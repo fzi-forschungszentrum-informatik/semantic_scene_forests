@@ -154,28 +154,49 @@ void ObjectManagerNode::onEditObject(const EditObject::Request::SharedPtr& reque
                                      const EditObject::Response::SharedPtr& response)
 {
   RCLCPP_INFO(this->get_logger(), "EditObject: id=%ld", request->object_id);
-  if (m_manager.editObject(*request, this->now()))
+  ObjectManager::EditFailure failure;
+  if (m_manager.editObject(*request, this->now(), failure))
   {
     response->success = true;
     response->message = "Object edited successfully";
     publishManagedObjects();
+    return;
   }
-  else
+
+  response->success = false;
+  switch (failure)
   {
-    response->success = false;
-    response->message = "Object ID not found";
-    RCLCPP_WARN(this->get_logger(), "EditObject failed: id=%ld not found", request->object_id);
+    case ObjectManager::EditFailure::UNKNOWN_OBJECT:
+      response->message = "Object ID not found or blocked";
+      break;
+    case ObjectManager::EditFailure::INVALID_CROP_INDEX:
+      response->message = "Invalid crop index in remove_crop_indices; edit rejected";
+      break;
+    case ObjectManager::EditFailure::SUCCESS:
+      break;
   }
+  RCLCPP_WARN(this->get_logger(),
+              "EditObject failed: id=%ld (%s)",
+              request->object_id,
+              response->message.c_str());
 }
 
 void ObjectManagerNode::onUnblockObject(const UnblockObject::Request::SharedPtr& request,
                                         const UnblockObject::Response::SharedPtr& response)
 {
   RCLCPP_INFO(this->get_logger(), "UnblockObject: id=%ld", request->object_id);
-  m_manager.unblockObject(request->object_id);
-  response->success = true;
-  response->message = "Object unblocked";
-  publishManagedObjects();
+  if (m_manager.unblockObject(request->object_id))
+  {
+    response->success = true;
+    response->message = "Object unblocked";
+    publishManagedObjects();
+  }
+  else
+  {
+    response->success = false;
+    response->message = "Object ID not blocked";
+    RCLCPP_WARN(this->get_logger(), "UnblockObject failed: id=%ld not blocked", request->object_id);
+  }
 }
 
 void ObjectManagerNode::onGetObjectVisuals(const GetObjectVisuals::Request::SharedPtr& request,
@@ -195,21 +216,13 @@ void ObjectManagerNode::publishManagedObjects()
 
 void ObjectManagerNode::onHealthDiagnostic(diagnostic_updater::DiagnosticStatusWrapper& stat)
 {
-  const auto objects = m_manager.getManagedObjects(m_params.frame_id);
-  size_t blocked     = 0;
-  for (const auto& obj : objects)
-  {
-    if (obj.is_blocked)
-    {
-      ++blocked;
-    }
-  }
+  const auto OBJECTS = m_manager.getManagedObjects(m_params.frame_id);
 
-  stat.add("Managed objects", objects.size());
-  stat.add("Blocked objects", blocked);
+  stat.add("Managed objects", OBJECTS.size());
+  stat.add("Blocked objects", m_manager.getBlockedObjectCount());
   stat.add("Publish frequency (Hz)", m_params.publish_frequency_hz);
   stat.summary(diagnostic_msgs::msg::DiagnosticStatus::OK,
-               "Managing " + std::to_string(objects.size()) + " objects");
+               "Managing " + std::to_string(OBJECTS.size()) + " objects");
 }
 
 } // namespace semantic_scene_forests_object_manager

@@ -184,3 +184,26 @@ def test_ros_message_conversion_preserves_current_wire_format() -> None:
     graph.update_from_msg(message)
     assert graph.has_node(object_id)
     assert graph.has_node(concept_id)
+
+
+def test_retain_object_nodes_binding_smoke() -> None:
+    graph = SceneGraph()
+    detection, visuals = make_payload()
+    object1 = graph.add_object_node_with_id(1, "cup", detection, visuals)
+    object2 = graph.add_object_node_with_id(2, "plate", detection, visuals)
+    shared = graph.add_concept_node_with_id(-1, "shared")
+    ancestor = graph.add_concept_node_with_id(-2, "ancestor")
+    graph.add_edge(object1, shared, "rel")
+    graph.add_edge(object2, shared, "rel")
+    graph.add_edge(shared, ancestor, "rel")
+
+    graph.retain_object_nodes({object2})
+
+    assert graph.has_node(object2)
+    assert graph.has_node(shared)
+    assert graph.has_node(ancestor)
+    assert not graph.has_node(object1)
+
+    graph.retain_object_nodes(set())
+    assert len(graph.nodes) == 0
+    assert len(graph.edges) == 0
