@@ -1,3 +1,93 @@
 //! Rust bindings for the existing C++ semantic scene graph library.
 
 pub use ros_env::semantic_scene_forests_msgs::msg::SceneGraph as SceneGraphMsg;
+
+mod ffi;
+pub use bridge::GraphErrorKind;
+use ffi::bridge;
+
+/// A graph operation rejected by the C++ library.
+#[derive(Debug)]
+pub struct GraphError {
+    pub kind: GraphErrorKind,
+    pub message: String,
+}
+
+impl std::fmt::Display for GraphError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for GraphError {}
+
+impl bridge::Status {
+    fn into_result(self) -> Result<(), GraphError> {
+        if self.success {
+            Ok(())
+        } else {
+            Err(GraphError {
+                kind: self.kind,
+                message: self.message,
+            })
+        }
+    }
+}
+
+/// An owned copy of an edge label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Edge {
+    pub label: String,
+}
+
+/// Owns a C++ graph. Mutation requires an exclusive Rust borrow.
+pub struct SceneGraph {
+    inner: cxx::UniquePtr<bridge::NativeGraph>,
+}
+
+impl Default for SceneGraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SceneGraph {
+    pub fn new() -> Self {
+        Self {
+            inner: bridge::new_graph(),
+        }
+    }
+
+    /// Add an object without detection or image payloads.
+    pub fn add_object_node(&mut self, class_name: &str) -> Result<i64, GraphError> {
+        let result = self.inner.pin_mut().add_object_node(class_name);
+        result.status.into_result()?;
+        Ok(result.id)
+    }
+
+    pub fn add_concept_node(&mut self, name: &str) -> Result<i64, GraphError> {
+        let result = self.inner.pin_mut().add_concept_node(name);
+        result.status.into_result()?;
+        Ok(result.id)
+    }
+
+    pub fn has_node(&self, id: i64) -> bool {
+        self.inner.has_node(id)
+    }
+
+    pub fn add_edge(&mut self, source: i64, target: i64, label: &str) -> Result<(), GraphError> {
+        self.inner
+            .pin_mut()
+            .add_edge(source, target, label)
+            .into_result()
+    }
+
+    pub fn outgoing_edges(&self, id: i64) -> Result<Vec<(i64, Edge)>, GraphError> {
+        let result = self.inner.outgoing_edges(id);
+        result.status.into_result()?;
+        Ok(result
+            .edges
+            .into_iter()
+            .map(|e| (e.target, Edge { label: e.label }))
+            .collect())
+    }
+}

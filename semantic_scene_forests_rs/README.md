@@ -28,3 +28,21 @@ Older colcon workspaces may contain a stale `.cargo/config.toml` with patches fo
 removed message packages. Cargo reads configuration from the working directory's
 ancestors, even with `--manifest-path`. Run the command from outside that workspace
 with the absolute manifest path rather than editing unrelated configuration.
+
+## Graph operations
+
+```rust
+use semantic_scene_forests_rs::SceneGraph;
+
+let mut graph = SceneGraph::new();
+let cup = graph.add_object_node("cup")?;
+let on = graph.add_concept_node("on")?;
+graph.add_edge(cup, on, "relation")?;
+assert_eq!(graph.outgoing_edges(cup)?[0].0, on);
+# Ok::<(), semantic_scene_forests_rs::GraphError>(())
+```
+
+Graph operations use the C++ implementation and return `GraphError` with its
+original error kind and message. Queries return owned Rust values. Object creation
+currently accepts a class name only, without detection/image payloads. The graph
+does not implement `Clone`, `Send`, or `Sync` in this first version.

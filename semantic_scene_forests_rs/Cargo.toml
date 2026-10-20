@@ -7,7 +7,12 @@ license = "BSD-3-Clause"
 description = "Rust bindings for the semantic scene graph C++ library"
 
 [dependencies]
+cxx = "=1.0.205"
 ros-env = "0.3"
+
+[build-dependencies]
+cmake = "0.1"
+cxx-build = "=1.0.205"
 
 [dev-dependencies]
 rclrs = "0.8"
