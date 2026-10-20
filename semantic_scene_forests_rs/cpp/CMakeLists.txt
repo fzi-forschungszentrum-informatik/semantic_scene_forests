@@ -9,6 +9,7 @@ find_package(Boost REQUIRED)
 find_package(fmt REQUIRED)
 find_package(semantic_scene_forests_msgs REQUIRED)
 find_package(vision_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(semantic_scene_forests REQUIRED)
 
 add_library(ssf_rs_adapter STATIC bridge.cpp)

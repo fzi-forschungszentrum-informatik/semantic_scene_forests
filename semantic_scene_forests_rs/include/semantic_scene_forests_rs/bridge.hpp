@@ -15,13 +15,16 @@ struct Status;
 struct IdResult;
 struct EdgeList;
 struct GraphRecord;
+struct PayloadRecord;
+struct ObjectNodeRecord;
 
 class NativeGraph
 {
 public:
   NativeGraph();
   ~NativeGraph();
-  IdResult addObjectNode(rust::Str name);
+  IdResult addObjectNode(rust::Str name, const PayloadRecord& payload);
+  rust::Vec<ObjectNodeRecord> objectNodes() const;
   IdResult addConceptNode(rust::Str name);
   bool hasNode(int64_t id) const;
   Status addEdge(int64_t source, int64_t target, rust::Str label);

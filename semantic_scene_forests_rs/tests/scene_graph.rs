@@ -28,7 +28,7 @@ fn generated_messages_share_rclrs_runtime() {
 #[test]
 fn build_and_query_graph() {
     let mut graph = SceneGraph::new();
-    let cup = graph.add_object_node("cup").unwrap();
+    let cup = graph.add_object_node("cup", None, [None; 5]).unwrap();
     let on = graph.add_concept_node("on").unwrap();
     let table = graph.add_concept_node("table").unwrap();
     assert!(cup > 0 && on < 0 && table < 0 && on != table);
@@ -63,7 +63,7 @@ fn message_roundtrip() {
     assert_eq!(loaded_empty.to_msg(), SceneGraphMsg::default());
 
     let mut graph = SceneGraph::new();
-    let cup = graph.add_object_node("cup").unwrap();
+    let cup = graph.add_object_node("cup", None, [None; 5]).unwrap();
     let on = graph.add_concept_node("on").unwrap();
     graph.add_edge(cup, on, "relation").unwrap();
     let message = graph.to_msg();
@@ -106,4 +106,81 @@ fn update_keeps_earlier_success_on_error() {
     graph.update_from_msg(&message).unwrap();
     graph.update_from_msg(&SceneGraphMsg::default()).unwrap();
     assert!(!graph.has_node(-42));
+}
+
+#[test]
+fn payload_roundtrip_owns_complete_ros_messages() {
+    use semantic_scene_forests_rs::{Detection3D, Image};
+    let mut detection = Detection3D {
+        id: "cup-1".into(),
+        ..Default::default()
+    };
+    detection.header.frame_id = "camera".into();
+    detection.header.stamp.sec = 12;
+    detection.header.stamp.nanosec = 345;
+    detection.bbox.center.position.x = 1.0;
+    detection.bbox.center.position.y = 2.0;
+    detection.bbox.center.position.z = 3.0;
+    detection.bbox.center.orientation.x = 0.1;
+    detection.bbox.center.orientation.y = 0.2;
+    detection.bbox.center.orientation.z = 0.3;
+    detection.bbox.center.orientation.w = 0.9;
+    detection.bbox.size.x = 0.4;
+    detection.bbox.size.y = 0.5;
+    detection.bbox.size.z = 0.6;
+    detection.results.push(Default::default());
+    detection.results[0].hypothesis.class_id = "cup".into();
+    detection.results[0].hypothesis.score = 0.95;
+    detection.results[0].pose.pose = detection.bbox.center.clone();
+    detection.results[0].pose.covariance = std::array::from_fn(|i| i as f64 / 10.0);
+    let mut image = Image {
+        header: detection.header.clone(),
+        height: 1,
+        width: 2,
+        encoding: "rgb8".into(),
+        is_bigendian: 1,
+        step: 6,
+        data: vec![1, 2, 3, 4, 5, 6],
+    };
+    let expected_detection = detection.clone();
+    let expected_image = image.clone();
+    let mut graph = SceneGraph::new();
+    let cup = graph
+        .add_object_node(
+            "cup",
+            Some(&detection),
+            [Some(&image), None, None, None, Some(&image)],
+        )
+        .unwrap();
+    detection.id = "changed after insertion".into();
+    image.data[0] = 99;
+
+    let mut objects = graph.object_nodes();
+    assert_eq!(objects[0].id, cup);
+    assert_eq!(objects[0].class_name, "cup");
+    assert_eq!(objects[0].detection.as_ref(), Some(&expected_detection));
+    assert_eq!(
+        objects[0].visuals,
+        [
+            Some(expected_image.clone()),
+            None,
+            None,
+            None,
+            Some(expected_image)
+        ]
+    );
+    objects[0].detection.as_mut().unwrap().id = "changed returned copy".into();
+    assert_eq!(
+        graph.object_nodes()[0].detection.as_ref(),
+        Some(&expected_detection)
+    );
+
+    let plain = graph.add_object_node("plain", None, [None; 5]).unwrap();
+    let plain = graph
+        .object_nodes()
+        .into_iter()
+        .find(|node| node.id == plain)
+        .unwrap();
+    assert!(plain.detection.is_none());
+    assert_eq!(plain.visuals, [None, None, None, None, None]);
 }

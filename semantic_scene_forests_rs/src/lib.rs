@@ -1,8 +1,10 @@
 //! Rust bindings for the existing C++ semantic scene graph library.
 
 pub use ros_env::semantic_scene_forests_msgs::msg::SceneGraph as SceneGraphMsg;
+pub use ros_env::{sensor_msgs::msg::Image, vision_msgs::msg::Detection3D};
 
 mod ffi;
+mod payloads;
 pub use bridge::GraphErrorKind;
 use ffi::bridge;
 
@@ -39,6 +41,15 @@ pub struct Edge {
     pub label: String,
 }
 
+/// An owned copy of an object and its optional ROS payloads.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObjectNode {
+    pub id: i64,
+    pub class_name: String,
+    pub detection: Option<Detection3D>,
+    pub visuals: [Option<Image>; 5],
+}
+
 /// Owns a C++ graph. Mutation requires an exclusive Rust borrow.
 pub struct SceneGraph {
     inner: cxx::UniquePtr<bridge::NativeGraph>,
@@ -57,11 +68,26 @@ impl SceneGraph {
         }
     }
 
-    /// Add an object without detection or image payloads.
-    pub fn add_object_node(&mut self, class_name: &str) -> Result<i64, GraphError> {
-        let result = self.inner.pin_mut().add_object_node(class_name);
+    /// Add an object, copying its detection and exactly five optional image slots.
+    pub fn add_object_node(
+        &mut self,
+        class_name: &str,
+        detection: Option<&Detection3D>,
+        visuals: [Option<&Image>; 5],
+    ) -> Result<i64, GraphError> {
+        let payload = bridge::PayloadRecord::new(detection, visuals);
+        let result = self.inner.pin_mut().add_object_node(class_name, &payload);
         result.status.into_result()?;
         Ok(result.id)
+    }
+
+    /// Return independent copies; editing these values does not mutate the graph.
+    pub fn object_nodes(&self) -> Vec<ObjectNode> {
+        self.inner
+            .object_nodes()
+            .into_iter()
+            .map(Into::into)
+            .collect()
     }
 
     pub fn add_concept_node(&mut self, name: &str) -> Result<i64, GraphError> {

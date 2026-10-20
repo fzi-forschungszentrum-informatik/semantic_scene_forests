@@ -8,6 +8,8 @@
   <buildtool_depend>ament_cargo</buildtool_depend>
   <depend>semantic_scene_forests</depend>
   <depend>semantic_scene_forests_msgs</depend>
+  <depend>vision_msgs</depend>
+  <depend>sensor_msgs</depend>
   <export>
     <build_type>ament_cargo</build_type>
   </export>

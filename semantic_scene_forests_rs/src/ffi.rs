@@ -34,6 +34,7 @@ pub(crate) mod bridge {
         edges: Vec<EdgeRecord>,
     }
 
+    #[derive(Default)]
     struct HeaderRecord {
         sec: i32,
         nanosec: u32,
@@ -58,6 +59,57 @@ pub(crate) mod bridge {
         edges: Vec<EdgeRecord>,
     }
 
+    #[derive(Default)]
+    struct PoseRecord {
+        position: [f64; 3],
+        orientation: [f64; 4],
+    }
+
+    struct HypothesisRecord {
+        class_id: String,
+        score: f64,
+        pose: PoseRecord,
+        covariance: [f64; 36],
+    }
+
+    #[derive(Default)]
+    struct DetectionRecord {
+        header: HeaderRecord,
+        results: Vec<HypothesisRecord>,
+        center: PoseRecord,
+        size: [f64; 3],
+        id: String,
+    }
+
+    #[derive(Default)]
+    struct ImageRecord {
+        header: HeaderRecord,
+        height: u32,
+        width: u32,
+        encoding: String,
+        is_bigendian: u8,
+        step: u32,
+        data: Vec<u8>,
+    }
+
+    #[derive(Default)]
+    struct ImageSlot {
+        present: bool,
+        image: ImageRecord,
+    }
+
+    struct PayloadRecord {
+        has_detection: bool,
+        detection: DetectionRecord,
+        visuals: [ImageSlot; 5],
+    }
+
+    struct ObjectNodeRecord {
+        id: i64,
+        class_name: String,
+        payload: PayloadRecord,
+    }
+
     unsafe extern "C++" {
         include!("semantic_scene_forests_rs/bridge.hpp");
         type NativeGraph;
@@ -65,7 +117,13 @@ pub(crate) mod bridge {
         #[cxx_name = "newGraph"]
         fn new_graph() -> UniquePtr<NativeGraph>;
         #[cxx_name = "addObjectNode"]
-        fn add_object_node(self: Pin<&mut NativeGraph>, name: &str) -> IdResult;
+        fn add_object_node(
+            self: Pin<&mut NativeGraph>,
+            name: &str,
+            payload: &PayloadRecord,
+        ) -> IdResult;
+        #[cxx_name = "objectNodes"]
+        fn object_nodes(self: &NativeGraph) -> Vec<ObjectNodeRecord>;
         #[cxx_name = "addConceptNode"]
         fn add_concept_node(self: Pin<&mut NativeGraph>, name: &str) -> IdResult;
         #[cxx_name = "hasNode"]

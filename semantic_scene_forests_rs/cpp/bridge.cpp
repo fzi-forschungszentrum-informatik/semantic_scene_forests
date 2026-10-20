@@ -60,6 +60,95 @@ HeaderRecord fromHeader(const std_msgs::msg::Header& header)
   return {.sec = header.stamp.sec, .nanosec = header.stamp.nanosec, .frame_id = header.frame_id};
 }
 
+geometry_msgs::msg::Pose toPose(const PoseRecord& record)
+{
+  geometry_msgs::msg::Pose pose;
+  pose.position.x    = record.position[0];
+  pose.position.y    = record.position[1];
+  pose.position.z    = record.position[2];
+  pose.orientation.x = record.orientation[0];
+  pose.orientation.y = record.orientation[1];
+  pose.orientation.z = record.orientation[2];
+  pose.orientation.w = record.orientation[3];
+  return pose;
+}
+
+PoseRecord fromPose(const geometry_msgs::msg::Pose& pose)
+{
+  return {.position    = {pose.position.x, pose.position.y, pose.position.z},
+          .orientation = {
+            pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w}};
+}
+
+vision_msgs::msg::Detection3D toDetection(const DetectionRecord& record)
+{
+  vision_msgs::msg::Detection3D detection;
+  detection.header      = toHeader(record.header);
+  detection.id          = std::string(record.id);
+  detection.bbox.center = toPose(record.center);
+  detection.bbox.size.x = record.size[0];
+  detection.bbox.size.y = record.size[1];
+  detection.bbox.size.z = record.size[2];
+  for (const auto& result : record.results)
+  {
+    vision_msgs::msg::ObjectHypothesisWithPose hypothesis;
+    hypothesis.hypothesis.class_id = std::string(result.class_id);
+    hypothesis.hypothesis.score    = result.score;
+    hypothesis.pose.pose           = toPose(result.pose);
+    hypothesis.pose.covariance     = result.covariance;
+    detection.results.push_back(std::move(hypothesis));
+  }
+  return detection;
+}
+
+DetectionRecord fromDetection(const vision_msgs::msg::Detection3D& detection)
+{
+  DetectionRecord record{
+    .header  = fromHeader(detection.header),
+    .results = {},
+    .center  = fromPose(detection.bbox.center),
+    .size    = {detection.bbox.size.x, detection.bbox.size.y, detection.bbox.size.z},
+    .id      = detection.id};
+  for (const auto& result : detection.results)
+  {
+    record.results.push_back({.class_id   = result.hypothesis.class_id,
+                              .score      = result.hypothesis.score,
+                              .pose       = fromPose(result.pose.pose),
+                              .covariance = result.pose.covariance});
+  }
+  return record;
+}
+
+sensor_msgs::msg::Image toImage(const ImageRecord& record)
+{
+  sensor_msgs::msg::Image image;
+  image.header       = toHeader(record.header);
+  image.height       = record.height;
+  image.width        = record.width;
+  image.encoding     = std::string(record.encoding);
+  image.is_bigendian = record.is_bigendian;
+  image.step         = record.step;
+  image.data.assign(record.data.begin(), record.data.end());
+  return image;
+}
+
+ImageRecord fromImage(const sensor_msgs::msg::Image& image)
+{
+  ImageRecord record{.header       = fromHeader(image.header),
+                     .height       = image.height,
+                     .width        = image.width,
+                     .encoding     = image.encoding,
+                     .is_bigendian = image.is_bigendian,
+                     .step         = image.step,
+                     .data         = {}};
+  record.data.reserve(image.data.size());
+  for (const auto BYTE : image.data)
+  {
+    record.data.push_back(BYTE);
+  }
+  return record;
+}
+
 semantic_scene_forests_msgs::msg::SceneGraph toMsg(const GraphRecord& record)
 {
   semantic_scene_forests_msgs::msg::SceneGraph message;
@@ -102,9 +191,48 @@ std::unique_ptr<NativeGraph> newGraph()
   return std::make_unique<NativeGraph>();
 }
 
-IdResult NativeGraph::addObjectNode(rust::Str name)
+IdResult NativeGraph::addObjectNode(rust::Str name, const PayloadRecord& payload)
 {
-  return nodeResult(m_graph->addObjectNode(std::string(name), nullptr, {}));
+  vision_msgs::msg::Detection3D::SharedPtr detection;
+  if (payload.has_detection)
+  {
+    detection = std::make_shared<vision_msgs::msg::Detection3D>(toDetection(payload.detection));
+  }
+  std::array<sensor_msgs::msg::Image::SharedPtr, 5> visuals{};
+  for (std::size_t i = 0; i < visuals.size(); ++i)
+  {
+    if (payload.visuals[i].present)
+    {
+      visuals[i] = std::make_shared<sensor_msgs::msg::Image>(toImage(payload.visuals[i].image));
+    }
+  }
+  return nodeResult(m_graph->addObjectNode(std::string(name), detection, visuals));
+}
+
+rust::Vec<ObjectNodeRecord> NativeGraph::objectNodes() const
+{
+  rust::Vec<ObjectNodeRecord> objects;
+  for (const auto& node : m_graph->getObjectNodes())
+  {
+    ObjectNodeRecord record{.id         = node.id,
+                            .class_name = node.class_name,
+                            .payload    = {.has_detection = static_cast<bool>(node.detection),
+                                           .detection     = {},
+                                           .visuals       = {}}};
+    if (node.detection)
+    {
+      record.payload.detection = fromDetection(*node.detection);
+    }
+    for (std::size_t i = 0; i < node.visuals.size(); ++i)
+    {
+      if (node.visuals[i])
+      {
+        record.payload.visuals[i] = {.present = true, .image = fromImage(*node.visuals[i])};
+      }
+    }
+    objects.push_back(std::move(record));
+  }
+  return objects;
 }
 
 IdResult NativeGraph::addConceptNode(rust::Str name)

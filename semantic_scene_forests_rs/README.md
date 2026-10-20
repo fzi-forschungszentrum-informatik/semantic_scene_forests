@@ -68,19 +68,28 @@ left the pre-existing workspace configuration unchanged.
 ## Graph operations
 
 ```rust
-use semantic_scene_forests_rs::SceneGraph;
+use semantic_scene_forests_rs::{Detection3D, Image, SceneGraph};
 
+let detection = Detection3D { id: "cup-1".into(), ..Default::default() };
+let mut image = Image::default();
+image.header.frame_id = "camera".into();
 let mut graph = SceneGraph::new();
-let cup = graph.add_object_node("cup")?;
+let cup = graph.add_object_node(
+    "cup", Some(&detection), [Some(&image), None, None, None, None],
+)?;
 let on = graph.add_concept_node("on")?;
 graph.add_edge(cup, on, "relation")?;
 assert_eq!(graph.outgoing_edges(cup)?[0].0, on);
 ```
 
 Graph operations use the C++ implementation and return `GraphError` with its
-original error kind and message. Queries return owned Rust values. Object creation
-currently accepts a class name only, without detection/image payloads. The graph
-does not implement `Clone`, `Send`, or `Sync` in this first version.
+original error kind and message. `add_object_node` accepts an optional generated
+`Detection3D` and exactly five optional `Image` references; class-only insertion
+uses `add_object_node("cup", None, [None; 5])`. Every detection field (including
+hypotheses, poses, covariance, and bounding box) and every image field is copied.
+`graph.object_nodes()` returns owned copies of objects and payloads, so modifying
+inputs or returned values does not mutate the stored graph. The graph does not
+implement the `Clone`, `Send`, or `Sync` traits in this first version.
 
 ## ROS message conversion
 

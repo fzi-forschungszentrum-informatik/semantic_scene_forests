@@ -23,7 +23,7 @@ fn inspect_message(message: &SceneGraphMsg, cup: i64, on: i64) -> Result<(), Box
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut graph = SceneGraph::new();
-    let cup = graph.add_object_node("cup")?;
+    let cup = graph.add_object_node("cup", None, [None; 5])?;
     let on = graph.add_concept_node("on")?;
     graph.add_edge(cup, on, "relation")?;
     let mut message = graph.to_msg();
