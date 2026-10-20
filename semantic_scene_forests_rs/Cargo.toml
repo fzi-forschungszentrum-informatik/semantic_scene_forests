@@ -2,9 +2,12 @@
 name = "semantic_scene_forests_rs"
 version = "1.0.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.89"
 license = "BSD-3-Clause"
 description = "Rust bindings for the semantic scene graph C++ library"
+
+[package.metadata.ros]
+install_to_share = ["cpp", "include"]
 
 [dependencies]
 cxx = "=1.0.205"

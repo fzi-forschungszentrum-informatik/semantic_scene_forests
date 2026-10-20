@@ -6,12 +6,14 @@ proof of concept, not yet equivalent to the Python API.
 ## Prerequisites
 
 Source a ROS 2 Lyrical workspace containing `semantic_scene_forests` and generated
-Rust messages (`rosidl_generator_rs`). Rust 1.85 or newer, C++23, CMake, and the
+Rust messages (`rosidl_generator_rs`). Rust 1.89 or newer, C++23, CMake, and the
 `colcon-cargo`/`colcon-ros-cargo` plugins are required.
 
 The verified current releases are `rclrs 0.8.0`, `ros-env 0.3.0`, and
 `rosidl_runtime_rs 0.7.0`. The lockfile records the tested versions. `rclrs` is a
 development dependency only: graph operations do not create a ROS node or executor.
+The current CXX release requires Rust 1.88; the locked rclrs development dependency
+tree raises the minimum for the complete package and examples to Rust 1.89.
 
 `ros-env` includes generated messages from the sourced environment. It lets the
 installed message source use runtime 0.7 even when its generated Cargo manifest
@@ -24,10 +26,44 @@ and image conversion; C/Rust Image and byte-sequence sizes matched on Lyrical.
 cargo test --manifest-path /path/to/semantic_scene_forests_rs/Cargo.toml
 ```
 
+## Build and ROS example
+
+From a sourced ROS workspace:
+
+```bash
+colcon build --packages-up-to semantic_scene_forests_rs
+source install/setup.bash
+cargo run --manifest-path /path/to/semantic_scene_forests_rs/Cargo.toml \
+  --example scene_graph_roundtrip
+```
+
+The example lives in this package's `examples/` directory; it is not installed as
+a `ros2 run` executable. It repeatedly publishes on `/scene_graph_rust_demo`,
+reconstructs and modifies the received graph in an rclrs callback, and exits after
+10 seconds. It fails if no valid message arrived or an operation failed.
+
+While it runs, a non-Rust observer can inspect the same message:
+
+```bash
+ros2 topic echo --once /scene_graph_rust_demo semantic_scene_forests_msgs/msg/SceneGraph
+```
+
+Both processes need the same middleware/domain. The local verification used
+temporary `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp` and `ROS_DOMAIN_ID=183` settings;
+Zenoh users need their router running. No saved middleware settings are changed.
+
+The native adapter is built with CMake against the exported C++ target. Its
+sources/headers are installed alongside the Rust sources so downstream Cargo
+crates can also build against the installed package.
+
 Older colcon workspaces may contain a stale `.cargo/config.toml` with patches for
 removed message packages. Cargo reads configuration from the working directory's
 ancestors, even with `--manifest-path`. Run the command from outside that workspace
 with the absolute manifest path rather than editing unrelated configuration.
+Colcon runs Cargo from the package's source directory, so that case additionally
+requires regenerating the stale workspace configuration or building from a clean
+source checkout. Verification here used a clean temporary copy for colcon and
+left the pre-existing workspace configuration unchanged.
 
 ## Graph operations
 

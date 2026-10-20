@@ -1,0 +1,63 @@
+//! Publish, receive, and mutate a C++-backed graph in an rclrs node.
+use rclrs::{Context, CreateBasicExecutor, RclrsErrorFilter, SpinOptions};
+use semantic_scene_forests_rs::{SceneGraph, SceneGraphMsg};
+use std::{
+    error::Error,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+fn inspect_message(message: &SceneGraphMsg, cup: i64, on: i64) -> Result<(), Box<dyn Error>> {
+    let mut graph = SceneGraph::from_msg(message)?;
+    let edges = graph.outgoing_edges(cup)?;
+    if edges.len() != 1 || edges[0].0 != on || edges[0].1.label != "relation" {
+        return Err("received graph does not contain the expected cup relation".into());
+    }
+    let table = graph.add_concept_node("table")?;
+    graph.add_edge(on, table, "target")?;
+    if graph.outgoing_edges(on)?[0].0 != table {
+        return Err("received graph could not be modified".into());
+    }
+    Ok(())
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let mut graph = SceneGraph::new();
+    let cup = graph.add_object_node("cup")?;
+    let on = graph.add_concept_node("on")?;
+    graph.add_edge(cup, on, "relation")?;
+    let mut message = graph.to_msg();
+    message.header.frame_id = "rust_demo".into();
+
+    let mut executor = Context::default_from_env()?.create_basic_executor();
+    let node = executor.create_node("scene_graph_rust_roundtrip")?;
+    let publisher = node.create_publisher::<SceneGraphMsg>("/scene_graph_rust_demo")?;
+    let outcome = Arc::new(Mutex::new(None::<Result<(), String>>));
+    let received = outcome.clone();
+    let _subscription =
+        node.create_subscription("/scene_graph_rust_demo", move |message: SceneGraphMsg| {
+            let result = inspect_message(&message, cup, on).map_err(|error| error.to_string());
+            received.lock().unwrap().get_or_insert(result);
+        })?;
+    let published = outcome.clone();
+    let _timer = node.create_timer_repeating(Duration::from_millis(250), move || {
+        if let Err(error) = publisher.publish(&message) {
+            published
+                .lock()
+                .unwrap()
+                .get_or_insert(Err(error.to_string()));
+        }
+    })?;
+
+    executor
+        .spin(SpinOptions::default().timeout(Duration::from_secs(10)))
+        .timeout_ok()
+        .first_error()?;
+    outcome
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or("no SG message received within 10 seconds")??;
+    println!("Published, received, queried, and modified the C++ scene graph successfully.");
+    Ok(())
+}
