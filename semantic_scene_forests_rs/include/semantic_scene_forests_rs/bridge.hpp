@@ -25,6 +25,7 @@ public:
   ~NativeGraph();
   IdResult addObjectNode(rust::Str name, const PayloadRecord& payload);
   rust::Vec<ObjectNodeRecord> objectNodes() const;
+  Status copyFrom(const NativeGraph& other);
   IdResult addConceptNode(rust::Str name);
   bool hasNode(int64_t id) const;
   Status addEdge(int64_t source, int64_t target, rust::Str label);

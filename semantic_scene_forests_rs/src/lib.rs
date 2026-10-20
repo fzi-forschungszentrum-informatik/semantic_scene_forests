@@ -90,6 +90,17 @@ impl SceneGraph {
             .collect()
     }
 
+    /// Deep-copy the graph and all payloads using the fallible C++ snapshot operation.
+    pub fn try_clone(&self) -> Result<Self, GraphError> {
+        let mut snapshot = Self::new();
+        snapshot
+            .inner
+            .pin_mut()
+            .copy_from(&self.inner)
+            .into_result()?;
+        Ok(snapshot)
+    }
+
     pub fn add_concept_node(&mut self, name: &str) -> Result<i64, GraphError> {
         let result = self.inner.pin_mut().add_concept_node(name);
         result.status.into_result()?;

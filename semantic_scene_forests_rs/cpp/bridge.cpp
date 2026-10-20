@@ -235,6 +235,17 @@ rust::Vec<ObjectNodeRecord> NativeGraph::objectNodes() const
   return objects;
 }
 
+Status NativeGraph::copyFrom(const NativeGraph& other)
+{
+  auto result = other.m_graph->clone();
+  if (!result)
+  {
+    return failure(result.error());
+  }
+  m_graph = std::move(*result);
+  return success();
+}
+
 IdResult NativeGraph::addConceptNode(rust::Str name)
 {
   return nodeResult(m_graph->addConceptNode(std::string(name)));

@@ -124,6 +124,8 @@ pub(crate) mod bridge {
         ) -> IdResult;
         #[cxx_name = "objectNodes"]
         fn object_nodes(self: &NativeGraph) -> Vec<ObjectNodeRecord>;
+        #[cxx_name = "copyFrom"]
+        fn copy_from(self: Pin<&mut NativeGraph>, other: &NativeGraph) -> Status;
         #[cxx_name = "addConceptNode"]
         fn add_concept_node(self: Pin<&mut NativeGraph>, name: &str) -> IdResult;
         #[cxx_name = "hasNode"]

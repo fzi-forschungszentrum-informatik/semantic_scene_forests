@@ -184,3 +184,55 @@ fn payload_roundtrip_owns_complete_ros_messages() {
     assert!(plain.detection.is_none());
     assert_eq!(plain.visuals, [None, None, None, None, None]);
 }
+
+#[test]
+fn python_equivalent_snapshot_preserves_payloads_without_wire_serialization() {
+    use semantic_scene_forests_rs::{Detection3D, Image};
+    let detection = Detection3D {
+        id: "cup-1".into(),
+        ..Default::default()
+    };
+    let mut image = Image::default();
+    image.header.frame_id = "camera".into();
+    image.data = vec![42];
+    let mut graph = SceneGraph::new();
+    let cup = graph
+        .add_object_node(
+            "cup",
+            Some(&detection),
+            [Some(&image), None, None, None, None],
+        )
+        .unwrap();
+    let on = graph.add_concept_node("on").unwrap();
+    graph.add_edge(cup, on, "relation").unwrap();
+    assert_eq!(
+        graph.add_edge(on, cup, "invalid").unwrap_err().kind,
+        GraphErrorKind::InvalidEdge
+    );
+
+    let snapshot = graph.try_clone().unwrap();
+    assert_eq!(snapshot.object_nodes(), graph.object_nodes());
+    assert_eq!(
+        snapshot.outgoing_edges(cup).unwrap(),
+        graph.outgoing_edges(cup).unwrap()
+    );
+    let message = graph.to_msg();
+    let loaded = SceneGraph::from_msg(&message).unwrap();
+    assert_eq!(
+        loaded.outgoing_edges(cup).unwrap(),
+        graph.outgoing_edges(cup).unwrap()
+    );
+    let loaded_objects = loaded.object_nodes();
+    assert!(loaded_objects[0].class_name.is_empty());
+    assert!(loaded_objects[0].detection.as_ref().unwrap().id.is_empty());
+    assert!(loaded_objects[0].visuals.iter().all(Option::is_none));
+
+    let extra = graph.add_concept_node("original only").unwrap();
+    assert!(!snapshot.has_node(extra));
+    graph.update_from_msg(&SceneGraphMsg::default()).unwrap();
+    assert!(!graph.has_node(cup));
+    let retained = snapshot.object_nodes();
+    assert_eq!(retained[0].detection.as_ref(), Some(&detection));
+    assert_eq!(retained[0].visuals[0].as_ref(), Some(&image));
+    assert_eq!(snapshot.outgoing_edges(cup).unwrap()[0].0, on);
+}

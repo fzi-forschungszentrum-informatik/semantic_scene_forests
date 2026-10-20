@@ -1,7 +1,8 @@
 # semantic_scene_forests_rs
 
-Rust bindings for the existing C++ scene graph library. This package is an initial
-proof of concept, not yet equivalent to the Python API.
+Rust bindings for the existing C++ scene graph library, with typed object payloads,
+queries, error handling, snapshots, and ROS message conversion. Additional Python
+graph-editing methods are not yet wrapped.
 
 ## Prerequisites
 
@@ -80,6 +81,26 @@ let cup = graph.add_object_node(
 let on = graph.add_concept_node("on")?;
 graph.add_edge(cup, on, "relation")?;
 assert_eq!(graph.outgoing_edges(cup)?[0].0, on);
+
+for (target_id, edge) in graph.outgoing_edges(cup)? {
+    println!("{target_id} {}", edge.label);
+}
+
+if let Err(error) = graph.add_edge(on, cup, "invalid") {
+    println!("{:?}: {error}", error.kind);
+}
+
+let snapshot = graph.try_clone()?;
+let message = graph.to_msg();
+let loaded = SceneGraph::from_msg(&message)?;
+```
+
+The complete, runnable counterpart of the Python example is in
+[`examples/python_equivalent.rs`](examples/python_equivalent.rs):
+
+```bash
+cargo run --manifest-path /path/to/semantic_scene_forests_rs/Cargo.toml \
+  --example python_equivalent
 ```
 
 Graph operations use the C++ implementation and return `GraphError` with its
@@ -90,6 +111,9 @@ hypotheses, poses, covariance, and bounding box) and every image field is copied
 `graph.object_nodes()` returns owned copies of objects and payloads, so modifying
 inputs or returned values does not mutate the stored graph. The graph does not
 implement the `Clone`, `Send`, or `Sync` traits in this first version.
+Use `try_clone()` for a deep snapshot: it preserves class names, detections, and
+images by calling C++ `clone()`. It returns `Result` because the underlying C++
+operation can fail; it does **not** copy through the lossy SG wire format.
 
 ## ROS message conversion
 
