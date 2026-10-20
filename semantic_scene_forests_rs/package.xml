@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>semantic_scene_forests_rs</name>
+  <version>1.0.0</version>
+  <description>Rust bindings for the semantic scene graph C++ library.</description>
+  <maintainer email="oberacker@fzi.de">David Oberacker</maintainer>
+  <license>BSD-3-Clause</license>
+  <buildtool_depend>ament_cargo</buildtool_depend>
+  <depend>semantic_scene_forests</depend>
+  <depend>semantic_scene_forests_msgs</depend>
+  <export>
+    <build_type>ament_cargo</build_type>
+  </export>
+</package>
