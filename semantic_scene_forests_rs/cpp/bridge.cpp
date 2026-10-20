@@ -45,6 +45,50 @@ IdResult nodeResult(const std::expected<int64_t, SceneGraphError>& result)
   return result ? IdResult{.status = success(), .id = *result}
                 : IdResult{.status = failure(result.error()), .id = 0};
 }
+
+std_msgs::msg::Header toHeader(const HeaderRecord& record)
+{
+  std_msgs::msg::Header header;
+  header.stamp.sec     = record.sec;
+  header.stamp.nanosec = record.nanosec;
+  header.frame_id      = std::string(record.frame_id);
+  return header;
+}
+
+HeaderRecord fromHeader(const std_msgs::msg::Header& header)
+{
+  return {.sec = header.stamp.sec, .nanosec = header.stamp.nanosec, .frame_id = header.frame_id};
+}
+
+semantic_scene_forests_msgs::msg::SceneGraph toMsg(const GraphRecord& record)
+{
+  semantic_scene_forests_msgs::msg::SceneGraph message;
+  message.header = toHeader(record.header);
+  for (const auto& node : record.objects)
+  {
+    semantic_scene_forests_msgs::msg::ObjectNode object;
+    object.header = toHeader(node.header);
+    object.id     = node.id;
+    message.object_nodes.push_back(std::move(object));
+  }
+  for (const auto& node : record.concepts)
+  {
+    semantic_scene_forests_msgs::msg::ConceptNode concept_node;
+    concept_node.header     = toHeader(node.header);
+    concept_node.id         = node.id;
+    concept_node.class_name = std::string(node.class_name);
+    message.concept_nodes.push_back(std::move(concept_node));
+  }
+  for (const auto& edge : record.edges)
+  {
+    semantic_scene_forests_msgs::msg::Edge edge_message;
+    edge_message.source_id = edge.source;
+    edge_message.target_id = edge.target;
+    edge_message.label     = std::string(edge.label);
+    message.edges.push_back(std::move(edge_message));
+  }
+  return message;
+}
 } // namespace
 
 NativeGraph::NativeGraph()
@@ -92,5 +136,44 @@ EdgeList NativeGraph::outgoingEdges(int64_t id) const
     edges.edges.push_back({.source = id, .target = target, .label = edge.label});
   }
   return edges;
+}
+
+Status NativeGraph::loadMessage(const GraphRecord& message)
+{
+  auto result = fzi::semantic_scene_forests::SceneGraph::fromMsg(toMsg(message));
+  if (!result)
+  {
+    return failure(result.error());
+  }
+  m_graph = std::move(*result);
+  return success();
+}
+
+GraphRecord NativeGraph::toMessage()
+{
+  const auto MESSAGE = m_graph->toMsg();
+  GraphRecord record{
+    .header = fromHeader(MESSAGE->header), .objects = {}, .concepts = {}, .edges = {}};
+  for (const auto& node : MESSAGE->object_nodes)
+  {
+    record.objects.push_back({.header = fromHeader(node.header), .id = node.id});
+  }
+  for (const auto& node : MESSAGE->concept_nodes)
+  {
+    record.concepts.push_back(
+      {.header = fromHeader(node.header), .id = node.id, .class_name = node.class_name});
+  }
+  for (const auto& edge : MESSAGE->edges)
+  {
+    record.edges.push_back(
+      {.source = edge.source_id, .target = edge.target_id, .label = edge.label});
+  }
+  return record;
+}
+
+Status NativeGraph::updateFromMessage(const GraphRecord& message)
+{
+  const auto RESULT = m_graph->updateSceneGraphFromMsg(toMsg(message));
+  return RESULT ? success() : failure(RESULT.error());
 }
 } // namespace ssf_rs

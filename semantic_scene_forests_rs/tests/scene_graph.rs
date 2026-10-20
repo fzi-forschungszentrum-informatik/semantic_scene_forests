@@ -55,3 +55,55 @@ fn cycle_error_preserves_graph() {
     assert_eq!(graph.outgoing_edges(first).unwrap(), before);
     assert!(graph.outgoing_edges(second).unwrap().is_empty());
 }
+
+#[test]
+fn message_roundtrip() {
+    let mut empty = SceneGraph::new();
+    let mut loaded_empty = SceneGraph::from_msg(&empty.to_msg()).unwrap();
+    assert_eq!(loaded_empty.to_msg(), SceneGraphMsg::default());
+
+    let mut graph = SceneGraph::new();
+    let cup = graph.add_object_node("cup").unwrap();
+    let on = graph.add_concept_node("on").unwrap();
+    graph.add_edge(cup, on, "relation").unwrap();
+    let message = graph.to_msg();
+    assert_eq!(message.object_nodes[0].id, cup);
+    assert_eq!(message.concept_nodes[0].id, on);
+    assert_eq!(message.concept_nodes[0].class_name, "on");
+    assert_eq!(message.edges[0].source_id, cup);
+    assert_eq!(message.edges[0].target_id, on);
+    assert_eq!(message.edges[0].label, "relation");
+    let mut loaded = SceneGraph::from_msg(&message).unwrap();
+    assert!(loaded.has_node(cup));
+    assert_eq!(
+        loaded.outgoing_edges(cup).unwrap(),
+        graph.outgoing_edges(cup).unwrap()
+    );
+    assert_eq!(loaded.to_msg(), message);
+}
+
+#[test]
+fn update_keeps_earlier_success_on_error() {
+    use ros_env::semantic_scene_forests_msgs::msg::{ConceptNode, Edge as EdgeMsg};
+    let mut graph = SceneGraph::new();
+    let mut message = SceneGraphMsg::default();
+    message.concept_nodes.push(ConceptNode {
+        id: -42,
+        class_name: "new concept".into(),
+        ..Default::default()
+    });
+    message.edges.push(EdgeMsg {
+        source_id: -42,
+        target_id: -999,
+        label: "missing".into(),
+    });
+    let error = graph.update_from_msg(&message).unwrap_err();
+    assert_eq!(error.kind, GraphErrorKind::NodeDoesNotExist);
+    assert!(graph.has_node(-42));
+    assert!(graph.outgoing_edges(-42).unwrap().is_empty());
+
+    message.edges.clear();
+    graph.update_from_msg(&message).unwrap();
+    graph.update_from_msg(&SceneGraphMsg::default()).unwrap();
+    assert!(!graph.has_node(-42));
+}

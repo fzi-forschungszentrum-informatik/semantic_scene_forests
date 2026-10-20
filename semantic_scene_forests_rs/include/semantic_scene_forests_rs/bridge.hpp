@@ -14,6 +14,7 @@ namespace ssf_rs {
 struct Status;
 struct IdResult;
 struct EdgeList;
+struct GraphRecord;
 
 class NativeGraph
 {
@@ -25,6 +26,9 @@ public:
   bool hasNode(int64_t id) const;
   Status addEdge(int64_t source, int64_t target, rust::Str label);
   EdgeList outgoingEdges(int64_t id) const;
+  Status loadMessage(const GraphRecord& message);
+  GraphRecord toMessage();
+  Status updateFromMessage(const GraphRecord& message);
 
 private:
   std::unique_ptr<fzi::semantic_scene_forests::SceneGraph> m_graph;

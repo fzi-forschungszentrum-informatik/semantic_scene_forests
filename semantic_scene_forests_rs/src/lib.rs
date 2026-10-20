@@ -90,4 +90,28 @@ impl SceneGraph {
             .map(|e| (e.target, Edge { label: e.label }))
             .collect())
     }
+
+    /// Reconstruct a graph from the existing ID-only object wire format.
+    pub fn from_msg(message: &SceneGraphMsg) -> Result<Self, GraphError> {
+        let mut graph = Self::new();
+        graph
+            .inner
+            .pin_mut()
+            .load_message(&message.into())
+            .into_result()?;
+        Ok(graph)
+    }
+
+    /// Export the graph; object payloads and message headers are not retained.
+    pub fn to_msg(&mut self) -> SceneGraphMsg {
+        self.inner.pin_mut().to_message().into()
+    }
+
+    /// Update in place. Successful earlier changes remain if a later operation fails.
+    pub fn update_from_msg(&mut self, message: &SceneGraphMsg) -> Result<(), GraphError> {
+        self.inner
+            .pin_mut()
+            .update_from_message(&message.into())
+            .into_result()
+    }
 }

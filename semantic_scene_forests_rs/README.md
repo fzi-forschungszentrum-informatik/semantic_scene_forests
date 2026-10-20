@@ -39,10 +39,21 @@ let cup = graph.add_object_node("cup")?;
 let on = graph.add_concept_node("on")?;
 graph.add_edge(cup, on, "relation")?;
 assert_eq!(graph.outgoing_edges(cup)?[0].0, on);
-# Ok::<(), semantic_scene_forests_rs::GraphError>(())
 ```
 
 Graph operations use the C++ implementation and return `GraphError` with its
 original error kind and message. Queries return owned Rust values. Object creation
 currently accepts a class name only, without detection/image payloads. The graph
 does not implement `Clone`, `Send`, or `Sync` in this first version.
+
+## ROS message conversion
+
+`SceneGraph::from_msg(&message)`, `graph.to_msg()`, and
+`graph.update_from_msg(&message)` use generated Rust SG messages and delegate to
+the corresponding C++ methods. Object graph messages contain IDs only: class
+names, detections, and image visuals do not survive a message round trip. The
+C++ graph also does not retain message headers.
+
+Updates edit the live graph in place. On an error, successful earlier changes
+remain; this is not an all-or-nothing transaction. Nodes absent from a successful
+update message are removed. Sending an empty message clears the graph.
