@@ -1,6 +1,12 @@
 object_tracker:
   ros__parameters:
     world_frame: "map"
+    camera_names: ["default"]
+    cameras:
+      default:
+        detections_2d_topic: "detections_2d"
+        detections_3d_topic: "detections_3d"
+        image_topic: "camera/image"
     max_trackable_objects: 1000
     gate_threshold_strict: 3.0
     gate_threshold_confirmed: 10.0

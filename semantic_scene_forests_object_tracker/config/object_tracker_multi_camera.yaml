@@ -1,0 +1,24 @@
+object_tracker:
+  ros__parameters:
+    world_frame: "map"
+    camera_names: ["front", "rear"]
+    cameras:
+      front:
+        detections_2d_topic: "/front/vision/detections_2d"
+        detections_3d_topic: "/front/vision/detections_3d"
+        image_topic: "/front/camera/image"
+      rear:
+        detections_2d_topic: "/rear/vision/detections_2d"
+        detections_3d_topic: "/rear/vision/detections_3d"
+        image_topic: "/rear/camera/image"
+    max_trackable_objects: 1000
+    gate_threshold_strict: 3.0
+    gate_threshold_confirmed: 10.0
+    confidence_threshold: 0.8
+    measurement_noise_std: 0.4
+    process_noise_std: 0.05
+    confirmation_threshold: 3
+    unconfirmed_track_timeout: 30.0
+    merge_iou_threshold: 0.6
+    crop_padding: 10
+    max_crops_per_object: 5
