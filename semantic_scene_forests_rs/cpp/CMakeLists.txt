@@ -14,11 +14,16 @@ find_package(semantic_scene_forests REQUIRED)
 
 add_library(ssf_rs_adapter STATIC bridge.cpp)
 target_compile_features(ssf_rs_adapter PRIVATE cxx_std_23)
-set_target_properties(ssf_rs_adapter PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_include_directories(ssf_rs_adapter PRIVATE ../include "${CXXBRIDGE_INCLUDE_DIR}")
-target_link_libraries(ssf_rs_adapter PRIVATE semantic_scene_forests::semantic_scene_forests)
+set_target_properties(ssf_rs_adapter
+  PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(ssf_rs_adapter
+  PRIVATE ../include "${CXXBRIDGE_INCLUDE_DIR}")
+target_link_libraries(ssf_rs_adapter
+  PRIVATE semantic_scene_forests::semantic_scene_forests)
 
 file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/cargo-links.txt" CONTENT
-  "cargo:rustc-link-search=native=$<TARGET_FILE_DIR:semantic_scene_forests::semantic_scene_forests>\ncargo:rustc-link-lib=dylib=semantic_scene_forests\n")
+  "cargo:rustc-link-search=native=
+  $<TARGET_FILE_DIR:semantic_scene_forests::semantic_scene_forests>\n
+  cargo:rustc-link-lib=dylib=semantic_scene_forests\n")
 install(TARGETS ssf_rs_adapter ARCHIVE DESTINATION lib)
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/cargo-links.txt" DESTINATION .)
