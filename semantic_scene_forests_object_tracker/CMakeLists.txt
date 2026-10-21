@@ -80,10 +80,17 @@ install(DIRECTORY launch config
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(semantic_scene_forests_object_manager REQUIRED)
   ament_add_gtest(test_bbox_transform test/test_bbox_transform.cpp)
   target_link_libraries(test_bbox_transform object_tracker_component)
   target_include_directories(test_bbox_transform PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+  ament_add_gtest(test_multi_camera_tracker test/test_multi_camera_tracker.cpp)
+  target_link_libraries(
+    test_multi_camera_tracker
+    object_tracker_component
+    semantic_scene_forests_object_manager::object_manager_component)
 endif()
 
 ament_package()

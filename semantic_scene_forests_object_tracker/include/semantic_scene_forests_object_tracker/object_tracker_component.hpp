@@ -120,7 +120,28 @@ private:
                                                     sensor_msgs::msg::Image>;
   using SynchronizerVision = message_filters::Synchronizer<SyncPolicyVision>;
 
-  void syncedCallbackVision(const vision_msgs::msg::Detection2DArray::ConstSharedPtr& det2d_msg,
+  struct CameraInput
+  {
+    CameraInput(ObjectTrackerComponent& owner, std::string name);
+
+    void onSynchronized(const vision_msgs::msg::Detection2DArray::ConstSharedPtr& det2d_msg,
+                        const vision_msgs::msg::Detection3DArray::ConstSharedPtr& det3d_msg,
+                        const sensor_msgs::msg::Image::ConstSharedPtr& img_msg);
+
+    ObjectTrackerComponent& owner;
+    std::string name;
+    message_filters::Subscriber<vision_msgs::msg::Detection2DArray> det2d_sub;
+    message_filters::Subscriber<vision_msgs::msg::Detection3DArray> det3d_sub;
+    message_filters::Subscriber<sensor_msgs::msg::Image> img_sub;
+    std::optional<double> last_update_time;
+    size_t rejected_timestamps{0};
+    semantic_scene_forests_utils::ErrorCounter tf_errors;
+    std::unique_ptr<diagnostic_updater::HeaderlessTopicDiagnostic> frequency;
+    std::unique_ptr<SynchronizerVision> synchronizer;
+  };
+
+  void syncedCallbackVision(CameraInput& camera,
+                            const vision_msgs::msg::Detection2DArray::ConstSharedPtr& det2d_msg,
                             const vision_msgs::msg::Detection3DArray::ConstSharedPtr& det3d_msg,
                             const sensor_msgs::msg::Image::ConstSharedPtr& img_msg);
 
@@ -134,12 +155,6 @@ private:
   cropImagePatch(const cv::Mat& image, const vision_msgs::msg::BoundingBox2D& bbox, int padding);
 
   void onHealthDiagnostic(diagnostic_updater::DiagnosticStatusWrapper& stat);
-
-  message_filters::Subscriber<vision_msgs::msg::Detection2DArray> m_det2d_sub;
-  message_filters::Subscriber<vision_msgs::msg::Detection3DArray> m_det3d_sub;
-  message_filters::Subscriber<sensor_msgs::msg::Image> m_img_sub;
-
-  std::shared_ptr<SynchronizerVision> m_sync_vision;
 
   rclcpp::Publisher<semantic_scene_forests_object_msgs::msg::ObjectCandidate>::SharedPtr
     m_candidates_pub;
@@ -161,9 +176,9 @@ private:
   diagnostic_updater::Updater m_diagnostic_updater;
   double m_min_freq{0.5};
   double m_max_freq{1000.0};
-  std::unique_ptr<diagnostic_updater::HeaderlessTopicDiagnostic> m_vision_freq;
-  semantic_scene_forests_utils::ErrorCounter m_tf_errors;
   semantic_scene_forests_utils::ErrorCounter m_crop_errors;
+  // Inputs and their diagnostics must be destroyed before the updater they reference.
+  std::vector<std::unique_ptr<CameraInput>> m_cameras;
 };
 
 } // namespace semantic_scene_forests_object_tracker

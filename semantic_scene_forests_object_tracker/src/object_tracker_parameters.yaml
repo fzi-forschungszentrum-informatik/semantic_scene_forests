@@ -1,4 +1,35 @@
 object_tracker:
+  camera_names:
+    type: string_array
+    default_value: ["default"]
+    description: "Named camera pipelines; each camera has independent synchronized inputs."
+    read_only: true
+    validation:
+      not_empty<>: []
+      unique<>: []
+  cameras:
+    __map_camera_names:
+      detections_2d_topic:
+        type: string
+        default_value: "detections_2d"
+        description: "2D detections for this camera."
+        read_only: true
+        validation:
+          not_empty<>: []
+      detections_3d_topic:
+        type: string
+        default_value: "detections_3d"
+        description: "3D detections for this camera."
+        read_only: true
+        validation:
+          not_empty<>: []
+      image_topic:
+        type: string
+        default_value: "camera/image"
+        description: "Image synchronized with this camera's detections."
+        read_only: true
+        validation:
+          not_empty<>: []
   world_frame:
     type: string
     default_value: "map"
