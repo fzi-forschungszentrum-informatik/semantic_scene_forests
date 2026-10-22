@@ -28,6 +28,7 @@ ROS 2 monorepo for building, querying, and visualizing semantic scene graphs fro
 |---|---|---|
 | `semantic_scene_forests` | In-memory scene graph library | C++ headers and shared library |
 | `semantic_scene_forests_py` | Python bindings for the in-memory graph | `import semantic_scene_forests` |
+| [`semantic_scene_forests_rs`](semantic_scene_forests_rs/README.md) | Initial Rust bindings for the same C++ graph | Cargo library and in-package rclrs example |
 | `semantic_scene_forests_generation` | Builds semantic graphs from managed objects | `ManagedObjectArray` in, `SceneGraph` out |
 | `semantic_scene_forests_launch` | Starts the integrated stack | `scene_graph_combined.launch.xml` |
 | `semantic_scene_forests_msgs` | Graph message and action definitions | `SceneGraph`, `Edge`, `UpdateSceneGraph` |

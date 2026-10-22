@@ -38,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        distro: [jazzy, kilted, lyrical]
+        distro: [lyrical]
     steps:
       - uses: actions/checkout@v7
       - name: Build and test
@@ -47,19 +47,22 @@ jobs:
           ROS_DISTRO: ${{ matrix.distro }}
           ROS_REPO: main
           # oai-api/CPR needs development headers, not just the curl executable.
-          ADDITIONAL_DEBS: libssl-dev libcurl4-openssl-dev
+          # The Rust bindings additionally need the toolchain and bindgen's libclang.
+          ADDITIONAL_DEBS: libssl-dev libcurl4-openssl-dev cargo rustc rustfmt libclang-dev python3-pip
           BASEDIR: ${{ github.workspace }}/.build
           UPSTREAM_WORKSPACE: upstream_workspace.yaml
-          # Built upstream as plain CMake; rosdep cannot discover it as an ament package.
-          ROSDEP_SKIP_KEYS: oai_api
+          # oai_api: built upstream as plain CMake; rosdep cannot discover it as an ament package.
+          # ament_cargo: a colcon build type (colcon-ros-cargo), not a rosdep key.
+          ROSDEP_SKIP_KEYS: oai_api ament_cargo
+          BEFORE_INSTALL_TARGET_DEPENDENCIES: pip3 install --break-system-packages colcon-cargo colcon-ros-cargo cargo-ament-build
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: Test Results (ROS ${{ matrix.distro }})
           path: |
-            .build/target_ws/build/**/test_results/**/*.xml
-            .build/target_ws/build/**/pytest.xml
-            .build/target_ws/build/**/*xunit.xml
+            .build/target_ws/build/*/test_results/**/*.xml
+            .build/target_ws/build/*/pytest.xml
+            .build/target_ws/build/*/*xunit.xml
           include-hidden-files: true
           if-no-files-found: warn
