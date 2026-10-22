@@ -1,3 +1,4 @@
+
 // Copyright (c) 2026 FZI Forschungszentrum Informatik
 //
 // Redistribution and use in source and binary forms, with or without
@@ -9,6 +10,10 @@
 //    * Redistributions in binary form must reproduce the above copyright
 //      notice, this list of conditions and the following disclaimer in the
 //      documentation and/or other materials provided with the distribution.
+//
+//    * Neither the name of the copyright holder nor the names of its
+//      contributors may be used to endorse or promote products derived from
+//      this software without specific prior written permission.
 //
 // THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
 // AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
@@ -319,10 +324,10 @@ public:
         const bool FRONT_READY = m_front->detections_2d->get_subscription_count() > 0 &&
                                  m_front->detections_3d->get_subscription_count() > 0 &&
                                  m_front->image->get_subscription_count() > 0;
-        const bool REAR_READY = !m_rear || (m_rear->detections_2d->get_subscription_count() > 0 &&
-                                            m_rear->detections_3d->get_subscription_count() > 0 &&
-                                            m_rear->image->get_subscription_count() > 0);
-        const bool TF_READY   = m_tf_buffer->canTransform(
+        const bool REAR_READY  = !m_rear || (m_rear->detections_2d->get_subscription_count() > 0 &&
+                                             m_rear->detections_3d->get_subscription_count() > 0 &&
+                                             m_rear->image->get_subscription_count() > 0);
+        const bool TF_READY    = m_tf_buffer->canTransform(
           "map", m_front->frame_id, tf2::TimePointZero, tf2::durationFromSec(0.0));
         const bool REAR_TF_READY =
           !m_rear || m_tf_buffer->canTransform(
