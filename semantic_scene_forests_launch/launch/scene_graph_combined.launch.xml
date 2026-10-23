@@ -41,6 +41,8 @@
   <!-- Camera image consumed by the object tracker. -->
   <arg name="camera_image_topic" default="camera/image"
        description="Topic name for the camera image input."/>
+  <arg name="object_candidate_snapshots_topic" default="object_candidate_snapshots"
+       description="Topic name for authoritative tracker snapshots shared with the manager."/>
 
   <!-- Detections topics feeding the tracker. Only settable when the converter
        is NOT used; with the converter enabled these are produced internally on
@@ -63,7 +65,7 @@
       <remap from="detections_2d" to="$(var detections_2d_topic)"/>
       <remap from="detections_3d" to="$(var detections_3d_topic)"/>
       <remap from="camera/image" to="$(var camera_image_topic)"/>
-      <remap from="object_candidates" to="object_candidates"/>
+      <remap from="object_candidate_snapshots" to="$(var object_candidate_snapshots_topic)"/>
     </composable_node>
 
     <!-- Object Manager Node -->
@@ -73,7 +75,7 @@
       <param from="$(var config_dir)/object_manager.yaml"/>
       <param name="frame_id" value="$(var scene_graph_frame)"/>
       <param name="use_sim_time" value="$(var use_sim_time)"/>
-      <remap from="object_candidates" to="object_candidates"/>
+      <remap from="object_candidate_snapshots" to="$(var object_candidate_snapshots_topic)"/>
       <remap from="managed_objects" to="managed_objects"/>
     </composable_node>
 

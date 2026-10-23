@@ -85,3 +85,4 @@ todo/
 # Graphify output
 graphify-out/
 .codegraph/
+.superpowers/

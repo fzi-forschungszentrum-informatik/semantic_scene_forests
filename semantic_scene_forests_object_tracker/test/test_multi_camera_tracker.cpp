@@ -55,7 +55,7 @@
 #include <vision_msgs/msg/object_hypothesis_with_pose.hpp>
 
 #include "semantic_scene_forests_object_manager/object_manager_node.hpp"
-#include "semantic_scene_forests_object_msgs/msg/object_candidate.hpp"
+#include "semantic_scene_forests_object_msgs/msg/object_candidate_array.hpp"
 #include "semantic_scene_forests_object_msgs/srv/get_object_visuals.hpp"
 #include "semantic_scene_forests_object_msgs/srv/get_objects.hpp"
 #include "semantic_scene_forests_object_tracker/object_tracker_component.hpp"
@@ -68,9 +68,10 @@ using namespace std::chrono_literals;
 using semantic_scene_forests_object_tracker::DetectionAdapter;
 using semantic_scene_forests_object_tracker::ObjectTrackerComponent;
 using semantic_scene_forests_object_tracker::TrackedObject;
-using ObjectCandidate  = semantic_scene_forests_object_msgs::msg::ObjectCandidate;
-using GetObjectVisuals = semantic_scene_forests_object_msgs::srv::GetObjectVisuals;
-using GetObjects       = semantic_scene_forests_object_msgs::srv::GetObjects;
+using ObjectCandidate      = semantic_scene_forests_object_msgs::msg::ObjectCandidate;
+using ObjectCandidateArray = semantic_scene_forests_object_msgs::msg::ObjectCandidateArray;
+using GetObjectVisuals     = semantic_scene_forests_object_msgs::srv::GetObjectVisuals;
+using GetObjects           = semantic_scene_forests_object_msgs::srv::GetObjects;
 
 rclcpp::NodeOptions twoCameraOptions()
 {
@@ -256,12 +257,13 @@ public:
                            SENSOR_QOS);
     }
 
-    m_candidates_sub = m_source_node->create_subscription<ObjectCandidate>(
-      "object_candidates",
+    m_candidates_sub = m_source_node->create_subscription<ObjectCandidateArray>(
+      "object_candidate_snapshots",
       rclcpp::QoS(1000).reliable().transient_local(),
-      [this](ObjectCandidate::ConstSharedPtr candidate) {
+      [this](ObjectCandidateArray::ConstSharedPtr snapshot) {
         std::scoped_lock lock(m_candidates_mutex);
-        m_candidates.push_back(*candidate);
+        m_latest_candidates = snapshot->objects;
+        m_candidates.insert(m_candidates.end(), snapshot->objects.begin(), snapshot->objects.end());
       });
 
     m_tf_buffer = std::make_shared<tf2_ros::Buffer>(m_source_node->get_clock());
@@ -354,6 +356,12 @@ public:
     return m_candidates;
   }
 
+  std::vector<ObjectCandidate> latestCandidates() const
+  {
+    std::scoped_lock lock(m_candidates_mutex);
+    return m_latest_candidates;
+  }
+
   bool waitForCandidates(size_t count, std::chrono::milliseconds timeout = 2s) const
   {
     return waitUntil([this, count]() { return candidates().size() >= count; }, timeout);
@@ -437,7 +445,7 @@ private:
   rclcpp::Node::SharedPtr m_manager;
   std::optional<CameraPublisher> m_front;
   std::optional<CameraPublisher> m_rear;
-  rclcpp::Subscription<ObjectCandidate>::SharedPtr m_candidates_sub;
+  rclcpp::Subscription<ObjectCandidateArray>::SharedPtr m_candidates_sub;
   rclcpp::Client<GetObjects>::SharedPtr m_get_objects;
   rclcpp::Client<GetObjectVisuals>::SharedPtr m_get_visuals;
   std::shared_ptr<tf2_ros::Buffer> m_tf_buffer;
@@ -445,6 +453,7 @@ private:
   std::unique_ptr<tf2_ros::StaticTransformBroadcaster> m_tf_broadcaster;
   mutable std::mutex m_candidates_mutex;
   std::vector<ObjectCandidate> m_candidates;
+  std::vector<ObjectCandidate> m_latest_candidates;
   rclcpp::executors::MultiThreadedExecutor m_executor;
   std::thread m_spinner;
 };
@@ -621,11 +630,11 @@ TEST(MultiCameraTracker, DelayedAndDuplicateSourceFramesDoNotReverseTrackTime)
   publishBatches(harness.front(), 10.0, 3, "1", 4.0, 110);
   ASSERT_TRUE(harness.waitForCandidates(1));
   const auto BEFORE       = harness.candidates();
-  const auto BEFORE_STAMP = rclcpp::Time(BEFORE.back().header.stamp).nanoseconds();
+  const auto BEFORE_STAMP = rclcpp::Time(BEFORE.back().last_seen).nanoseconds();
   publishBatches(harness.rear(), 9.9, 1, "2", 6.0, 120);
   ASSERT_TRUE(harness.waitForCandidates(BEFORE.size() + 1));
   const auto AFTER_DELAYED = harness.candidates();
-  EXPECT_GE(rclcpp::Time(AFTER_DELAYED.back().header.stamp).nanoseconds(), BEFORE_STAMP);
+  EXPECT_GE(rclcpp::Time(AFTER_DELAYED.back().last_seen).nanoseconds(), BEFORE_STAMP);
   EXPECT_TRUE(containsCrop(AFTER_DELAYED.back(), 120, "rear_frame"));
   harness.rear().publish(rclcpp::Time(static_cast<int64_t>(9.9e9)), "2", 6.0, 121);
   EXPECT_TRUE(harness.noCropTagFor(121, 300ms));
@@ -634,8 +643,8 @@ TEST(MultiCameraTracker, DelayedAndDuplicateSourceFramesDoNotReverseTrackTime)
   const auto ALL = harness.candidates();
   for (size_t index = 1; index < ALL.size(); ++index)
   {
-    EXPECT_GE(rclcpp::Time(ALL[index].header.stamp).nanoseconds(),
-              rclcpp::Time(ALL[index - 1].header.stamp).nanoseconds());
+    EXPECT_GE(rclcpp::Time(ALL[index].last_seen).nanoseconds(),
+              rclcpp::Time(ALL[index - 1].last_seen).nanoseconds());
   }
 }
 
@@ -674,6 +683,21 @@ TEST(MultiCameraTracker, LongDelayedSourceCanConfirmNewTrack)
   publishBatches(harness.rear(), 1.0, 3, "77", 21.0, 166);
   ASSERT_TRUE(harness.waitUntil(
     [&harness]() { return candidateIds(harness.candidates()).size() >= 2U; }, 2s));
+
+  const auto CONFIRMED = harness.latestCandidates();
+  const auto DELAYED   = std::ranges::find_if(
+    CONFIRMED, [](const auto& candidate) { return containsCrop(candidate, 166, "rear_frame"); });
+  ASSERT_NE(DELAYED, CONFIRMED.end());
+  const auto DELAYED_ID = DELAYED->id;
+  publishBatches(harness.rear(), 2.0, 3, "77", 21.0, 167);
+  ASSERT_TRUE(harness.waitUntil(
+    [&harness, DELAYED_ID]() {
+      return std::ranges::any_of(harness.latestCandidates(), [DELAYED_ID](const auto& candidate) {
+        return candidate.id == DELAYED_ID && containsCrop(candidate, 167, "rear_frame");
+      });
+    },
+    2s));
+  EXPECT_EQ(candidateIds(harness.candidates()).size(), 2U);
 }
 
 TEST(MultiCameraTracker, PublishedTrackSurvivesMergeWithNewerTrack)
@@ -703,7 +727,7 @@ TEST(MultiCameraTracker, PublishedTrackSurvivesMergeWithNewerTrack)
     2s));
 }
 
-TEST(MultiCameraTracker, TwoPublishedTracksRemainAfterOverlap)
+TEST(MultiCameraTracker, SnapshotRetiresPublishedTrackAfterMerge)
 {
   TrackerHarness harness(true, false, 3, 0.1, 0.1);
   ASSERT_TRUE(harness.ready());
@@ -722,14 +746,10 @@ TEST(MultiCameraTracker, TwoPublishedTracksRemainAfterOverlap)
   harness.rear().publish(rclcpp::Time(FINAL_STAMP), "2", 8.0, 195, true, true, true, "", 20.0);
 
   ASSERT_TRUE(harness.waitUntil(
-    [&harness, &INITIAL, FINAL_STAMP]() {
-      const auto CANDIDATES = harness.candidates();
-      return std::ranges::all_of(INITIAL, [&CANDIDATES, FINAL_STAMP](int64_t id) {
-        return std::ranges::any_of(CANDIDATES, [id, FINAL_STAMP](const auto& candidate) {
-          return candidate.id == id &&
-                 rclcpp::Time(candidate.header.stamp).nanoseconds() >= FINAL_STAMP;
-        });
-      });
+    [&harness, &INITIAL]() {
+      const auto CANDIDATES = harness.latestCandidates();
+      return CANDIDATES.size() == 1U && INITIAL.contains(CANDIDATES.front().id) &&
+             rclcpp::Time(CANDIDATES.front().last_seen).nanoseconds() >= FINAL_STAMP;
     },
     2s));
 }
@@ -745,12 +765,17 @@ TEST(TrackedObject, ObservationTimeNeverMovesBackwards)
   detection.bbox3d.size.x               = 1.0;
   detection.bbox3d.size.y               = 1.0;
   detection.bbox3d.size.z               = 1.0;
-  TrackedObject object(detection, 10.0, 1, 0.4, 0.05, 3, 20);
-  object.update(detection, 9.0);
-  EXPECT_DOUBLE_EQ(object.last_seen, 10.0);
-  TrackedObject newer(detection, 20.0, 2, 0.4, 0.05, 3, 20);
+  const rclcpp::Time INITIAL_TIME(1700000000, 123456789, RCL_ROS_TIME);
+  const rclcpp::Time DELAYED_TIME(1699999999, 987654321, RCL_ROS_TIME);
+  const rclcpp::Time NEWER_TIME(1700000001, 234567891, RCL_ROS_TIME);
+  TrackedObject object(detection, INITIAL_TIME, 1, 0.4, 0.05, 3, 20);
+  object.update(detection, DELAYED_TIME);
+  EXPECT_EQ(object.last_seen, INITIAL_TIME);
+  EXPECT_EQ(rclcpp::Time(object.toDetection3D().header.stamp), INITIAL_TIME);
+  TrackedObject newer(detection, NEWER_TIME, 2, 0.4, 0.05, 3, 20);
   object.mergeFrom(newer);
-  EXPECT_DOUBLE_EQ(object.last_seen, 20.0);
+  EXPECT_EQ(object.last_seen, NEWER_TIME);
+  EXPECT_EQ(rclcpp::Time(object.toDetection3D().header.stamp), NEWER_TIME);
 }
 
 TEST(MultiCameraTracker, ManagerKeepsSharedGlobalIdsAndVisuals)
