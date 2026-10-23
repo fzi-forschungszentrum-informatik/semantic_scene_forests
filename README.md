@@ -68,10 +68,9 @@ colcon build --symlink-install --packages-up-to semantic_scene_forests_launch
 - One tracker owns the snapshot topic. Restart tracker and manager together for a new session,
   including recording rewind/loop; do not mix observation time domains. There is no persistence
   or ID epoch. Remembered objects can accumulate for the lifetime of a session.
-- The synthetic integration test exercises real tracker/manager/generation/query ROS transport,
-  static TF, timestamps, replacement, duplicate merging and empty snapshots with a local HTTP
-  stub. It validates membership, not model answer quality. No dataset or hardware validation
-  is implied; the initial tuning values require calibration on recordings/hardware.
+- Tracker and manager tests exercise their own logic and node interfaces independently.
+  No full-stack test, dataset or hardware validation is included; the initial tuning values
+  require calibration on recordings/hardware.
 
 - `semantic_scene_forests_docker/` contains container and dev environment support and is intentionally not a ROS package.
 - Each package has its own brief `README.md` describing its task and interface.

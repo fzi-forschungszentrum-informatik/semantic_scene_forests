@@ -71,13 +71,10 @@ parameter machinery. The world-frame box transform algorithm remains unchanged.
 
 ## Validation
 
-`test_tracking_lifecycle.cpp` covers focused real-ROS lifecycle cases.
-`test_snapshot_pipeline.py` runs all four real components with synchronized synthetic
-observations and a translated static camera TF. Only HTTP inference is stubbed; empty task
-lists still need generation's setup acknowledgement. The sequence checks remembered A's
-unchanged timestamp, confirmed replacement B/new ID, duplicate retirement, explicit graph
-generation, rejected retired-ID queries and an authoritative empty snapshot. It does not
-measure model quality or replace dataset/hardware calibration.
+`test_bbox_transform.cpp`, `test_tracked_object.cpp` and `test_tracking_lifecycle.cpp`
+cover geometry, observation bookkeeping and the tracker node's lifecycle using synthetic
+inputs. They do not launch the manager, generation or query nodes. No dataset or hardware
+calibration is implied.
 
 ## Entry Points
 
