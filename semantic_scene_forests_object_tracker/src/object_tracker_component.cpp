@@ -35,6 +35,8 @@
 #include <functional>
 #include <limits>
 #include <set>
+#include <stdexcept>
+#include <utility>
 
 namespace semantic_scene_forests_object_tracker {
 
@@ -61,6 +63,20 @@ void subscribeWithQoS(TSubscriber& subscriber,
 
 } // namespace
 
+ObjectTrackerComponent::CameraInput::CameraInput(ObjectTrackerComponent& owner, std::string name)
+  : owner(owner)
+  , name(std::move(name))
+{
+}
+
+void ObjectTrackerComponent::CameraInput::onSynchronized(
+  const vision_msgs::msg::Detection2DArray::ConstSharedPtr& det2d_msg,
+  const vision_msgs::msg::Detection3DArray::ConstSharedPtr& det3d_msg,
+  const sensor_msgs::msg::Image::ConstSharedPtr& img_msg)
+{
+  owner.syncedCallbackVision(*this, det2d_msg, det3d_msg, img_msg);
+}
+
 ObjectTrackerComponent::ObjectTrackerComponent(const rclcpp::NodeOptions& options)
   : Node("object_tracker", options)
   , m_tf_buffer(this->get_clock())
@@ -78,31 +94,50 @@ ObjectTrackerComponent::ObjectTrackerComponent(const rclcpp::NodeOptions& option
 
   auto sensor_qos = rclcpp::SensorDataQoS();
 
-  subscribeWithQoS(m_det2d_sub, this, "detections_2d", sensor_qos);
-  subscribeWithQoS(m_det3d_sub, this, "detections_3d", sensor_qos);
-  subscribeWithQoS(m_img_sub, this, "camera/image", sensor_qos);
+  std::set<std::string> input_topics;
+  for (const auto& name : m_params.camera_names)
+  {
+    if (name.empty())
+    {
+      throw std::invalid_argument("Camera names must not be empty");
+    }
+    const auto& topics = m_params.cameras.camera_names_map.at(name);
+    for (const auto& topic :
+         {topics.detections_2d_topic, topics.detections_3d_topic, topics.image_topic})
+    {
+      const auto RESOLVED = this->get_node_topics_interface()->resolve_topic_name(topic);
+      if (!input_topics.insert(RESOLVED).second)
+      {
+        throw std::invalid_argument("Repeated camera input topic: " + RESOLVED);
+      }
+    }
 
-  m_sync_vision =
-    std::make_shared<SynchronizerVision>(SyncPolicyVision(20), m_det2d_sub, m_det3d_sub, m_img_sub);
-  m_sync_vision->setMaxIntervalDuration(rclcpp::Duration::from_seconds(0.05));
-  // Register the member function directly: a generic (auto&&) lambda is rejected by the
-  // message_filters 6 (Jazzy) Signal9, which binds nine placeholders regardless of arity.
-  m_sync_vision->registerCallback(&ObjectTrackerComponent::syncedCallbackVision, this);
-
-  // Monitor the synchronized vision pipeline (det2d + det3d + image) as a single
-  // frequency diagnostic — it only ticks when all three inputs arrive in sync.
-  m_vision_freq = std::make_unique<diagnostic_updater::HeaderlessTopicDiagnostic>(
-    "Vision pipeline",
-    m_diagnostic_updater,
-    diagnostic_updater::FrequencyStatusParam(&m_min_freq, &m_max_freq, 0.1, 5));
+    auto camera = std::make_unique<CameraInput>(*this, name);
+    // Default subscriptions share the node's mutually exclusive callback group.
+    subscribeWithQoS(camera->det2d_sub, this, topics.detections_2d_topic, sensor_qos);
+    subscribeWithQoS(camera->det3d_sub, this, topics.detections_3d_topic, sensor_qos);
+    subscribeWithQoS(camera->img_sub, this, topics.image_topic, sensor_qos);
+    camera->synchronizer = std::make_unique<SynchronizerVision>(
+      SyncPolicyVision(20), camera->det2d_sub, camera->det3d_sub, camera->img_sub);
+    camera->synchronizer->setMaxIntervalDuration(rclcpp::Duration::from_seconds(0.05));
+    // Concrete member callbacks also work with the Jazzy message_filters Signal9 adapter.
+    camera->synchronizer->registerCallback(&CameraInput::onSynchronized, camera.get());
+    camera->frequency = std::make_unique<diagnostic_updater::HeaderlessTopicDiagnostic>(
+      "Vision pipeline (" + name + ")",
+      m_diagnostic_updater,
+      diagnostic_updater::FrequencyStatusParam(&m_min_freq, &m_max_freq, 0.1, 5));
+    m_cameras.push_back(std::move(camera));
+  }
 
   auto pub_qos = rclcpp::QoS(1000).reliable().transient_local();
   m_candidates_pub =
     this->create_publisher<semantic_scene_forests_object_msgs::msg::ObjectCandidate>(
       "object_candidates", pub_qos);
 
-  RCLCPP_INFO(
-    this->get_logger(), "ObjectTrackerComponent started. World frame: %s", m_world_frame.c_str());
+  RCLCPP_INFO(this->get_logger(),
+              "ObjectTrackerComponent started with %zu cameras. World frame: %s",
+              m_cameras.size(),
+              m_world_frame.c_str());
 }
 
 bool ObjectTrackerComponent::has3dBbox(const vision_msgs::msg::Detection3D& det)
@@ -165,9 +200,17 @@ void ObjectTrackerComponent::mergeOverlappingTracks()
         continue;
       }
 
+      // The manager cannot retire an ID that has already been published.
+      if (tracked_object->published && other_tracked_object->published)
+      {
+        continue;
+      }
+
       if (TrackedObject::bbox3dOverlap(*tracked_object, *other_tracked_object) > threshold)
       {
-        if (tracked_object->observation_count >= other_tracked_object->observation_count)
+        if (tracked_object->published ||
+            (!other_tracked_object->published &&
+             tracked_object->track_id < other_tracked_object->track_id))
         {
           tracked_object->mergeFrom(*other_tracked_object);
           removed.insert(j);
@@ -223,32 +266,28 @@ std::optional<sensor_msgs::msg::Image> ObjectTrackerComponent::cropImagePatch(
 }
 
 void ObjectTrackerComponent::syncedCallbackVision(
+  CameraInput& camera,
   const vision_msgs::msg::Detection2DArray::ConstSharedPtr& det2d_msg,
   const vision_msgs::msg::Detection3DArray::ConstSharedPtr& det3d_msg,
   const sensor_msgs::msg::Image::ConstSharedPtr& img_msg)
 {
-  m_vision_freq->tick();
+  camera.frequency->tick();
 
   m_params = m_param_listener->get_params();
 
   double current_time = static_cast<double>(det2d_msg->header.stamp.sec) +
                         (static_cast<double>(det2d_msg->header.stamp.nanosec) / 1e9);
 
-  if (!m_last_update_time)
+  // shortcut: source clocks must be monotonic; restart with the manager after replay time resets.
+  if (camera.last_update_time && current_time <= *camera.last_update_time)
   {
-    m_last_update_time = current_time;
+    ++camera.rejected_timestamps;
+    return;
   }
+  camera.last_update_time = current_time;
 
-  double dt = current_time - *m_last_update_time;
-  if (dt <= 0.0)
-  {
-    dt = 0.1;
-  }
-
-  for (auto& obj : m_tracked_objects)
-  {
-    obj->predict(dt);
-  }
+  const double TRACKING_TIME = std::max(m_last_update_time.value_or(current_time), current_time);
+  const double DT            = TRACKING_TIME - m_last_update_time.value_or(TRACKING_TIME);
 
   const auto& whitelist = m_params.class_whitelist;
   bool use_whitelist    = !whitelist.empty();
@@ -263,6 +302,7 @@ void ObjectTrackerComponent::syncedCallbackVision(
 
   std::vector<TransformedDetection> transformed_detections;
   transformed_detections.reserve(combined_detections.size());
+  std::optional<geometry_msgs::msg::TransformStamped> world_transform;
 
   for (auto& [id, combined] : combined_detections)
   {
@@ -298,14 +338,16 @@ void ObjectTrackerComponent::syncedCallbackVision(
 
     try
     {
-      geometry_msgs::msg::TransformStamped transform =
-        m_tf_buffer.lookupTransform(m_world_frame,
-                                    det3d_msg->header.frame_id,
-                                    det3d_msg->header.stamp,
-                                    rclcpp::Duration::from_seconds(0.1));
+      if (!world_transform)
+      {
+        world_transform = m_tf_buffer.lookupTransform(m_world_frame,
+                                                      det3d_msg->header.frame_id,
+                                                      det3d_msg->header.stamp,
+                                                      rclcpp::Duration::from_seconds(0.1));
+      }
 
       // Whole-box world transform; invalid geometry is skipped with a warning.
-      auto world_bbox = detail::transformBoundingBoxToFrame(combined.det3d->bbox, transform);
+      auto world_bbox = detail::transformBoundingBoxToFrame(combined.det3d->bbox, *world_transform);
       if (!world_bbox)
       {
         RCLCPP_WARN(this->get_logger(),
@@ -320,13 +362,13 @@ void ObjectTrackerComponent::syncedCallbackVision(
     catch (const tf2::TransformException& ex)
     {
       RCLCPP_WARN(this->get_logger(),
-                  "Cannot transform from '%s' to '%s': %s - skipping detection ID: %s",
+                  "Camera '%s': cannot transform from '%s' to '%s': %s - skipping batch",
+                  camera.name.c_str(),
                   det3d_msg->header.frame_id.c_str(),
                   m_world_frame.c_str(),
-                  ex.what(),
-                  combined.id().c_str());
-      m_tf_errors.increment(ex.what());
-      continue;
+                  ex.what());
+      camera.tf_errors.increment(ex.what());
+      return;
     }
 
     transformed_detections.push_back(std::move(trans_det));
@@ -351,6 +393,11 @@ void ObjectTrackerComponent::syncedCallbackVision(
   {
     RCLCPP_ERROR(this->get_logger(), "cv_bridge exception: %s", e.what());
     return;
+  }
+
+  for (auto& obj : m_tracked_objects)
+  {
+    obj->predict(DT);
   }
 
   std::vector<int> det_to_track(detections.size(), -1);
@@ -520,6 +567,7 @@ void ObjectTrackerComponent::syncedCallbackVision(
     auto crop = cropImagePatch(cv_image->image, detections[d]->bbox2D(), m_params.crop_padding);
     if (crop)
     {
+      crop->header = img_msg->header;
       obj->addCrop(*crop);
     }
   }
@@ -558,28 +606,30 @@ void ObjectTrackerComponent::syncedCallbackVision(
     }
 
     semantic_scene_forests_object_msgs::msg::ObjectCandidate candidate;
-    candidate.header                    = det2d_msg->header;
+    candidate.header       = det2d_msg->header;
+    candidate.header.stamp = rclcpp::Time(static_cast<int64_t>(std::llround(obj->last_seen * 1e9)));
     candidate.header.frame_id           = m_world_frame;
     candidate.id                        = obj->track_id;
     candidate.class_name                = obj->class_name;
     candidate.detection                 = obj->toDetection3D();
-    candidate.detection.header          = det2d_msg->header;
+    candidate.detection.header          = candidate.header;
     candidate.detection.header.frame_id = m_world_frame;
     candidate.image_crops               = obj->getCrops();
     m_candidates_pub->publish(candidate);
+    obj->published = true;
   }
 
   // Prune unconfirmed tracks not observed within the timeout window.
   double timeout = m_params.unconfirmed_track_timeout;
-  m_tracked_objects.erase(
-    std::remove_if(m_tracked_objects.begin(),
-                   m_tracked_objects.end(),
-                   [current_time, timeout](const std::unique_ptr<TrackedObject>& obj) {
-                     return !obj->confirmed && (current_time - obj->last_seen) > timeout;
-                   }),
-    m_tracked_objects.end());
+  m_tracked_objects.erase(std::remove_if(m_tracked_objects.begin(),
+                                         m_tracked_objects.end(),
+                                         [timeout](const std::unique_ptr<TrackedObject>& obj) {
+                                           return !obj->confirmed &&
+                                                  obj->time_since_update > timeout;
+                                         }),
+                          m_tracked_objects.end());
 
-  m_last_update_time = current_time;
+  m_last_update_time = TRACKING_TIME;
 }
 
 void ObjectTrackerComponent::onHealthDiagnostic(diagnostic_updater::DiagnosticStatusWrapper& stat)
@@ -595,10 +645,16 @@ void ObjectTrackerComponent::onHealthDiagnostic(diagnostic_updater::DiagnosticSt
 
   stat.add("Total tracks", m_tracked_objects.size());
   stat.add("Confirmed tracks", confirmed);
-  m_tf_errors.report(stat, "TF");
+  size_t tf_errors = 0;
+  for (const auto& camera : m_cameras)
+  {
+    camera->tf_errors.report(stat, "TF (" + camera->name + ")");
+    stat.add("Rejected timestamps (" + camera->name + ")", camera->rejected_timestamps);
+    tf_errors += camera->tf_errors.count();
+  }
   m_crop_errors.report(stat, "Crop");
 
-  if (m_tf_errors.count() > 0 || m_crop_errors.count() > 0)
+  if (tf_errors > 0 || m_crop_errors.count() > 0)
   {
     stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN, "TF/crop errors encountered");
   }

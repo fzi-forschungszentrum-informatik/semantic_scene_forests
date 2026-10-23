@@ -72,6 +72,7 @@ TrackedObject::TrackedObject(const DetectionAdapter& initial_detection,
 
 void TrackedObject::predict(double dt)
 {
+  time_since_update += dt;
   double q = m_process_noise_std * dt;
   m_covariance += Eigen::Matrix3d::Identity() * (q * q);
 }
@@ -120,8 +121,9 @@ void TrackedObject::update(const DetectionAdapter& detection, double current_tim
   bbox3d_size  = (1.0 - alpha) * bbox3d_size + alpha * union_size;
   score        = detection.score;
 
-  last_detection = detection;
-  last_seen      = current_time;
+  last_detection    = detection;
+  last_seen         = std::max(last_seen, current_time);
+  time_since_update = 0.0;
   observation_count++;
 
   if (observation_count >= m_confirmation_threshold)
@@ -203,6 +205,8 @@ void TrackedObject::mergeFrom(const TrackedObject& other)
   }
 
   observation_count = std::max(observation_count, other.observation_count);
+  last_seen         = std::max(last_seen, other.last_seen);
+  time_since_update = std::min(time_since_update, other.time_since_update);
 
   int max_count = 0;
   for (const auto& [name, count] : m_class_history)

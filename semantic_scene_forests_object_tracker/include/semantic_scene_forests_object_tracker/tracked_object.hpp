@@ -84,8 +84,10 @@ public:
   Eigen::Vector3d bbox3d_size;
   double score;
   bool confirmed;
+  bool published{false};
   int observation_count;
   double last_seen;
+  double time_since_update{0.0};
   DetectionAdapter last_detection;
 
 private:
