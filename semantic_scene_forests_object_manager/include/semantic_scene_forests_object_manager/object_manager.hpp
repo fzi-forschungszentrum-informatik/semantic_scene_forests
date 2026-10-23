@@ -38,7 +38,7 @@
 #include <rclcpp/time.hpp>
 #include <semantic_scene_forests_object_msgs/msg/managed_object.hpp>
 #include <semantic_scene_forests_object_msgs/msg/managed_object_array.hpp>
-#include <semantic_scene_forests_object_msgs/msg/object_candidate.hpp>
+#include <semantic_scene_forests_object_msgs/msg/object_candidate_array.hpp>
 #include <semantic_scene_forests_object_msgs/msg/object_visuals.hpp>
 #include <semantic_scene_forests_object_msgs/srv/edit_object.hpp>
 
@@ -56,9 +56,9 @@ public:
     INVALID_CROP_INDEX
   };
 
-  bool
-  processObjectCandidate(const semantic_scene_forests_object_msgs::msg::ObjectCandidate& candidate,
-                         const rclcpp::Time& now);
+  void processObjectSnapshot(
+    const semantic_scene_forests_object_msgs::msg::ObjectCandidateArray& snapshot,
+    const rclcpp::Time& now);
 
   bool blockObject(int64_t id);
 

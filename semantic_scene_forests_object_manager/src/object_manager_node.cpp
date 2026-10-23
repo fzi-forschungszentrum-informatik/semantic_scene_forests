@@ -32,13 +32,13 @@
 
 namespace semantic_scene_forests_object_manager {
 
-using ObjectCandidate    = semantic_scene_forests_object_msgs::msg::ObjectCandidate;
-using ManagedObjectArray = semantic_scene_forests_object_msgs::msg::ManagedObjectArray;
-using GetObjects         = semantic_scene_forests_object_msgs::srv::GetObjects;
-using GetObjectVisuals   = semantic_scene_forests_object_msgs::srv::GetObjectVisuals;
-using BlockObject        = semantic_scene_forests_object_msgs::srv::BlockObject;
-using EditObject         = semantic_scene_forests_object_msgs::srv::EditObject;
-using UnblockObject      = semantic_scene_forests_object_msgs::srv::UnblockObject;
+using ObjectCandidateArray = semantic_scene_forests_object_msgs::msg::ObjectCandidateArray;
+using ManagedObjectArray   = semantic_scene_forests_object_msgs::msg::ManagedObjectArray;
+using GetObjects           = semantic_scene_forests_object_msgs::srv::GetObjects;
+using GetObjectVisuals     = semantic_scene_forests_object_msgs::srv::GetObjectVisuals;
+using BlockObject          = semantic_scene_forests_object_msgs::srv::BlockObject;
+using EditObject           = semantic_scene_forests_object_msgs::srv::EditObject;
+using UnblockObject        = semantic_scene_forests_object_msgs::srv::UnblockObject;
 
 ObjectManagerNode::ObjectManagerNode(const rclcpp::NodeOptions& options)
   : Node("object_manager", options)
@@ -54,13 +54,13 @@ ObjectManagerNode::ObjectManagerNode(const rclcpp::NodeOptions& options)
   auto pub_qos  = rclcpp::QoS(1).reliable().transient_local();
   m_managed_pub = this->create_publisher<ManagedObjectArray>("managed_objects", pub_qos);
 
-  m_candidate_sub = this->create_subscription<ObjectCandidate>(
-    "object_candidates",
-    rclcpp::SensorDataQoS(),
-    [this](const ObjectCandidate::ConstSharedPtr& candidate) { onObjectCandidate(candidate); });
+  m_snapshot_sub = this->create_subscription<ObjectCandidateArray>(
+    "object_candidate_snapshots",
+    rclcpp::QoS(1).reliable().transient_local(),
+    [this](const ObjectCandidateArray::ConstSharedPtr& snapshot) { onObjectSnapshot(snapshot); });
 
-  m_candidate_freq = std::make_unique<diagnostic_updater::HeaderlessTopicDiagnostic>(
-    "object_candidates",
+  m_snapshot_freq = std::make_unique<diagnostic_updater::HeaderlessTopicDiagnostic>(
+    "object_candidate_snapshots",
     m_diagnostic_updater,
     diagnostic_updater::FrequencyStatusParam(&m_min_freq, &m_max_freq, 0.1, 5));
 
@@ -109,20 +109,12 @@ ObjectManagerNode::ObjectManagerNode(const rclcpp::NodeOptions& options)
               m_params.publish_frequency_hz);
 }
 
-void ObjectManagerNode::onObjectCandidate(const ObjectCandidate::ConstSharedPtr& candidate)
+void ObjectManagerNode::onObjectSnapshot(const ObjectCandidateArray::ConstSharedPtr& snapshot)
 {
-  m_candidate_freq->tick();
+  m_snapshot_freq->tick();
 
-  const bool ACCEPTED = m_manager.processObjectCandidate(*candidate, this->now());
-  if (ACCEPTED)
-  {
-    RCLCPP_DEBUG(
-      this->get_logger(), "Updated object %ld (%s)", candidate->id, candidate->class_name.c_str());
-  }
-  else
-  {
-    RCLCPP_DEBUG(this->get_logger(), "Dropped blocked object %ld", candidate->id);
-  }
+  m_manager.processObjectSnapshot(*snapshot, this->now());
+  publishManagedObjects();
 }
 
 void ObjectManagerNode::onGetObjects(const GetObjects::Request::SharedPtr& /*request*/,

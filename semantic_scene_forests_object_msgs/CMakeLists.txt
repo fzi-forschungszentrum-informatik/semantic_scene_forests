@@ -17,6 +17,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ManagedObject.msg"
   "msg/ManagedObjectArray.msg"
   "msg/ObjectCandidate.msg"
+  "msg/ObjectCandidateArray.msg"
   "msg/ObjectVisuals.msg"
   "srv/GetObjects.srv"
   "srv/GetObjectVisuals.srv"

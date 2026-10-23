@@ -96,10 +96,11 @@ ObjectTrackerComponent::ObjectTrackerComponent(const rclcpp::NodeOptions& option
     m_diagnostic_updater,
     diagnostic_updater::FrequencyStatusParam(&m_min_freq, &m_max_freq, 0.1, 5));
 
-  auto pub_qos = rclcpp::QoS(1000).reliable().transient_local();
+  auto pub_qos = rclcpp::QoS(1).reliable().transient_local();
   m_candidates_pub =
-    this->create_publisher<semantic_scene_forests_object_msgs::msg::ObjectCandidate>(
-      "object_candidates", pub_qos);
+    this->create_publisher<semantic_scene_forests_object_msgs::msg::ObjectCandidateArray>(
+      "object_candidate_snapshots", pub_qos);
+  publishSnapshot();
 
   RCLCPP_INFO(
     this->get_logger(), "ObjectTrackerComponent started. World frame: %s", m_world_frame.c_str());
@@ -137,7 +138,99 @@ ObjectTrackerComponent::associateById(const vision_msgs::msg::Detection2DArray& 
   return combined;
 }
 
-void ObjectTrackerComponent::mergeOverlappingTracks()
+bool ObjectTrackerComponent::isRecent(const TrackedObject& object,
+                                      const rclcpp::Time& current_time) const
+{
+  return current_time - object.last_seen <=
+         rclcpp::Duration::from_seconds(m_params.reacquisition_timeout);
+}
+
+void ObjectTrackerComponent::replaceRememberedTracks(const rclcpp::Time& current_time)
+{
+  // Build the complete recent-confirmed/remembered bipartite graph before removing
+  // anything, so established recent neighbors still count as ambiguity blockers.
+  // Only newly confirmed or explicitly pending ambiguous IDs may retire a partner.
+  std::vector<std::vector<size_t>> partners(m_tracked_objects.size());
+  for (size_t i = 0; i < m_tracked_objects.size(); ++i)
+  {
+    const auto& recent = *m_tracked_objects[i];
+    if (!recent.confirmed || !isRecent(recent, current_time))
+    {
+      continue;
+    }
+    for (size_t j = 0; j < m_tracked_objects.size(); ++j)
+    {
+      const auto& remembered = *m_tracked_objects[j];
+      if (!remembered.confirmed || isRecent(remembered, current_time) ||
+          recent.last_seen <= remembered.last_seen ||
+          (recent.getPosition() - remembered.getPosition()).norm() > m_params.replacement_distance)
+      {
+        continue;
+      }
+      const Eigen::Vector3d ratios =
+        recent.bbox3d_size.cwiseMax(remembered.bbox3d_size)
+          .cwiseQuotient(recent.bbox3d_size.cwiseMin(remembered.bbox3d_size));
+      if ((ratios.array() <= m_params.replacement_max_size_ratio).all())
+      {
+        partners[i].push_back(j);
+        partners[j].push_back(i);
+      }
+    }
+  }
+
+  std::set<uint64_t> retired;
+  std::set<uint64_t> pending;
+  for (size_t i = 0; i < partners.size(); ++i)
+  {
+    const auto& candidate = *m_tracked_objects[i];
+    if (!m_replacement_candidates.contains(candidate.track_id) ||
+        !isRecent(candidate, current_time))
+    {
+      continue;
+    }
+    if (partners[i].size() == 1 && partners[partners[i][0]].size() == 1)
+    {
+      const auto j = partners[i][0];
+      retired.insert(m_tracked_objects[j]->track_id);
+      RCLCPP_INFO(this->get_logger(),
+                  "Replacing remembered track %lu with recent track %lu",
+                  m_tracked_objects[j]->track_id,
+                  m_tracked_objects[i]->track_id);
+    }
+    else if (!partners[i].empty())
+    {
+      pending.insert(candidate.track_id);
+    }
+  }
+  m_replacement_candidates = std::move(pending);
+  std::erase_if(m_tracked_objects,
+                [&retired](const auto& object) { return retired.contains(object->track_id); });
+}
+
+void ObjectTrackerComponent::publishSnapshot()
+{
+  semantic_scene_forests_object_msgs::msg::ObjectCandidateArray snapshot;
+  snapshot.header.stamp    = this->now();
+  snapshot.header.frame_id = m_world_frame;
+  for (const auto& obj : m_tracked_objects)
+  {
+    if (!obj->confirmed)
+    {
+      continue;
+    }
+    semantic_scene_forests_object_msgs::msg::ObjectCandidate candidate;
+    candidate.header      = snapshot.header;
+    candidate.id          = obj->track_id;
+    candidate.class_name  = obj->class_name;
+    candidate.detection   = obj->toDetection3D();
+    candidate.last_seen   = candidate.detection.header.stamp;
+    candidate.image_crops = obj->getCrops();
+    snapshot.objects.push_back(std::move(candidate));
+  }
+  m_candidates_pub->publish(snapshot);
+}
+
+void ObjectTrackerComponent::mergeOverlappingTracks(const rclcpp::Time& current_time)
 {
   double threshold = m_params.merge_iou_threshold;
   std::set<size_t> removed;
@@ -146,7 +239,8 @@ void ObjectTrackerComponent::mergeOverlappingTracks()
   {
     auto& tracked_object = m_tracked_objects[i];
 
-    if (removed.contains(i) || !tracked_object->confirmed)
+    if (removed.contains(i) || !tracked_object->confirmed ||
+        !isRecent(*tracked_object, current_time))
     {
       continue;
     }
@@ -154,7 +248,8 @@ void ObjectTrackerComponent::mergeOverlappingTracks()
     for (size_t j = i + 1; j < m_tracked_objects.size(); ++j)
     {
       auto& other_tracked_object = m_tracked_objects[j];
-      if (removed.contains(j) || !other_tracked_object->confirmed)
+      if (removed.contains(j) || !other_tracked_object->confirmed ||
+          !isRecent(*other_tracked_object, current_time))
       {
         continue;
       }
@@ -191,6 +286,11 @@ void ObjectTrackerComponent::mergeOverlappingTracks()
       if (!removed.contains(i))
       {
         kept.push_back(std::move(m_tracked_objects[i]));
+      }
+      else
+      {
+        // Retirement authority belongs to an identity, not its merged estimate.
+        m_replacement_candidates.erase(m_tracked_objects[i]->track_id);
       }
     }
     m_tracked_objects = std::move(kept);
@@ -231,23 +331,39 @@ void ObjectTrackerComponent::syncedCallbackVision(
 
   m_params = m_param_listener->get_params();
 
-  double current_time = static_cast<double>(det2d_msg->header.stamp.sec) +
-                        (static_cast<double>(det2d_msg->header.stamp.nanosec) / 1e9);
+  const rclcpp::Time current_time(det3d_msg->header.stamp);
 
-  if (!m_last_update_time)
+  // Rewinding/looping a recording requires restarting tracker and manager together.
+  // Do not mix observation clocks within a session.
+  if (m_last_update_time && current_time <= *m_last_update_time)
   {
-    m_last_update_time = current_time;
+    return;
   }
 
-  double dt = current_time - *m_last_update_time;
-  if (dt <= 0.0)
+  // Validate the synchronized image before prediction or any observation-state mutation.
+  cv_bridge::CvImageConstPtr cv_image;
+  try
   {
-    dt = 0.1;
+    cv_image = cv_bridge::toCvCopy(*img_msg, "bgr8");
+  }
+  catch (const cv_bridge::Exception& e)
+  {
+    RCLCPP_ERROR(this->get_logger(), "cv_bridge exception: %s", e.what());
+    return;
   }
 
+  std::erase_if(m_tracked_objects, [this, current_time](const auto& obj) {
+    return !obj->confirmed && current_time - obj->last_seen >
+                                rclcpp::Duration::from_seconds(m_params.unconfirmed_track_timeout);
+  });
+  const double dt = m_last_update_time ? (current_time - *m_last_update_time).seconds() : 0.0;
   for (auto& obj : m_tracked_objects)
   {
-    obj->predict(dt);
+    // Staleness is decided BEFORE matching. Remembered objects do not grow uncertainty.
+    if (!obj->confirmed || isRecent(*obj, current_time))
+    {
+      obj->predict(dt);
+    }
   }
 
   const auto& whitelist = m_params.class_whitelist;
@@ -342,17 +458,6 @@ void ObjectTrackerComponent::syncedCallbackVision(
     detections.push_back(std::move(combined));
   }
 
-  cv_bridge::CvImageConstPtr cv_image;
-  try
-  {
-    cv_image = cv_bridge::toCvCopy(*img_msg, "bgr8");
-  }
-  catch (const cv_bridge::Exception& e)
-  {
-    RCLCPP_ERROR(this->get_logger(), "cv_bridge exception: %s", e.what());
-    return;
-  }
-
   std::vector<int> det_to_track(detections.size(), -1);
   std::set<size_t> obj_matched;
 
@@ -371,7 +476,7 @@ void ObjectTrackerComponent::syncedCallbackVision(
     for (size_t o = 0; o < m_tracked_objects.size(); ++o)
     {
       auto& obj = m_tracked_objects[o];
-      if (!obj->confirmed || obj_matched.contains(o))
+      if (!obj->confirmed || !isRecent(*obj, current_time) || obj_matched.contains(o))
       {
         continue;
       }
@@ -388,6 +493,12 @@ void ObjectTrackerComponent::syncedCallbackVision(
       adapter.bbox2d     = det.bbox2D();
       adapter.frame_id   = m_world_frame;
 
+      const auto& center = adapter.bbox3d.center.position;
+      if ((Eigen::Vector3d(center.x, center.y, center.z) - obj->getPosition()).norm() >
+          m_params.max_association_distance)
+      {
+        continue;
+      }
       double dist = obj->mahalanobisDistance(adapter);
       if (dist < m_params.gate_threshold_confirmed && dist < best_dist)
       {
@@ -444,6 +555,12 @@ void ObjectTrackerComponent::syncedCallbackVision(
       adapter.bbox2d     = det.bbox2D();
       adapter.frame_id   = m_world_frame;
 
+      const auto& center = adapter.bbox3d.center.position;
+      if ((Eigen::Vector3d(center.x, center.y, center.z) - obj->getPosition()).norm() >
+          m_params.max_association_distance)
+      {
+        continue;
+      }
       double dist = obj->mahalanobisDistance(adapter);
       if (dist < m_params.gate_threshold_strict && dist < best_dist)
       {
@@ -462,12 +579,23 @@ void ObjectTrackerComponent::syncedCallbackVision(
       adapter.bbox2d     = detections[d]->bbox2D();
       adapter.frame_id   = m_world_frame;
 
-      m_tracked_objects[best_idx]->update(adapter, current_time);
+      auto& object = *m_tracked_objects[best_idx];
+      object.update(adapter, current_time);
+      if (object.confirmed)
+      {
+        m_replacement_candidates.insert(object.track_id);
+      }
       det_to_track[d] = best_idx;
       obj_matched.insert(best_idx);
     }
   }
 
+  // Remembered storage lasts for this session and may grow without positive replacement
+  // evidence. Never evict remembered identities merely to admit an active track.
+  auto active_count = std::count_if(
+    m_tracked_objects.begin(), m_tracked_objects.end(), [this, current_time](const auto& obj) {
+      return !obj->confirmed || isRecent(*obj, current_time);
+    });
   // Create new tracks for unmatched detections
   for (size_t d = 0; d < detections.size(); ++d)
   {
@@ -475,7 +603,7 @@ void ObjectTrackerComponent::syncedCallbackVision(
     {
       continue;
     }
-    if (static_cast<int>(m_tracked_objects.size()) >= m_params.max_trackable_objects)
+    if (active_count >= m_params.max_trackable_objects)
     {
       break;
     }
@@ -495,12 +623,19 @@ void ObjectTrackerComponent::syncedCallbackVision(
                                       m_params.measurement_noise_std,
                                       m_params.process_noise_std,
                                       m_params.confirmation_threshold,
-                                      static_cast<size_t>(m_params.max_crops_per_object)));
+                                      static_cast<size_t>(m_params.max_crops_per_object),
+                                      m_params.bbox_size_alpha));
+    det_to_track[d] = static_cast<int>(m_tracked_objects.size() - 1);
+    if (m_tracked_objects.back()->confirmed)
+    {
+      m_replacement_candidates.insert(m_next_track_id);
+    }
+    ++active_count;
     m_next_track_id++;
   }
 
-  // Crop images for matched confirmed tracks. This must run before
-  // mergeOverlappingTracks(): det_to_track stores indices into the
+  // Crop images for observed confirmed tracks. This must run before replacement
+  // and merging: det_to_track stores indices into the
   // pre-compaction m_tracked_objects vector, and TrackedObject::mergeFrom()
   // carries the crops into the surviving track.
   for (size_t d = 0; d < detections.size(); ++d)
@@ -524,60 +659,9 @@ void ObjectTrackerComponent::syncedCallbackVision(
     }
   }
 
-  mergeOverlappingTracks();
-
-  {
-    size_t confirmed_count   = 0;
-    size_t unconfirmed_count = 0;
-    for (const auto& obj : m_tracked_objects)
-    {
-      if (obj->confirmed)
-      {
-        ++confirmed_count;
-      }
-      else
-      {
-        ++unconfirmed_count;
-      }
-    }
-    RCLCPP_DEBUG(this->get_logger(),
-                 "Tracks: %zu confirmed, %zu unconfirmed (%zu total) | "
-                 "detections this frame: %zu",
-                 confirmed_count,
-                 unconfirmed_count,
-                 m_tracked_objects.size(),
-                 detections.size());
-  }
-
-  // Publish all confirmed tracks
-  for (const auto& obj : m_tracked_objects)
-  {
-    if (!obj->confirmed)
-    {
-      continue;
-    }
-
-    semantic_scene_forests_object_msgs::msg::ObjectCandidate candidate;
-    candidate.header                    = det2d_msg->header;
-    candidate.header.frame_id           = m_world_frame;
-    candidate.id                        = obj->track_id;
-    candidate.class_name                = obj->class_name;
-    candidate.detection                 = obj->toDetection3D();
-    candidate.detection.header          = det2d_msg->header;
-    candidate.detection.header.frame_id = m_world_frame;
-    candidate.image_crops               = obj->getCrops();
-    m_candidates_pub->publish(candidate);
-  }
-
-  // Prune unconfirmed tracks not observed within the timeout window.
-  double timeout = m_params.unconfirmed_track_timeout;
-  m_tracked_objects.erase(
-    std::remove_if(m_tracked_objects.begin(),
-                   m_tracked_objects.end(),
-                   [current_time, timeout](const std::unique_ptr<TrackedObject>& obj) {
-                     return !obj->confirmed && (current_time - obj->last_seen) > timeout;
-                   }),
-    m_tracked_objects.end());
+  replaceRememberedTracks(current_time);
+  mergeOverlappingTracks(current_time);
+  publishSnapshot();
 
   m_last_update_time = current_time;
 }
@@ -585,16 +669,23 @@ void ObjectTrackerComponent::syncedCallbackVision(
 void ObjectTrackerComponent::onHealthDiagnostic(diagnostic_updater::DiagnosticStatusWrapper& stat)
 {
   size_t confirmed = 0;
+  size_t recent    = 0;
   for (const auto& obj : m_tracked_objects)
   {
     if (obj->confirmed)
     {
       ++confirmed;
+      if (m_last_update_time && isRecent(*obj, *m_last_update_time))
+      {
+        ++recent;
+      }
     }
   }
 
   stat.add("Total tracks", m_tracked_objects.size());
   stat.add("Confirmed tracks", confirmed);
+  stat.add("Recent tracks", recent);
+  stat.add("Remembered tracks", confirmed - recent);
   m_tf_errors.report(stat, "TF");
   m_crop_errors.report(stat, "Crop");
 

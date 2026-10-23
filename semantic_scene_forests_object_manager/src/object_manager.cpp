@@ -33,17 +33,33 @@
 
 namespace semantic_scene_forests_object_manager {
 
-bool ObjectManager::processObjectCandidate(
-  const semantic_scene_forests_object_msgs::msg::ObjectCandidate& candidate,
+void ObjectManager::processObjectSnapshot(
+  const semantic_scene_forests_object_msgs::msg::ObjectCandidateArray& snapshot,
   const rclcpp::Time& now)
 {
   const std::scoped_lock LOCK{m_objects_mutex};
-  if (m_blocked_ids.contains(candidate.id))
+  std::unordered_set<int64_t> present_ids;
+  present_ids.reserve(snapshot.objects.size());
+  for (const auto& candidate : snapshot.objects)
   {
-    return false;
+    present_ids.insert(candidate.id);
+    if (!m_blocked_ids.contains(candidate.id))
+    {
+      auto it = m_objects.find(candidate.id);
+      if (it == m_objects.end())
+      {
+        m_objects.emplace(candidate.id, ManagedObject::fromCandidate(candidate, now));
+      }
+      else
+      {
+        it->second.updateFromCandidate(candidate, now);
+      }
+    }
   }
-  m_objects[candidate.id] = ManagedObject::fromCandidate(candidate, now);
-  return true;
+  // Retiring an ID also retires all its overrides and curated visuals. Blocking
+  // IDs are separate and survive even an empty authoritative snapshot.
+  std::erase_if(m_objects,
+                [&present_ids](const auto& entry) { return !present_ids.contains(entry.first); });
 }
 
 bool ObjectManager::blockObject(int64_t id)
@@ -103,15 +119,23 @@ bool ObjectManager::editObject(
     }
   }
 
+  bool changed = false;
   if (request.update_class_name)
   {
-    obj.class_name = request.class_name;
+    changed              = !obj.class_overridden || obj.class_name != request.class_name;
+    obj.class_name       = request.class_name;
+    obj.class_overridden = true;
+    for (auto& result : obj.detection.results)
+    {
+      result.hypothesis.class_id = obj.class_name;
+    }
   }
 
   if (request.update_pose)
   {
-    obj.detection.bbox.center.position    = request.pose.position;
-    obj.detection.bbox.center.orientation = request.pose.orientation;
+    changed = changed || !obj.pose_overridden || obj.detection.bbox.center != request.pose;
+    obj.detection.bbox.center = request.pose;
+    obj.pose_overridden       = true;
   }
 
   for (const uint32_t IDX : std::views::reverse(indices))
@@ -119,9 +143,17 @@ bool ObjectManager::editObject(
     obj.image_crops.erase(obj.image_crops.begin() + static_cast<std::ptrdiff_t>(IDX));
   }
 
-  obj.source       = 1;
-  obj.last_updated = now;
-  failure          = EditFailure::SUCCESS;
+  if (!indices.empty())
+  {
+    obj.crops_curated = true;
+    changed           = true;
+  }
+  if (changed)
+  {
+    obj.source       = 1;
+    obj.last_updated = now;
+  }
+  failure = EditFailure::SUCCESS;
   return true;
 }
 

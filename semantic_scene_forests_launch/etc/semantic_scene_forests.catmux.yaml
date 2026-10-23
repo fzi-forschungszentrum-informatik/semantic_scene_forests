@@ -23,7 +23,7 @@ windows:
         detections_2d_topic:=vision/detections_2d
         detections_3d_topic:=vision/detections_3d
         camera_image_topic:=camera/image
-        object_candidates_topic:=object_candidates
+        object_candidate_snapshots_topic:=object_candidate_snapshots
         tracker_config_file:=${config_dir}/object_tracker.yaml
         manager_config_file:=${config_dir}/object_manager.yaml
 

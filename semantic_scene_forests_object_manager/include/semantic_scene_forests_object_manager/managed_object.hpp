@@ -32,6 +32,7 @@
 #include <string>
 #include <vector>
 
+#include <builtin_interfaces/msg/time.hpp>
 #include <rclcpp/time.hpp>
 #include <semantic_scene_forests_object_msgs/msg/managed_object.hpp>
 #include <semantic_scene_forests_object_msgs/msg/object_candidate.hpp>
@@ -49,10 +50,18 @@ struct ManagedObject
   bool is_blocked{false};
   uint8_t source{0};
   rclcpp::Time last_updated;
+  builtin_interfaces::msg::Time last_seen;
+  bool class_overridden{false};
+  bool pose_overridden{false};
+  bool crops_curated{false};
 
   static ManagedObject
   fromCandidate(const semantic_scene_forests_object_msgs::msg::ObjectCandidate& candidate,
                 const rclcpp::Time& now);
+
+  void
+  updateFromCandidate(const semantic_scene_forests_object_msgs::msg::ObjectCandidate& candidate,
+                      const rclcpp::Time& now);
 
   [[nodiscard]] semantic_scene_forests_object_msgs::msg::ManagedObject
   toMessage(const std::string& frame_id) const;

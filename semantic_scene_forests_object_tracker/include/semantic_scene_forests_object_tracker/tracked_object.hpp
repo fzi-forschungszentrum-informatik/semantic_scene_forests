@@ -35,6 +35,7 @@
 #include <vector>
 
 #include <Eigen/Dense>
+#include <rclcpp/time.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <vision_msgs/msg/detection2_d.hpp>
 #include <vision_msgs/msg/detection3_d.hpp>
@@ -55,15 +56,16 @@ class TrackedObject
 {
 public:
   TrackedObject(const DetectionAdapter& initial_detection,
-                double initial_time,
+                const rclcpp::Time& initial_time,
                 uint64_t track_id,
                 double measurement_std,
                 double process_noise_std,
                 int confirmation_threshold,
-                size_t max_crops);
+                size_t max_crops,
+                double bbox_size_alpha = 0.2);
 
   void predict(double dt);
-  void update(const DetectionAdapter& detection, double current_time);
+  void update(const DetectionAdapter& detection, const rclcpp::Time& current_time);
 
   Eigen::Vector3d getPosition() const;
   Eigen::Matrix3d getPositionCovariance() const;
@@ -85,7 +87,7 @@ public:
   double score;
   bool confirmed;
   int observation_count;
-  double last_seen;
+  rclcpp::Time last_seen;
   DetectionAdapter last_detection;
 
 private:
@@ -93,6 +95,7 @@ private:
   Eigen::Matrix3d m_covariance;
   Eigen::Matrix3d m_measurement_noise;
   double m_process_noise_std;
+  double m_bbox_size_alpha;
   int m_confirmation_threshold;
 
   std::unordered_map<std::string, int> m_class_history;

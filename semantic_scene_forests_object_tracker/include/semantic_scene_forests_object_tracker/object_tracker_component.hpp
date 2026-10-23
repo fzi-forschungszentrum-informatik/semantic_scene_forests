@@ -45,7 +45,7 @@
 #include <opencv2/core.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_components/register_node_macro.hpp>
-#include <semantic_scene_forests_object_msgs/msg/object_candidate.hpp>
+#include <semantic_scene_forests_object_msgs/msg/object_candidate_array.hpp>
 #include <semantic_scene_forests_utils/diagnostic_utils.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
@@ -129,7 +129,10 @@ private:
                 const vision_msgs::msg::Detection3DArray& det3d_msg);
 
   static bool has3dBbox(const vision_msgs::msg::Detection3D& det);
-  void mergeOverlappingTracks();
+  bool isRecent(const TrackedObject& object, const rclcpp::Time& current_time) const;
+  void replaceRememberedTracks(const rclcpp::Time& current_time);
+  void mergeOverlappingTracks(const rclcpp::Time& current_time);
+  void publishSnapshot();
   std::optional<sensor_msgs::msg::Image>
   cropImagePatch(const cv::Mat& image, const vision_msgs::msg::BoundingBox2D& bbox, int padding);
 
@@ -141,11 +144,13 @@ private:
 
   std::shared_ptr<SynchronizerVision> m_sync_vision;
 
-  rclcpp::Publisher<semantic_scene_forests_object_msgs::msg::ObjectCandidate>::SharedPtr
+  rclcpp::Publisher<semantic_scene_forests_object_msgs::msg::ObjectCandidateArray>::SharedPtr
     m_candidates_pub;
 
   std::vector<std::unique_ptr<TrackedObject>> m_tracked_objects;
-  std::optional<double> m_last_update_time;
+  // Newly confirmed IDs enter for one evaluation; only ambiguous candidates persist.
+  std::set<uint64_t> m_replacement_candidates;
+  std::optional<rclcpp::Time> m_last_update_time;
   uint64_t m_next_track_id{1};
 
   std::shared_ptr<object_tracker::ParamListener> m_param_listener;
