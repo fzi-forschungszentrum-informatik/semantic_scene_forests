@@ -80,8 +80,14 @@ install(DIRECTORY launch config
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(test_snapshot_pipeline test/test_snapshot_pipeline.py TIMEOUT 90)
   ament_add_gtest(test_bbox_transform test/test_bbox_transform.cpp)
   target_link_libraries(test_bbox_transform object_tracker_component)
+  ament_add_gtest(test_tracked_object test/test_tracked_object.cpp)
+  target_link_libraries(test_tracked_object object_tracker_component)
+  ament_add_gtest(test_tracking_lifecycle test/test_tracking_lifecycle.cpp)
+  target_link_libraries(test_tracking_lifecycle object_tracker_component)
   target_include_directories(test_bbox_transform PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
 endif()

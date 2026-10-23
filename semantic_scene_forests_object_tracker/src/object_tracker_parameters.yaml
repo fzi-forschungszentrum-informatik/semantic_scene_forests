@@ -7,7 +7,7 @@ object_tracker:
   max_trackable_objects:
     type: int
     default_value: 1000
-    description: "Maximum number of objects that can be tracked."
+    description: "Maximum tentative and recent tracks; remembered objects do not count."
     read_only: true
     validation:
       gt<>: [0]
@@ -29,6 +29,37 @@ object_tracker:
     description: "Minimum detection confidence score to accept a detection."
     validation:
       bounds<>: [0.0, 1.0]
+  reacquisition_timeout:
+    type: double
+    default_value: 5.0
+    description: "Maximum observation age in seconds for ordinary identity reuse."
+    validation:
+      gt<>: [0.0]
+  max_association_distance:
+    type: double
+    default_value: 0.5
+    description: "Hard center-distance association limit in meters, in addition to Mahalanobis gating."
+    validation:
+      gt<>: [0.0]
+  replacement_distance:
+    type: double
+    default_value: 0.2
+    description: "Maximum center distance in meters for unambiguous remembered-object replacement."
+    validation:
+      gt<>: [0.0]
+  replacement_max_size_ratio:
+    type: double
+    default_value: 2.0
+    description: "Maximum larger/smaller ratio on every world-AABB dimension for replacement."
+    validation:
+      gt_eq<>: [1.0]
+  bbox_size_alpha:
+    type: double
+    default_value: 0.2
+    description: "Measurement weight in world-AABB dimension filtering."
+    validation:
+      gt<>: [0.0]
+      lt_eq<>: [1.0]
   measurement_noise_std:
     type: double
     default_value: 0.4

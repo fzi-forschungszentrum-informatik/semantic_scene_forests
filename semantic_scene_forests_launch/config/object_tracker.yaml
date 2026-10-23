@@ -4,6 +4,12 @@ object_tracker:
     max_trackable_objects: 1000
     gate_threshold_strict: 3.0
     gate_threshold_confirmed: 10.0
+    # Initial tuning only: calibrate for large furniture versus small tabletop objects.
+    reacquisition_timeout: 5.0
+    max_association_distance: 0.5
+    replacement_distance: 0.2
+    replacement_max_size_ratio: 2.0
+    bbox_size_alpha: 0.2
     confidence_threshold: 0.8
     measurement_noise_std: 0.4
     process_noise_std: 0.05
