@@ -35,6 +35,11 @@ semantic_scene_forests_query:
     type: string
     default_value: ""
     description: "Bearer token for the server. Leave empty for unauthenticated local servers."
+  extra_body:
+    type: string
+    default_value: ""
+    description: "JSON object merged into every LLM request body, e.g. OpenRouter routing: {\"provider\": {\"order\": [\"anthropic\"]}}. Empty sends nothing extra."
+    read_only: true
   model:
     type: string
     default_value: "Qwen/Qwen3-VL-8B-Instruct"

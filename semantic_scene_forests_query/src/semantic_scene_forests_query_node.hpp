@@ -53,10 +53,7 @@
 #include <semantic_scene_forests/scene_graph.hpp>
 
 #include <diagnostic_updater/diagnostic_updater.hpp>
-#include <diagnostic_updater/publisher.hpp>
 #include <semantic_scene_forests_msgs/msg/scene_graph.hpp>
-#include <semantic_scene_forests_object_msgs/msg/managed_object.hpp>
-#include <semantic_scene_forests_object_msgs/msg/managed_object_array.hpp>
 #include <semantic_scene_forests_object_msgs/srv/get_object_visuals.hpp>
 #include <semantic_scene_forests_planning_msgs/action/find_object.hpp>
 #include <semantic_scene_forests_planning_msgs/action/prompt_llm.hpp>
@@ -84,10 +81,9 @@ public:
   ~SceneGraphQueryNode() override;
 
 private:
-  using SceneGraphMsg      = semantic_scene_forests_msgs::msg::SceneGraph;
-  using ManagedObject      = semantic_scene_forests_object_msgs::msg::ManagedObject;
-  using ManagedObjectArray = semantic_scene_forests_object_msgs::msg::ManagedObjectArray;
-  using GetObjectVisuals   = semantic_scene_forests_object_msgs::srv::GetObjectVisuals;
+  using SceneGraphMsg    = semantic_scene_forests_msgs::msg::SceneGraph;
+  using ObjectNodeMsg    = semantic_scene_forests_msgs::msg::ObjectNode;
+  using GetObjectVisuals = semantic_scene_forests_object_msgs::srv::GetObjectVisuals;
 
   using FindObjectAction = semantic_scene_forests_planning_msgs::action::FindObject;
   using PromptLLMAction  = semantic_scene_forests_planning_msgs::action::PromptLLM;
@@ -96,7 +92,6 @@ private:
 
   // ── ROS infrastructure ──────────────────────────────────────────────────
   rclcpp::Subscription<SceneGraphMsg>::SharedPtr m_graph_sub;
-  rclcpp::Subscription<ManagedObjectArray>::SharedPtr m_objects_sub;
   rclcpp::Client<GetObjectVisuals>::SharedPtr m_visuals_client;
   rclcpp_action::Server<FindObjectAction>::SharedPtr m_find_object_server;
   rclcpp_action::Server<PromptLLMAction>::SharedPtr m_prompt_llm_server;
@@ -104,6 +99,7 @@ private:
   // ── Parameters ──────────────────────────────────────────────────────────
   std::shared_ptr<ParamListener> m_param_listener;
   Params m_params;
+  nlohmann::json m_extra_body; // parsed once from the read-only extra_body parameter
 
   // ── Prompt templates ────────────────────────────────────────────────────
   TemplateMap m_templates;
@@ -111,12 +107,6 @@ private:
   // ── Shared state ────────────────────────────────────────────────────────
   mutable std::mutex m_graph_mutex;
   std::optional<SceneGraphMsg> m_last_graph;
-  mutable std::mutex m_objects_mutex;
-  std::unordered_map<int64_t, ManagedObject> m_cached_objects;
-  // Whether an authoritative managed-object snapshot has arrived, and the
-  // membership epoch which changes whenever the active object-id set changes.
-  bool m_objects_received{false};
-  std::uint64_t m_objects_epoch{0};
 
   // ── Action workers ──────────────────────────────────────────────────────
   // One in-flight jthread per action type: a new goal of the same type is
@@ -133,10 +123,6 @@ private:
 
   // ── Diagnostics ────────────────────────────────────────────────────────
   diagnostic_updater::Updater m_diagnostic_updater;
-  double m_min_freq{0.1};
-  double m_max_freq{1000.0};
-  std::unique_ptr<diagnostic_updater::HeaderlessTopicDiagnostic> m_graph_freq;
-  std::unique_ptr<diagnostic_updater::HeaderlessTopicDiagnostic> m_objects_freq;
   semantic_scene_forests_utils::ErrorCounter m_llm_errors;
   semantic_scene_forests_utils::ErrorCounter m_service_errors;
   semantic_scene_forests_utils::ErrorCounter m_action_errors;
@@ -146,28 +132,23 @@ private:
 
   // ── Subscription callbacks ──────────────────────────────────────────────--
   void onSceneGraph(const SceneGraphMsg::SharedPtr& msg);
-  void onManagedObjects(const ManagedObjectArray::SharedPtr& msg);
 
   // ── Diagnostics ─────────────────────────────────────────────────────────
   void onConnectivityDiagnostic(diagnostic_updater::DiagnosticStatusWrapper& stat);
 
   // ── Shared helpers ──────────────────────────────────────────────────────--
   // Immutable scene state captured for one agent run: the sanitized graph, the
-  // object ids present in it, and the membership epoch at capture time.
+  // object ids present in it.
   struct SceneSnapshot
   {
     std::unique_ptr<fzi::semantic_scene_forests::SceneGraph> graph;
     std::unordered_set<int64_t> object_ids;
-    std::uint64_t epoch{0};
   };
 
   // Build an independent SceneGraph snapshot from the latest received message.
-  // Sanitizes it against the current managed-object membership (when an
-  // authoritative managed-object array has been received) so removed objects
-  // are invisible to the agent.
   [[nodiscard]] std::expected<SceneSnapshot, std::string> snapshotGraph() const;
 
-  // Object-manager lookup bound into the agent session.
+  // Object lookup in the latest scene graph, bound into the agent session.
   [[nodiscard]] std::optional<ObjectInfo> lookupObject(int64_t id) const;
 
   // Vision sub-completion over an object's crops (via /get_object_visuals).
@@ -191,10 +172,9 @@ private:
   {
     std::string text;
     std::vector<int64_t> expanded;
-    // Object ids present in the captured snapshot (post-sanitization) and the
-    // membership epoch at capture time; used to reject fabricated or stale answers.
+    // Object ids present in the captured snapshot (post-sanitization); used to
+    // reject fabricated answers.
     std::unordered_set<int64_t> snapshot_object_ids;
-    std::uint64_t membership_epoch{0};
   };
 
   // Shared agent driver for both actions: snapshot the graph, build the session
@@ -215,7 +195,7 @@ private:
   void guardedTerminal(const std::function<void()>& terminal);
 
   // Strictly validate the model's FindObject answer against the captured
-  // snapshot and the current membership epoch. Returns the terminal result on
+  // snapshot and the current active objects. Returns the terminal result on
   // success, or the abort reason when the answer is malformed, fabricated or
   // stale.
   [[nodiscard]] std::expected<FindObjectAction::Result::SharedPtr, std::string>

@@ -37,7 +37,6 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
-find_package(rclcpp_components REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(generate_parameter_library REQUIRED)
 find_package(ament_index_cpp REQUIRED)
@@ -50,6 +49,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(vision_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
+find_package(diagnostic_updater REQUIRED)
 
 # Third-party
 find_package(oai_api REQUIRED)
@@ -57,9 +57,7 @@ find_package(nlohmann_json REQUIRED)
 find_package(fmt REQUIRED)
 find_package(Boost REQUIRED)
 find_package(OpenCV REQUIRED)
-find_package(diagnostic_msgs REQUIRED)
-find_package(diagnostic_updater REQUIRED)
-find_package(semantic_scene_forests_utils REQUIRED)
+find_package(semantic_scene_forests_manager REQUIRED)
 
 # Minja fetches at configure time and is pinned to the misc_ws commit.
 include(FetchContent)
@@ -95,62 +93,31 @@ install(DIRECTORY ${minja_SOURCE_DIR}/include/
   DESTINATION include
 )
 
-generate_parameter_library(
-  semantic_scene_forests_generation_parameters
-  src/semantic_scene_forests_generation_parameters.yaml
+# LLM client, template and task plugin loading shared by the workers, plus their goal and
+# thread handling.
+add_library(generation_common SHARED
+  src/generation_common.cpp
 )
-
-add_library(
-  semantic_scene_forests_generation_component SHARED
-  src/semantic_scene_forests_generation.cpp
+target_compile_features(generation_common PUBLIC cxx_std_23)
+target_include_directories(generation_common PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include/${PROJECT_NAME}>
 )
-add_library(
-  semantic_scene_forests_generation::semantic_scene_forests_generation_component
-  ALIAS semantic_scene_forests_generation_component
-)
-
-target_compile_features(
-  semantic_scene_forests_generation_component PUBLIC cxx_std_23
-)
-target_compile_definitions(
-  semantic_scene_forests_generation_component
-  PRIVATE SEMANTIC_SCENE_FORESTS_GENERATION_BUILDING_DLL
-)
-
-target_include_directories(semantic_scene_forests_generation_component
-  PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/include>
-    $<INSTALL_INTERFACE:include/${PROJECT_NAME}>
-  PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-)
-
-target_link_libraries(semantic_scene_forests_generation_component
+target_link_libraries(generation_common
   PUBLIC
     oai_api::oai_api
     minja::minja
     semantic_scene_forests::semantic_scene_forests
-    ${semantic_scene_forests_msgs_TARGETS}
     ${semantic_scene_forests_object_msgs_TARGETS}
-    ${sensor_msgs_TARGETS}
-    ${vision_msgs_TARGETS}
-    ${diagnostic_msgs_TARGETS}
+    ${OpenCV_LIBS}
     rclcpp::rclcpp
     rclcpp_action::rclcpp_action
-    rclcpp_components::component
-    pluginlib::pluginlib
-    cv_bridge::cv_bridge
-    ament_index_cpp::ament_index_cpp
-    nlohmann_json::nlohmann_json
     diagnostic_updater::diagnostic_updater
-    semantic_scene_forests_utils::semantic_scene_forests_utils
-    semantic_scene_forests_generation_parameters
-)
-
-rclcpp_components_register_node(semantic_scene_forests_generation_component
-  PLUGIN "semantic_scene_forests_generation::SceneGraphGenerationNode"
-  EXECUTABLE semantic_scene_forests_generation_node
+    ${semantic_scene_forests_msgs_TARGETS}
+    pluginlib::pluginlib
+    nlohmann_json::nlohmann_json
+  PRIVATE
+    ament_index_cpp::ament_index_cpp
 )
 
 add_library(
@@ -175,7 +142,7 @@ target_include_directories(semantic_scene_forests_generation_tasks
 
 target_link_libraries(semantic_scene_forests_generation_tasks
   PUBLIC
-    semantic_scene_forests_generation_component
+    generation_common
     minja::minja
     nlohmann_json::nlohmann_json
 )
@@ -185,10 +152,52 @@ pluginlib_export_plugin_description_file(
   semantic_scene_forests_generation_plugins.xml
 )
 
+generate_parameter_library(object_attribution_parameters
+  src/object_attribution_parameters.yaml
+)
+
+# Worker plugin hosted by the scene_graph_manager.
+add_library(object_attribution_worker SHARED
+  src/object_attribution_worker.cpp
+)
+target_compile_features(object_attribution_worker PUBLIC cxx_std_23)
+target_link_libraries(object_attribution_worker
+  PUBLIC
+    generation_common
+    object_attribution_parameters
+    semantic_scene_forests_manager::world_db
+    ${semantic_scene_forests_msgs_TARGETS}
+    rclcpp_action::rclcpp_action
+    cv_bridge::cv_bridge
+)
+generate_parameter_library(concept_generation_parameters
+  src/concept_generation_parameters.yaml
+)
+
+add_library(concept_generation_worker SHARED
+  src/concept_generation_worker.cpp
+)
+target_compile_features(concept_generation_worker PUBLIC cxx_std_23)
+target_link_libraries(concept_generation_worker
+  PUBLIC
+    generation_common
+    concept_generation_parameters
+    semantic_scene_forests_manager::world_db
+    ${semantic_scene_forests_msgs_TARGETS}
+    rclcpp_action::rclcpp_action
+)
+
+pluginlib_export_plugin_description_file(semantic_scene_forests_manager
+  semantic_scene_forests_generation_workers.xml
+)
+
 install(TARGETS
-  semantic_scene_forests_generation_component
+  concept_generation_parameters
+  concept_generation_worker
+  generation_common
+  object_attribution_parameters
+  object_attribution_worker
   semantic_scene_forests_generation_tasks
-  semantic_scene_forests_generation_parameters
   EXPORT ${PROJECT_NAME}Targets
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
@@ -203,27 +212,33 @@ install(DIRECTORY resources/
   DESTINATION share/${PROJECT_NAME}/resources
 )
 
-install(DIRECTORY config/
-  DESTINATION share/${PROJECT_NAME}/config
-)
-
-install(DIRECTORY launch/
-  DESTINATION share/${PROJECT_NAME}/launch
-)
-
 install(FILES semantic_scene_forests_generation_plugins.xml
   DESTINATION share/${PROJECT_NAME}
 )
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+
+  ament_add_gtest(test_object_attribution_worker test/test_object_attribution_worker.cpp
+    TIMEOUT 60)
+  target_include_directories(test_object_attribution_worker PRIVATE src)
+  target_link_libraries(test_object_attribution_worker object_attribution_worker)
+
+  ament_add_gtest(test_concept_generation_worker test/test_concept_generation_worker.cpp
+    TIMEOUT 60)
+  target_include_directories(test_concept_generation_worker PRIVATE src)
+  target_link_libraries(test_concept_generation_worker concept_generation_worker)
+endif()
 
 ament_export_targets(${PROJECT_NAME}Targets HAS_LIBRARY_TARGET)
 ament_export_dependencies(
   rclcpp
   rclcpp_action
-  rclcpp_components
   pluginlib
   semantic_scene_forests_msgs
   semantic_scene_forests_object_msgs
   semantic_scene_forests
+  semantic_scene_forests_manager
   oai_api
   cv_bridge
   ament_index_cpp

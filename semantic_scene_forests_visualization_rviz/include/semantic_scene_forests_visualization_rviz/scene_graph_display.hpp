@@ -29,6 +29,7 @@
 #ifndef SEMANTIC_SCENE_FORESTS_VISUALIZATION_RVIZ__SCENE_GRAPH_DISPLAY_HPP_
 #define SEMANTIC_SCENE_FORESTS_VISUALIZATION_RVIZ__SCENE_GRAPH_DISPLAY_HPP_
 
+#include <chrono>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -56,13 +57,11 @@
 #include "rviz_common/properties/bool_property.hpp"
 #include "rviz_common/properties/color_property.hpp"
 #include "rviz_common/properties/float_property.hpp"
-#include "rviz_common/properties/qos_profile_property.hpp"
 #include "rviz_common/properties/ros_topic_property.hpp"
 #include "rviz_rendering/objects/movable_text.hpp"
 #include "rviz_rendering/objects/shape.hpp"
-#include "semantic_scene_forests_msgs/action/update_scene_graph.hpp"
+#include "semantic_scene_forests_msgs/action/run_worker.hpp"
 #include "semantic_scene_forests_msgs/msg/scene_graph.hpp"
-#include "semantic_scene_forests_object_msgs/msg/managed_object_array.hpp"
 #include "semantic_scene_forests_object_msgs/srv/block_object.hpp"
 #include "semantic_scene_forests_object_msgs/srv/get_object_visuals.hpp"
 
@@ -77,14 +76,16 @@ class SceneGraphDisplay : public rviz_common::Display
   Q_OBJECT
 
 public:
-  using UpdateSceneGraph = semantic_scene_forests_msgs::action::UpdateSceneGraph;
-  using GoalHandle       = rclcpp_action::ClientGoalHandle<UpdateSceneGraph>;
+  using RunWorker  = semantic_scene_forests_msgs::action::RunWorker;
+  using GoalHandle = rclcpp_action::ClientGoalHandle<RunWorker>;
 
   SceneGraphDisplay();
   ~SceneGraphDisplay() override;
 
   void onInitialize() override;
   void reset() override;
+  void update(std::chrono::nanoseconds wall_dt, std::chrono::nanoseconds ros_dt) override;
+  void fixedFrameChanged() override;
 
 private:
   // Nested type used by showImageDialog — must be declared before method signatures
@@ -96,23 +97,20 @@ private:
   };
 
   void clearVisuals();
-  void updateObjectNodes(
-    const std::vector<semantic_scene_forests_object_msgs::msg::ManagedObject>& objects);
+  void updateObjectNodes(const std::vector<semantic_scene_forests_msgs::msg::ObjectNode>& objects);
   bool eventFilter(QObject* obj, QEvent* event) override;
   bool handleContextMenu(const QPoint& pos);
   void showImageDialog(int64_t object_id, const ObjectVisual& visual);
   void blockObject(int64_t object_id);
 
-  void sendGoal(uint8_t phase);
+  void sendGoal(const rclcpp_action::Client<RunWorker>::SharedPtr& client, const QString& name);
   void handleGoalResponse(const GoalHandle::SharedPtr& goal_handle);
   void handleFeedback(const GoalHandle::SharedPtr& goal_handle,
-                      const std::shared_ptr<const UpdateSceneGraph::Feedback>& feedback);
+                      const std::shared_ptr<const RunWorker::Feedback>& feedback);
   void handleResult(const GoalHandle::WrappedResult& result);
   void resetActionState();
   QWidget* createControlWidget();
 
-  void
-  onManagedObjects(semantic_scene_forests_object_msgs::msg::ManagedObjectArray::ConstSharedPtr msg);
   void onSceneGraph(semantic_scene_forests_msgs::msg::SceneGraph::ConstSharedPtr msg);
   void requestObjectVisuals(int64_t object_id);
   void onObjectVisualsResponse(
@@ -125,6 +123,10 @@ private:
 
   // Visual storage (unique_ptr for RAII on Shape)
   std::map<int64_t, std::unique_ptr<rviz_rendering::Shape>> m_object_shapes;
+  //! Last received objects, re-rendered while some were skipped for missing TF.
+  std::vector<semantic_scene_forests_msgs::msg::ObjectNode> m_last_objects;
+  bool m_render_incomplete{false};
+  std::chrono::nanoseconds m_retry_elapsed{0};
 
   // Labels: raw pointers — MovableText (Ogre::SimpleRenderable) requires manual cleanup
   struct LabelVisual
@@ -146,16 +148,15 @@ private:
   rviz_common::properties::ColorProperty* m_object_color_property{nullptr};
   rviz_common::properties::FloatProperty* m_object_scale_property{nullptr};
   rviz_common::properties::BoolProperty* m_show_labels_property{nullptr};
-  rviz_common::properties::RosTopicProperty* m_managed_objects_topic_property{nullptr};
-  rviz_common::properties::QosProfileProperty* m_qos_profile_property{nullptr};
-  rclcpp::QoS m_qos_profile{5};
-
+  rviz_common::properties::FloatProperty* m_stale_after_property{nullptr};
   rviz_common::properties::RosTopicProperty* m_scene_graph_topic_property{nullptr};
-  rviz_common::properties::QosProfileProperty* m_scene_graph_qos_profile_property{nullptr};
-  rclcpp::QoS m_scene_graph_qos_profile{5};
+  // Fixed, not a property: scene_graph is latched and published only on change, so a volatile
+  // subscription (e.g. restored from an old .rviz) would miss an unchanged graph entirely.
+  const rclcpp::QoS m_scene_graph_qos_profile{rclcpp::QoS(1).reliable().transient_local()};
 
-  // Action client
-  rclcpp_action::Client<UpdateSceneGraph>::SharedPtr m_action_client;
+  // Worker action clients
+  rclcpp_action::Client<RunWorker>::SharedPtr m_attribute_objects_client;
+  rclcpp_action::Client<RunWorker>::SharedPtr m_generate_concepts_client;
 
   // Service client for blocking objects
   rclcpp::Client<semantic_scene_forests_object_msgs::srv::BlockObject>::SharedPtr
@@ -163,10 +164,6 @@ private:
 
   // ROS node abstraction for topic property initialization
   rviz_common::ros_integration::RosNodeAbstractionIface::WeakPtr m_rviz_ros_node;
-
-  // Managed objects subscription
-  rclcpp::Subscription<semantic_scene_forests_object_msgs::msg::ManagedObjectArray>::SharedPtr
-    m_managed_objects_sub;
 
   // Scene graph subscription
   rclcpp::Subscription<semantic_scene_forests_msgs::msg::SceneGraph>::SharedPtr m_scene_graph_sub;
@@ -177,8 +174,8 @@ private:
 
   // Associated widget (QPointer for safe access after destruction)
   QPointer<QWidget> m_control_widget;
-  QPointer<QPushButton> m_phase1_button;
-  QPointer<QPushButton> m_phase2_button;
+  QPointer<QPushButton> m_attribute_objects_button;
+  QPointer<QPushButton> m_generate_concepts_button;
   QPointer<QLabel> m_node_count_label;
   QPointer<QLabel> m_scene_graph_info_label;
   QPointer<QProgressBar> m_progress_bar;
@@ -186,13 +183,12 @@ private:
   bool m_action_in_progress{false};
 
 
-  void sendPhase1Goal();
-  void sendPhase2Goal();
+  void sendAttributeObjectsGoal();
+  void sendGenerateConceptsGoal();
 
 private Q_SLOTS:
   void updateObjectColor();
   void updateLabels();
-  void updateManagedObjectsTopic();
   void updateSceneGraphTopic();
 };
 

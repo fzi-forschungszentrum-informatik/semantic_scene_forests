@@ -35,7 +35,7 @@
   <version>0.0.0</version>
   <description>Package for visualizing scene graphs in Rviz.</description>
   <maintainer email="oberacker@fzi.de">David Oberacker</maintainer>
-  <license>Proprietary</license>
+  <license>BSD-3-Clause</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <buildtool_depend>ament_cmake_ros</buildtool_depend>

@@ -48,9 +48,8 @@
 #include <rclcpp_action/client.hpp>
 #include <rclcpp_action/create_client.hpp>
 
-#include <semantic_scene_forests_msgs/action/update_scene_graph.hpp>
+#include <semantic_scene_forests_msgs/action/run_worker.hpp>
 #include <semantic_scene_forests_msgs/msg/scene_graph.hpp>
-#include <semantic_scene_forests_object_msgs/msg/managed_object_array.hpp>
 #include <semantic_scene_forests_object_msgs/srv/get_object_visuals.hpp>
 #include <semantic_scene_forests_planning_msgs/action/find_object.hpp>
 #include <semantic_scene_forests_planning_msgs/action/prompt_llm.hpp>
@@ -87,7 +86,6 @@ public:
 
 signals:
   void sceneGraphReceived();
-  void managedObjectsReceived();
   void visualsReceived(qint64 object_id);
   void actionFeedback(unsigned current, unsigned total, QString status);
   void actionFinished(bool success, QString message);
@@ -96,7 +94,6 @@ signals:
 
 private slots:
   void onSceneGraphReceived();
-  void onManagedObjectsReceived();
   void onVisualsReceived(qint64 object_id);
   void onActionFeedback(unsigned current, unsigned total, QString status);
   void onActionFinished(bool success, QString message);
@@ -104,7 +101,6 @@ private slots:
   void onSelectionCleared();
   void onViewModeChanged(ViewMode mode);
   void onRefreshRequested();
-  void sendActionGoal(std::uint8_t phase);
   void onQueryRequested(int kind, QString text);
   void onQueryCancel();
   void onQueryInspected(QVector<qint64> ids, QString status);
@@ -113,10 +109,10 @@ private slots:
 
   // NOLINTNEXTLINE(readability-redundant-access-specifiers) — Qt slots section.
 private:
-  using UpdateSceneGraph = semantic_scene_forests_msgs::action::UpdateSceneGraph;
-  using GoalHandle       = rclcpp_action::ClientGoalHandle<UpdateSceneGraph>;
-  using PromptLLM        = semantic_scene_forests_planning_msgs::action::PromptLLM;
-  using FindObject       = semantic_scene_forests_planning_msgs::action::FindObject;
+  using RunWorker  = semantic_scene_forests_msgs::action::RunWorker;
+  using GoalHandle = rclcpp_action::ClientGoalHandle<RunWorker>;
+  using PromptLLM  = semantic_scene_forests_planning_msgs::action::PromptLLM;
+  using FindObject = semantic_scene_forests_planning_msgs::action::FindObject;
 
   QWidget* m_widget{nullptr};
   GraphView* m_graph_view{nullptr};
@@ -124,9 +120,8 @@ private:
   ImagePanel* m_image_panel{nullptr};
 
   rclcpp::Subscription<semantic_scene_forests_msgs::msg::SceneGraph>::SharedPtr m_scene_graph_sub;
-  rclcpp::Subscription<semantic_scene_forests_object_msgs::msg::ManagedObjectArray>::SharedPtr
-    m_managed_objects_sub;
-  rclcpp_action::Client<UpdateSceneGraph>::SharedPtr m_action_client;
+  rclcpp_action::Client<RunWorker>::SharedPtr m_attribute_objects_client;
+  rclcpp_action::Client<RunWorker>::SharedPtr m_generate_concepts_client;
   rclcpp_action::Client<PromptLLM>::SharedPtr m_prompt_client;
   rclcpp_action::Client<FindObject>::SharedPtr m_find_client;
   rclcpp::Client<semantic_scene_forests_object_msgs::srv::GetObjectVisuals>::SharedPtr
@@ -159,8 +154,7 @@ private:
   bool m_active_query_is_find{false};
 
   void onSceneGraphMsg(semantic_scene_forests_msgs::msg::SceneGraph::ConstSharedPtr msg);
-  void onManagedObjectsMsg(
-    semantic_scene_forests_object_msgs::msg::ManagedObjectArray::ConstSharedPtr msg);
+  void sendActionGoal(const rclcpp_action::Client<RunWorker>::SharedPtr& client);
   void requestVisuals(int64_t object_id);
   void syncDisplayedGraphToLatest();
 };

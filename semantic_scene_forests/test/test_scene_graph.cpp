@@ -740,3 +740,57 @@ TEST(SceneGraphTest, RetainObjectNodesEmptyActiveSetEmptiesGraph)
   EXPECT_TRUE(graph.getNodes().empty());
   EXPECT_TRUE(graph.getEdges().empty());
 }
+
+TEST(SceneGraphTest, ObjectNodeMessageRoundTripKeepsClassAndDetection)
+{
+  SceneGraph graph;
+  auto detection                    = std::make_shared<vision_msgs::msg::Detection3D>();
+  detection->bbox.center.position.x = 1.5;
+  std::array<sensor_msgs::msg::Image::SharedPtr, 5> visuals{};
+  ASSERT_TRUE(graph.addObjectNodeWithId(7, "cup", detection, visuals).has_value());
+
+  auto restored = SceneGraph::fromMsg(*graph.toMsg());
+  ASSERT_TRUE(restored.has_value());
+  auto node = restored.value()->findNode(7);
+  ASSERT_TRUE(node.has_value());
+  const auto* object = std::get_if<ObjectNode>(&node.value());
+  ASSERT_NE(object, nullptr);
+  EXPECT_EQ(object->class_name, "cup");
+  ASSERT_NE(object->detection, nullptr);
+  EXPECT_DOUBLE_EQ(object->detection->bbox.center.position.x, 1.5);
+}
+
+TEST(SceneGraphTest, PositiveConceptIdsAreAccepted)
+{
+  SceneGraph graph;
+  ASSERT_TRUE(graph.addConceptNodeWithId(42, "red").has_value());
+  EXPECT_TRUE(graph.hasNode(42));
+
+  auto scratch = graph.addConceptNode("x");
+  ASSERT_TRUE(scratch.has_value());
+  EXPECT_LT(scratch.value(), 0);
+}
+
+// Regression: the implicit copy kept vertex descriptors pointing into the source graph.
+TEST(SceneGraphTest, MovedGraphOutlivesSource)
+{
+  auto source    = std::make_unique<SceneGraph>();
+  const auto OBJ = source->addObjectNode("cup", nullptr, {}).value();
+  const auto RED = source->addConceptNode("red").value();
+  ASSERT_TRUE(source->addEdge(OBJ, RED, "has_color").has_value());
+
+  SceneGraph moved(std::move(*source));
+  source.reset();
+  ASSERT_TRUE(moved.findNode(OBJ).has_value());
+  ASSERT_EQ(moved.getEdges().size(), 1U);
+  EXPECT_TRUE(moved.hasEdge(OBJ, RED, "has_color"));
+
+  auto other = std::make_unique<SceneGraph>();
+  SceneGraph assigned;
+  *other   = std::move(moved);
+  assigned = std::move(*other);
+  other.reset();
+  ASSERT_TRUE(assigned.findNode(RED).has_value());
+  EXPECT_TRUE(assigned.hasEdge(OBJ, RED, "has_color"));
+  EXPECT_TRUE(assigned.addEdge(OBJ, assigned.addConceptNode("x").value(), "is").has_value());
+}

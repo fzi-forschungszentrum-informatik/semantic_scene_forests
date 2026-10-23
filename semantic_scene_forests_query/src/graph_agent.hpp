@@ -45,17 +45,14 @@
 namespace semantic_scene_forests_query {
 
 // ---------------------------------------------------------------------------
-// Object information sourced from the object manager (NOT the scene graph).
-//
-// Scene-graph ObjectNodes carry only an id (see semantic_scene_forests_msgs/ObjectNode and
-// SceneGraph::fromMsg, which sets class_name to ""), so the class name and pose
-// must be resolved through the /managed_objects cache supplied by the node.
+// Object information read from the ObjectNode fields (class_name, detection) of
+// the latest scene_graph message, resolved through the lookup supplied by the node.
 // ---------------------------------------------------------------------------
 
 struct ObjectInfo
 {
   std::string class_name;
-  // Bounding-box centre, in the frame published by the object manager.
+  // Bounding-box centre, in the frame of the object's detection header.
   double position_x{};
   double position_y{};
   double position_z{};
@@ -65,7 +62,7 @@ struct ObjectInfo
   double size_z{};
 };
 
-// Resolve object-manager metadata for a scene-graph object id.
+// Resolve object metadata for a scene-graph object id from the latest scene graph.
 using ObjectLookup = std::function<std::optional<ObjectInfo>(int64_t id)>;
 
 // Run a one-shot vision completion over an object's image crops (fetched from

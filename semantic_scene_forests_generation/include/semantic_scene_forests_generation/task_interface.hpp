@@ -59,7 +59,7 @@ using TaskResult  = std::expected<void, std::string>;
 // Executed once per managed object in Phase 1. The history vector is
 // pre-populated with the system message and the object-setup user message
 // (with image crops). Tasks append their own user prompt, call
-// client.complete(history), and update the scene graph.
+// client.chat({.messages = history}), and update the scene graph.
 // ---------------------------------------------------------------------------
 
 class SEMANTIC_SCENE_FORESTS_GENERATION_PUBLIC IObjectTask
@@ -92,12 +92,9 @@ public:
 
   virtual void initialize(rclcpp::Node* node, const TemplateMap& templates) = 0;
 
-  // NOTE: `current_graph` and `graph` may alias the same SceneGraph instance (the
-  // current call site always passes the same object for both). Implementations
-  // MUST snapshot any container/iterator obtained from `current_graph` (e.g. via
-  // getConceptNodes()) into a local value BEFORE mutating `graph` — do not hold
-  // live references or iterators into `current_graph` across a `graph` mutation.
-  // See category_task.cpp / affordance_task.cpp for the correct snapshot pattern.
+  // NOTE: `current_graph` holds the input concepts (database ids, no edges): only concepts not yet
+  // processed on automatic runs, all visible concepts on manual runs. It is always a separate
+  // graph from `graph`, the scratch copy that tasks mutate.
   virtual TaskResult execute(oai::OpenAIClient& client,
                              std::vector<oai::Message>& history,
                              const fzi::semantic_scene_forests::SceneGraph& current_graph,

@@ -49,6 +49,19 @@ SceneGraph::SceneGraph()
 
 SceneGraph::~SceneGraph() = default;
 
+// Both go through swap(), which rebuilds the descriptor maps of both graphs.
+SceneGraph::SceneGraph(SceneGraph&& other) noexcept
+  : SceneGraph()
+{
+  swap(other);
+}
+
+SceneGraph& SceneGraph::operator=(SceneGraph&& other) noexcept
+{
+  swap(other);
+  return *this;
+}
+
 std::expected<int64_t, SceneGraphError> SceneGraph::addObjectNodeWithId(
   int64_t id,
   const std::string& class_name,
@@ -551,10 +564,10 @@ SceneGraph::fromMsg(const semantic_scene_forests_msgs::msg::SceneGraph& msg) noe
 
   for (const auto& node_msg : msg.object_nodes)
   {
-    auto detection = std::make_shared<vision_msgs::msg::Detection3D>();
+    auto detection = std::make_shared<vision_msgs::msg::Detection3D>(node_msg.detection);
     std::array<sensor_msgs::msg::Image::SharedPtr, 5> visuals{};
 
-    auto result = graph->addObjectNodeWithId(node_msg.id, "", detection, visuals);
+    auto result = graph->addObjectNodeWithId(node_msg.id, node_msg.class_name, detection, visuals);
 
     if (!result)
     {
@@ -592,7 +605,12 @@ std::unique_ptr<semantic_scene_forests_msgs::msg::SceneGraph> SceneGraph::toMsg(
     if (const auto* object = std::get_if<ObjectNode>(&node))
     {
       semantic_scene_forests_msgs::msg::ObjectNode object_node_msg;
-      object_node_msg.id = object->id;
+      object_node_msg.id         = object->id;
+      object_node_msg.class_name = object->class_name;
+      if (object->detection)
+      {
+        object_node_msg.detection = *object->detection;
+      }
 
       msg->object_nodes.push_back(object_node_msg);
     }
@@ -718,14 +736,15 @@ std::expected<void, SceneGraphError> SceneGraph::updateObjectNodeFromMsg(
       return std::unexpected(SceneGraphError::nodeAlreadyExists(object_msg.id));
     }
 
-    // ObjectNode.msg carries no class_name/detection/visuals — nothing to merge, and
-    // replacing the node here would discard its real detection/visuals data.
+    // Existing nodes are kept as-is; replacing them here would discard their
+    // visuals, which ObjectNode.msg does not carry.
     return {};
   }
 
-  auto detection = std::make_shared<vision_msgs::msg::Detection3D>();
+  auto detection = std::make_shared<vision_msgs::msg::Detection3D>(object_msg.detection);
   std::array<sensor_msgs::msg::Image::SharedPtr, 5> visuals{};
-  if (auto result = addObjectNodeWithId(object_msg.id, "", detection, visuals); !result)
+  if (auto result = addObjectNodeWithId(object_msg.id, object_msg.class_name, detection, visuals);
+      !result)
   {
     return std::unexpected(result.error());
   }

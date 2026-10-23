@@ -67,6 +67,13 @@ public:
 
   virtual ~SceneGraph();
 
+  // Move-only: vertex descriptors are pointers into m_graph, so a member-wise copy would leave
+  // m_id_map pointing into the source. Use clone() for an independent copy.
+  SceneGraph(const SceneGraph&)            = delete;
+  SceneGraph& operator=(const SceneGraph&) = delete;
+  SEMANTIC_SCENE_FORESTS_PUBLIC SceneGraph(SceneGraph&& other) noexcept;
+  SEMANTIC_SCENE_FORESTS_PUBLIC SceneGraph& operator=(SceneGraph&& other) noexcept;
+
   [[nodiscard]] SEMANTIC_SCENE_FORESTS_PUBLIC std::expected<int64_t, SceneGraphError>
   addObjectNodeWithId(int64_t id,
                       const std::string& class_name,

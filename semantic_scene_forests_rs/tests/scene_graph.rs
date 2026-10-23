@@ -96,6 +96,7 @@ fn message_roundtrip() {
     graph.add_edge(cup, on, "relation").unwrap();
     let message = graph.to_msg();
     assert_eq!(message.object_nodes[0].id, cup);
+    assert_eq!(message.object_nodes[0].class_name, "cup");
     assert_eq!(message.concept_nodes[0].id, on);
     assert_eq!(message.concept_nodes[0].class_name, "on");
     assert_eq!(message.edges[0].source_id, cup);
@@ -251,7 +252,7 @@ fn python_equivalent_snapshot_preserves_payloads_without_wire_serialization() {
         graph.outgoing_edges(cup).unwrap()
     );
     let loaded_objects = loaded.object_nodes();
-    assert!(loaded_objects[0].class_name.is_empty());
+    assert_eq!(loaded_objects[0].class_name, "cup");
     assert!(loaded_objects[0].detection.as_ref().unwrap().id.is_empty());
     assert!(loaded_objects[0].visuals.iter().all(Option::is_none));
 

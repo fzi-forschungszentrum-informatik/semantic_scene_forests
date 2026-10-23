@@ -54,50 +54,58 @@
 #include <vision_msgs/msg/detection3_d_array.hpp>
 #include <vision_msgs/msg/object_hypothesis_with_pose.hpp>
 
-#include "semantic_scene_forests_object_manager/object_manager_node.hpp"
+#include "semantic_scene_forests_manager/database.hpp"
 #include "semantic_scene_forests_object_msgs/msg/object_candidate.hpp"
-#include "semantic_scene_forests_object_msgs/srv/get_object_visuals.hpp"
-#include "semantic_scene_forests_object_msgs/srv/get_objects.hpp"
-#include "semantic_scene_forests_object_tracker/object_tracker_component.hpp"
+#include "semantic_scene_forests_object_msgs/srv/add_observations.hpp"
 #include "semantic_scene_forests_object_tracker/tracked_object.hpp"
+#include "semantic_scene_forests_object_tracker/tracker_worker.hpp"
 
 namespace {
 
 using namespace std::chrono_literals;
 
+using semantic_scene_forests_manager::Database;
+using semantic_scene_forests_manager::Tx;
 using semantic_scene_forests_object_tracker::DetectionAdapter;
-using semantic_scene_forests_object_tracker::ObjectTrackerComponent;
 using semantic_scene_forests_object_tracker::TrackedObject;
-using ObjectCandidate  = semantic_scene_forests_object_msgs::msg::ObjectCandidate;
-using GetObjectVisuals = semantic_scene_forests_object_msgs::srv::GetObjectVisuals;
-using GetObjects       = semantic_scene_forests_object_msgs::srv::GetObjects;
+using semantic_scene_forests_object_tracker::TrackerWorker;
+using ObjectCandidate = semantic_scene_forests_object_msgs::msg::ObjectCandidate;
+using AddObservations = semantic_scene_forests_object_msgs::srv::AddObservations;
 
 rclcpp::NodeOptions twoCameraOptions()
 {
   rclcpp::NodeOptions options;
-  options.append_parameter_override("world_frame", "map");
-  options.append_parameter_override("camera_names", std::vector<std::string>{"front", "rear"});
-  options.append_parameter_override("cameras.front.detections_2d_topic", "/front/detections_2d");
-  options.append_parameter_override("cameras.front.detections_3d_topic", "/front/detections_3d");
-  options.append_parameter_override("cameras.front.image_topic", "/front/image");
-  options.append_parameter_override("cameras.rear.detections_2d_topic", "/rear/detections_2d");
-  options.append_parameter_override("cameras.rear.detections_3d_topic", "/rear/detections_3d");
-  options.append_parameter_override("cameras.rear.image_topic", "/rear/image");
+  options.append_parameter_override("tracker.world_frame", "map");
+  options.append_parameter_override("tracker.snapshot_rate_hz", 100.0);
+  options.append_parameter_override("tracker.camera_names",
+                                    std::vector<std::string>{"front", "rear"});
+  options.append_parameter_override("tracker.cameras.front.detections_2d_topic",
+                                    "/front/detections_2d");
+  options.append_parameter_override("tracker.cameras.front.detections_3d_topic",
+                                    "/front/detections_3d");
+  options.append_parameter_override("tracker.cameras.front.image_topic", "/front/image");
+  options.append_parameter_override("tracker.cameras.rear.detections_2d_topic",
+                                    "/rear/detections_2d");
+  options.append_parameter_override("tracker.cameras.rear.detections_3d_topic",
+                                    "/rear/detections_3d");
+  options.append_parameter_override("tracker.cameras.rear.image_topic", "/rear/image");
   return options;
 }
 
 rclcpp::NodeOptions commonTrackerOptions(int confirmation_threshold      = 3,
                                          double gate_threshold_strict    = 3.0,
                                          double gate_threshold_confirmed = 10.0,
-                                         double merge_iou_threshold      = 0.6)
+                                         double merge_overlap_threshold  = 0.6)
 {
   auto options = twoCameraOptions();
-  options.append_parameter_override("confirmation_threshold", confirmation_threshold);
-  options.append_parameter_override("gate_threshold_strict", gate_threshold_strict);
-  options.append_parameter_override("gate_threshold_confirmed", gate_threshold_confirmed);
-  options.append_parameter_override("merge_iou_threshold", merge_iou_threshold);
-  options.append_parameter_override("crop_padding", 0);
-  options.append_parameter_override("max_crops_per_object", 20);
+  options.append_parameter_override("tracker.confirmation_threshold", confirmation_threshold);
+  options.append_parameter_override("tracker.gate_threshold_strict", gate_threshold_strict);
+  options.append_parameter_override("tracker.gate_threshold_confirmed", gate_threshold_confirmed);
+  options.append_parameter_override("tracker.merge_overlap_threshold", merge_overlap_threshold);
+  // These scenarios grow boxes abruptly; size gating is covered in test_camera_tracker.
+  options.append_parameter_override("tracker.association_max_size_ratio", 100.0);
+  options.append_parameter_override("tracker.crop_padding", 0);
+  options.append_parameter_override("tracker.max_crops_per_object", 20);
   return options;
 }
 
@@ -111,10 +119,11 @@ rclcpp::NodeOptions defaultTrackerOptions()
                      "detections_3d:=/remapped/detections_3d",
                      "-r",
                      "camera/image:=/remapped/image"});
-  options.append_parameter_override("world_frame", "map");
-  options.append_parameter_override("confirmation_threshold", 3);
-  options.append_parameter_override("crop_padding", 0);
-  options.append_parameter_override("max_crops_per_object", 20);
+  options.append_parameter_override("tracker.world_frame", "map");
+  options.append_parameter_override("tracker.snapshot_rate_hz", 100.0);
+  options.append_parameter_override("tracker.confirmation_threshold", 3);
+  options.append_parameter_override("tracker.crop_padding", 0);
+  options.append_parameter_override("tracker.max_crops_per_object", 20);
   return options;
 }
 
@@ -225,19 +234,22 @@ class TrackerHarness
 {
 public:
   explicit TrackerHarness(bool two_cameras                = true,
-                          bool with_manager               = false,
                           int confirmation_threshold      = 3,
                           double gate_threshold_strict    = 3.0,
                           double gate_threshold_confirmed = 10.0,
-                          double merge_iou_threshold      = 0.6)
+                          double merge_overlap_threshold  = 0.6)
   {
     m_source_node = std::make_shared<rclcpp::Node>("multi_camera_test_source");
-    m_tracker     = std::make_shared<ObjectTrackerComponent>(
-      two_cameras ? commonTrackerOptions(confirmation_threshold,
-                                         gate_threshold_strict,
-                                         gate_threshold_confirmed,
-                                         merge_iou_threshold)
-                  : defaultTrackerOptions());
+    m_host =
+      std::make_shared<rclcpp::Node>("scene_graph_manager",
+                                     two_cameras ? commonTrackerOptions(confirmation_threshold,
+                                                                        gate_threshold_strict,
+                                                                        gate_threshold_confirmed,
+                                                                        merge_overlap_threshold)
+                                                 : defaultTrackerOptions());
+    m_diagnostics.emplace(m_host);
+    m_worker.initialize(*m_host, m_db, "tracker", *m_diagnostics);
+    m_worker.start();
 
     const auto SENSOR_QOS = rclcpp::SensorDataQoS();
     if (two_cameras)
@@ -256,13 +268,8 @@ public:
                            SENSOR_QOS);
     }
 
-    m_candidates_sub = m_source_node->create_subscription<ObjectCandidate>(
-      "object_candidates",
-      rclcpp::QoS(1000).reliable().transient_local(),
-      [this](ObjectCandidate::ConstSharedPtr candidate) {
-        std::scoped_lock lock(m_candidates_mutex);
-        m_candidates.push_back(*candidate);
-      });
+    // Each database change appends the visible objects to the history, like a snapshot did.
+    m_poll_timer = m_source_node->create_wall_timer(10ms, [this]() { pollDatabase(); });
 
     m_tf_buffer = std::make_shared<tf2_ros::Buffer>(m_source_node->get_clock());
     m_tf_listener =
@@ -274,22 +281,10 @@ public:
       m_tf_broadcaster->sendTransform(makeTransform(m_rear->frame_id, -1.0));
     }
 
-    if (with_manager)
-    {
-      rclcpp::NodeOptions manager_options;
-      manager_options.append_parameter_override("frame_id", "map");
-      m_manager =
-        std::make_shared<semantic_scene_forests_object_manager::ObjectManagerNode>(manager_options);
-      m_get_objects = m_source_node->create_client<GetObjects>("get_objects");
-      m_get_visuals = m_source_node->create_client<GetObjectVisuals>("get_object_visuals");
-    }
+    m_add_observations = m_source_node->create_client<AddObservations>("add_observations");
 
     m_executor.add_node(m_source_node);
-    m_executor.add_node(m_tracker);
-    if (m_manager)
-    {
-      m_executor.add_node(m_manager);
-    }
+    m_executor.add_node(m_host);
     m_spinner = std::thread([this]() { m_executor.spin(); });
   }
 
@@ -300,6 +295,7 @@ public:
     {
       m_spinner.join();
     }
+    m_worker.stop();
   }
 
   template <typename Predicate>
@@ -317,10 +313,10 @@ public:
     return predicate();
   }
 
-  bool ready(bool manager = false) const
+  bool ready() const
   {
     return waitUntil(
-      [this, manager]() {
+      [this]() {
         const bool FRONT_READY = m_front->detections_2d->get_subscription_count() > 0 &&
                                  m_front->detections_3d->get_subscription_count() > 0 &&
                                  m_front->image->get_subscription_count() > 0;
@@ -332,9 +328,7 @@ public:
         const bool REAR_TF_READY =
           !m_rear || m_tf_buffer->canTransform(
                        "map", m_rear->frame_id, tf2::TimePointZero, tf2::durationFromSec(0.0));
-        const bool SERVICES_READY =
-          !manager || (m_get_objects->service_is_ready() && m_get_visuals->service_is_ready());
-        return FRONT_READY && REAR_READY && TF_READY && REAR_TF_READY && SERVICES_READY;
+        return FRONT_READY && REAR_READY && TF_READY && REAR_TF_READY;
       },
       5s);
   }
@@ -344,7 +338,7 @@ public:
 
   bool setConfirmationThreshold(int64_t threshold)
   {
-    return m_tracker->set_parameter(rclcpp::Parameter("confirmation_threshold", threshold))
+    return m_host->set_parameter(rclcpp::Parameter("tracker.confirmation_threshold", threshold))
       .successful;
   }
 
@@ -352,6 +346,12 @@ public:
   {
     std::scoped_lock lock(m_candidates_mutex);
     return m_candidates;
+  }
+
+  std::vector<ObjectCandidate> latestCandidates() const
+  {
+    std::scoped_lock lock(m_candidates_mutex);
+    return m_latest_candidates;
   }
 
   bool waitForCandidates(size_t count, std::chrono::milliseconds timeout = 2s) const
@@ -393,21 +393,18 @@ public:
     return true;
   }
 
-  std::optional<GetObjects::Response> getObjects() const
+  Database& db() { return m_db; }
+
+  std::optional<AddObservations::Response>
+  addObservations(std::vector<ObjectCandidate> observations) const
   {
-    auto future = m_get_objects->async_send_request(std::make_shared<GetObjects::Request>());
-    if (!waitUntil([&future]() { return future.wait_for(0s) == std::future_status::ready; }, 2s))
+    if (!m_add_observations->wait_for_service(2s))
     {
       return std::nullopt;
     }
-    return *future.get();
-  }
-
-  std::optional<GetObjectVisuals::Response> getVisuals(const std::vector<int64_t>& ids) const
-  {
-    auto request        = std::make_shared<GetObjectVisuals::Request>();
-    request->object_ids = ids;
-    auto future         = m_get_visuals->async_send_request(request);
+    auto request          = std::make_shared<AddObservations::Request>();
+    request->observations = std::move(observations);
+    auto future           = m_add_observations->async_send_request(request);
     if (!waitUntil([&future]() { return future.wait_for(0s) == std::future_status::ready; }, 2s))
     {
       return std::nullopt;
@@ -416,6 +413,33 @@ public:
   }
 
 private:
+  void pollDatabase()
+  {
+    const auto CHANGES = m_db.changeCount();
+    if (CHANGES == m_seen_changes)
+    {
+      return;
+    }
+    m_seen_changes = CHANGES;
+    auto objects   = m_db.read([](const Tx& tx) {
+      std::vector<ObjectCandidate> result;
+      for (const auto& record : tx.visibleObjects())
+      {
+        ObjectCandidate candidate;
+        candidate.id          = record.id;
+        candidate.class_name  = record.class_name;
+        candidate.detection   = record.detection;
+        candidate.last_seen   = record.last_seen;
+        candidate.image_crops = tx.crops(record.id);
+        result.push_back(std::move(candidate));
+      }
+      return result;
+    });
+    std::scoped_lock lock(m_candidates_mutex);
+    m_candidates.insert(m_candidates.end(), objects.begin(), objects.end());
+    m_latest_candidates = std::move(objects);
+  }
+
   CameraPublisher makeCamera(const std::string& frame_id,
                              const std::string& detections_2d_topic,
                              const std::string& detections_3d_topic,
@@ -432,19 +456,22 @@ private:
     return camera;
   }
 
+  Database m_db;
   rclcpp::Node::SharedPtr m_source_node;
-  rclcpp::Node::SharedPtr m_tracker;
-  rclcpp::Node::SharedPtr m_manager;
+  rclcpp::Node::SharedPtr m_host;
+  TrackerWorker m_worker; // Declared after the host node: destroyed before it.
+  std::optional<diagnostic_updater::Updater> m_diagnostics; // Destroyed before the worker.
   std::optional<CameraPublisher> m_front;
   std::optional<CameraPublisher> m_rear;
-  rclcpp::Subscription<ObjectCandidate>::SharedPtr m_candidates_sub;
-  rclcpp::Client<GetObjects>::SharedPtr m_get_objects;
-  rclcpp::Client<GetObjectVisuals>::SharedPtr m_get_visuals;
+  rclcpp::TimerBase::SharedPtr m_poll_timer;
+  int64_t m_seen_changes{-1}; // only touched by m_poll_timer
+  rclcpp::Client<AddObservations>::SharedPtr m_add_observations;
   std::shared_ptr<tf2_ros::Buffer> m_tf_buffer;
   std::unique_ptr<tf2_ros::TransformListener> m_tf_listener;
   std::unique_ptr<tf2_ros::StaticTransformBroadcaster> m_tf_broadcaster;
   mutable std::mutex m_candidates_mutex;
   std::vector<ObjectCandidate> m_candidates;
+  std::vector<ObjectCandidate> m_latest_candidates;
   rclcpp::executors::MultiThreadedExecutor m_executor;
   std::thread m_spinner;
 };
@@ -488,23 +515,33 @@ void publishBatches(CameraPublisher& camera,
   }
 }
 
+void initializeWorker(const rclcpp::NodeOptions& options)
+{
+  Database db;
+  auto host = std::make_shared<rclcpp::Node>("scene_graph_manager", options);
+  diagnostic_updater::Updater diagnostics(host);
+  TrackerWorker worker;
+  worker.initialize(*host, db, "tracker", diagnostics);
+}
+
 TEST(MultiCameraTrackerParameters, AcceptsNamedIndependentInputs)
 {
-  EXPECT_NO_THROW(std::make_shared<ObjectTrackerComponent>(twoCameraOptions()));
+  EXPECT_NO_THROW(initializeWorker(twoCameraOptions()));
 }
 
 TEST(MultiCameraTrackerParameters, RejectsEmptyCameraName)
 {
   auto options = twoCameraOptions();
-  options.append_parameter_override("camera_names", std::vector<std::string>{"front", ""});
-  EXPECT_THROW(std::make_shared<ObjectTrackerComponent>(options), std::exception);
+  options.append_parameter_override("tracker.camera_names", std::vector<std::string>{"front", ""});
+  EXPECT_THROW(initializeWorker(options), std::exception);
 }
 
 TEST(MultiCameraTrackerParameters, RejectsDuplicateResolvedTopics)
 {
   auto options = twoCameraOptions();
-  options.append_parameter_override("cameras.rear.detections_2d_topic", "/front/detections_2d");
-  EXPECT_THROW(std::make_shared<ObjectTrackerComponent>(options), std::exception);
+  options.append_parameter_override("tracker.cameras.rear.detections_2d_topic",
+                                    "/front/detections_2d");
+  EXPECT_THROW(initializeWorker(options), std::exception);
 }
 
 TEST(MultiCameraTracker, CameraInputsDoNotCrossPair)
@@ -533,6 +570,25 @@ TEST(MultiCameraTracker, CameraInputsDoNotCrossPair)
   {
     EXPECT_FALSE(containsCrop(candidate, 20, "rear_frame"));
   }
+}
+
+TEST(MultiCameraTracker, ExactSyncDropsFramesWithMismatchedStamps)
+{
+  TrackerHarness harness;
+  ASSERT_TRUE(harness.ready());
+  for (int index = 0; index < 3; ++index)
+  {
+    const auto STAMP = rclcpp::Time(static_cast<int64_t>((3.0 + index * 0.01) * 1e9));
+    harness.front().publish(STAMP, "7", 4.0, 30, true, true, false);
+    harness.front().publish(STAMP + rclcpp::Duration::from_nanoseconds(1000000),
+                            "7",
+                            4.0,
+                            30,
+                            false,
+                            false,
+                            true); // Image 1 ms later: not the same frame.
+  }
+  EXPECT_TRUE(harness.noCandidatesFor(300ms));
 }
 
 TEST(MultiCameraTracker, OverlappingCamerasShareGlobalTrackAndCropHistory)
@@ -621,21 +677,25 @@ TEST(MultiCameraTracker, DelayedAndDuplicateSourceFramesDoNotReverseTrackTime)
   publishBatches(harness.front(), 10.0, 3, "1", 4.0, 110);
   ASSERT_TRUE(harness.waitForCandidates(1));
   const auto BEFORE       = harness.candidates();
-  const auto BEFORE_STAMP = rclcpp::Time(BEFORE.back().header.stamp).nanoseconds();
-  publishBatches(harness.rear(), 9.9, 1, "2", 6.0, 120);
-  ASSERT_TRUE(harness.waitForCandidates(BEFORE.size() + 1));
+  const auto BEFORE_STAMP = rclcpp::Time(BEFORE.back().last_seen).nanoseconds();
+  // The rear camera confirms the same object from older frames: it joins the global track
+  // without moving its observation time backwards.
+  publishBatches(harness.rear(), 9.9, 3, "2", 6.0, 120);
+  ASSERT_TRUE(harness.waitUntil(
+    [&harness]() { return containsCrop(harness.candidates().back(), 120, "rear_frame"); }, 2s));
   const auto AFTER_DELAYED = harness.candidates();
-  EXPECT_GE(rclcpp::Time(AFTER_DELAYED.back().header.stamp).nanoseconds(), BEFORE_STAMP);
-  EXPECT_TRUE(containsCrop(AFTER_DELAYED.back(), 120, "rear_frame"));
-  harness.rear().publish(rclcpp::Time(static_cast<int64_t>(9.9e9)), "2", 6.0, 121);
+  EXPECT_EQ(candidateIds(AFTER_DELAYED).size(), 1U);
+  EXPECT_GE(rclcpp::Time(AFTER_DELAYED.back().last_seen).nanoseconds(), BEFORE_STAMP);
+  // A duplicate of the rear camera's last frame is rejected.
+  harness.rear().publish(rclcpp::Time(static_cast<int64_t>(9.92e9)), "2", 6.0, 121);
   EXPECT_TRUE(harness.noCropTagFor(121, 300ms));
   harness.front().publish(rclcpp::Time(static_cast<int64_t>(10.1e9)), "1", 4.0, 130);
   ASSERT_TRUE(harness.waitForCandidates(BEFORE.size() + 2));
   const auto ALL = harness.candidates();
   for (size_t index = 1; index < ALL.size(); ++index)
   {
-    EXPECT_GE(rclcpp::Time(ALL[index].header.stamp).nanoseconds(),
-              rclcpp::Time(ALL[index - 1].header.stamp).nanoseconds());
+    EXPECT_GE(rclcpp::Time(ALL[index].last_seen).nanoseconds(),
+              rclcpp::Time(ALL[index - 1].last_seen).nanoseconds());
   }
 }
 
@@ -655,7 +715,7 @@ TEST(MultiCameraTracker, ActiveCameraContinuesWhenOtherCameraHasNoTf)
 TEST(MultiCameraTracker, DefaultCameraPreservesTopicRemaps)
 {
   TrackerHarness harness(false);
-  ASSERT_TRUE(harness.ready(false));
+  ASSERT_TRUE(harness.ready());
   publishBatches(harness.front(), 13.0, 3, "1", 4.0, 160);
   ASSERT_TRUE(harness.waitForCandidates(1));
   EXPECT_EQ(candidateIds(harness.candidates()).size(), 1U);
@@ -674,11 +734,26 @@ TEST(MultiCameraTracker, LongDelayedSourceCanConfirmNewTrack)
   publishBatches(harness.rear(), 1.0, 3, "77", 21.0, 166);
   ASSERT_TRUE(harness.waitUntil(
     [&harness]() { return candidateIds(harness.candidates()).size() >= 2U; }, 2s));
+
+  const auto CONFIRMED = harness.latestCandidates();
+  const auto DELAYED   = std::ranges::find_if(
+    CONFIRMED, [](const auto& candidate) { return containsCrop(candidate, 166, "rear_frame"); });
+  ASSERT_NE(DELAYED, CONFIRMED.end());
+  const auto DELAYED_ID = DELAYED->id;
+  publishBatches(harness.rear(), 2.0, 3, "77", 21.0, 167);
+  ASSERT_TRUE(harness.waitUntil(
+    [&harness, DELAYED_ID]() {
+      return std::ranges::any_of(harness.latestCandidates(), [DELAYED_ID](const auto& candidate) {
+        return candidate.id == DELAYED_ID && containsCrop(candidate, 167, "rear_frame");
+      });
+    },
+    2s));
+  EXPECT_EQ(candidateIds(harness.candidates()).size(), 2U);
 }
 
 TEST(MultiCameraTracker, PublishedTrackSurvivesMergeWithNewerTrack)
 {
-  TrackerHarness harness(true, false, 5, 3.0, 0.1);
+  TrackerHarness harness(true, 5, 3.0, 0.1);
   ASSERT_TRUE(harness.ready());
 
   publishBatches(harness.front(), 20.0, 5, "1", 4.0, 170, 10.0);
@@ -687,9 +762,9 @@ TEST(MultiCameraTracker, PublishedTrackSurvivesMergeWithNewerTrack)
   ASSERT_TRUE(harness.setConfirmationThreshold(6));
 
   // The new track confirms with more observations than the published survivor.
-  const auto BEFORE_NEW_TRACK = harness.candidates().size();
   publishBatches(harness.rear(), 21.0, 5, "2", 8.0, 180, 10.0);
-  ASSERT_TRUE(harness.waitForCandidates(BEFORE_NEW_TRACK + 5));
+  // The rear track is not confirmed yet, so nothing changes in the database to wait for.
+  std::this_thread::sleep_for(100ms);
   harness.rear().publish(
     rclcpp::Time(static_cast<int64_t>(21.05e9)), "2", 8.0, 181, true, true, true, "", 10.0);
   ASSERT_TRUE(harness.waitUntil(
@@ -703,9 +778,9 @@ TEST(MultiCameraTracker, PublishedTrackSurvivesMergeWithNewerTrack)
     2s));
 }
 
-TEST(MultiCameraTracker, TwoPublishedTracksRemainAfterOverlap)
+TEST(MultiCameraTracker, SnapshotRetiresPublishedTrackAfterMerge)
 {
-  TrackerHarness harness(true, false, 3, 0.1, 0.1);
+  TrackerHarness harness(true, 3, 0.1, 0.1);
   ASSERT_TRUE(harness.ready());
 
   publishBatches(harness.front(), 30.0, 3, "1", 4.0, 190, 1.0);
@@ -722,14 +797,10 @@ TEST(MultiCameraTracker, TwoPublishedTracksRemainAfterOverlap)
   harness.rear().publish(rclcpp::Time(FINAL_STAMP), "2", 8.0, 195, true, true, true, "", 20.0);
 
   ASSERT_TRUE(harness.waitUntil(
-    [&harness, &INITIAL, FINAL_STAMP]() {
-      const auto CANDIDATES = harness.candidates();
-      return std::ranges::all_of(INITIAL, [&CANDIDATES, FINAL_STAMP](int64_t id) {
-        return std::ranges::any_of(CANDIDATES, [id, FINAL_STAMP](const auto& candidate) {
-          return candidate.id == id &&
-                 rclcpp::Time(candidate.header.stamp).nanoseconds() >= FINAL_STAMP;
-        });
-      });
+    [&harness, &INITIAL]() {
+      const auto CANDIDATES = harness.latestCandidates();
+      return CANDIDATES.size() == 1U && INITIAL.contains(CANDIDATES.front().id) &&
+             rclcpp::Time(CANDIDATES.front().last_seen).nanoseconds() >= FINAL_STAMP;
     },
     2s));
 }
@@ -745,58 +816,111 @@ TEST(TrackedObject, ObservationTimeNeverMovesBackwards)
   detection.bbox3d.size.x               = 1.0;
   detection.bbox3d.size.y               = 1.0;
   detection.bbox3d.size.z               = 1.0;
-  TrackedObject object(detection, 10.0, 1, 0.4, 0.05, 3, 20);
-  object.update(detection, 9.0);
-  EXPECT_DOUBLE_EQ(object.last_seen, 10.0);
-  TrackedObject newer(detection, 20.0, 2, 0.4, 0.05, 3, 20);
+  const rclcpp::Time INITIAL_TIME(1700000000, 123456789, RCL_ROS_TIME);
+  const rclcpp::Time DELAYED_TIME(1699999999, 987654321, RCL_ROS_TIME);
+  const rclcpp::Time NEWER_TIME(1700000001, 234567891, RCL_ROS_TIME);
+  TrackedObject object(detection, INITIAL_TIME, 1, 0.4, 0.05, 3, 20);
+  object.update(detection, DELAYED_TIME);
+  EXPECT_EQ(object.last_seen, INITIAL_TIME);
+  EXPECT_EQ(rclcpp::Time(object.toDetection3D().header.stamp), INITIAL_TIME);
+  TrackedObject newer(detection, NEWER_TIME, 2, 0.4, 0.05, 3, 20);
   object.mergeFrom(newer);
-  EXPECT_DOUBLE_EQ(object.last_seen, 20.0);
+  EXPECT_EQ(object.last_seen, NEWER_TIME);
+  EXPECT_EQ(rclcpp::Time(object.toDetection3D().header.stamp), NEWER_TIME);
 }
 
-TEST(MultiCameraTracker, ManagerKeepsSharedGlobalIdsAndVisuals)
+ObjectCandidate
+observation(const std::string& class_name, const std::string& frame_id, double x, double size)
 {
-  TrackerHarness harness(true, true);
-  ASSERT_TRUE(harness.ready(true));
+  ObjectCandidate observation;
+  observation.class_name                          = class_name;
+  observation.detection.header.frame_id           = frame_id;
+  observation.detection.bbox.center.position.x    = x;
+  observation.detection.bbox.center.orientation.w = 1.0;
+  observation.detection.bbox.size.x               = size;
+  observation.detection.bbox.size.y               = size;
+  observation.detection.bbox.size.z               = size;
+  observation.image_crops.push_back(makeImage(rclcpp::Time(1, 0), "manual", 99));
+  return observation;
+}
+
+TEST(MultiCameraTracker, ManualObservationsJoinTracksOrStartPersistentOnes)
+{
+  TrackerHarness harness;
+  ASSERT_TRUE(harness.ready());
+  publishBatches(harness.front(), 3.0, 3, "1", 4.0, 30); // A cup at map x = 5.
+  ASSERT_TRUE(harness.waitForCandidates(1));
+  const int64_t CAMERA_ID = harness.candidates().front().id;
+
+  auto negative_stamp                       = observation("cup", "map", 40.0, 0.5);
+  negative_stamp.detection.header.stamp.sec = -1;
+  const auto RESPONSE                       = harness.addObservations({
+    observation("cup", "front_frame", 4.1, 0.9), // the camera's cup, seen by someone else
+    observation("cup", "map", 20.0, 0.5),        // something no camera saw
+    observation("", "map", 0.0, 0.5),
+    observation("cup", "nowhere", 0.0, 0.5),
+    observation("cup", "map", 30.0, 0.0), // no size
+    negative_stamp,
+  });
+  ASSERT_TRUE(RESPONSE);
+  EXPECT_FALSE(RESPONSE->success);
+  ASSERT_EQ(RESPONSE->object_ids.size(), 6U);
+  EXPECT_EQ(RESPONSE->object_ids[0], CAMERA_ID);
+  EXPECT_FALSE(RESPONSE->created[0]);
+  const int64_t MANUAL_ID = RESPONSE->object_ids[1];
+  EXPECT_NE(MANUAL_ID, 0);
+  EXPECT_NE(MANUAL_ID, CAMERA_ID);
+  EXPECT_TRUE(RESPONSE->created[1]);
+  ASSERT_EQ(RESPONSE->class_names.size(), 6U);
+  EXPECT_EQ(RESPONSE->class_names[1], "cup");
+  EXPECT_EQ(RESPONSE->class_names[2], "");
+  EXPECT_EQ(RESPONSE->object_ids[2], 0);
+  EXPECT_EQ(RESPONSE->object_ids[3], 0);
+  EXPECT_EQ(RESPONSE->object_ids[4], 0);
+  EXPECT_EQ(RESPONSE->object_ids[5], 0);
+  EXPECT_NE(RESPONSE->message.find("empty class_name"), std::string::npos);
+  EXPECT_NE(RESPONSE->message.find("negative detection timestamp"), std::string::npos);
+
+  // The manual track outlives its one-cycle tracklet and carries the observation's crop.
+  std::this_thread::sleep_for(100ms); // ~10 global cycles at 100 Hz
+  const auto LATEST = harness.latestCandidates();
+  const auto MANUAL = std::ranges::find(LATEST, MANUAL_ID, &ObjectCandidate::id);
+  ASSERT_NE(MANUAL, LATEST.end());
+  EXPECT_DOUBLE_EQ(MANUAL->detection.bbox.center.position.x, 20.0);
+  EXPECT_TRUE(containsCrop(*MANUAL, 99, "manual"));
+  EXPECT_NE(std::ranges::find(LATEST, CAMERA_ID, &ObjectCandidate::id), LATEST.end());
+}
+
+TEST(MultiCameraTracker, DatabaseKeepsGlobalIdsAndCrops)
+{
+  TrackerHarness harness;
+  ASSERT_TRUE(harness.ready());
+  const auto OBJECTS = [&harness]() {
+    return harness.db().read([](const Tx& tx) { return tx.visibleObjects(); });
+  };
   publishBatches(harness.front(), 14.0, 3, "1", 4.0, 170);
   ASSERT_TRUE(harness.waitForCandidates(1));
-  ASSERT_TRUE(TrackerHarness::waitUntil(
-    [&harness]() {
-      const auto OBJECTS = harness.getObjects();
-      return OBJECTS && OBJECTS->objects.size() == 1U;
-    },
-    2s));
-  const auto FIRST_OBJECTS = harness.getObjects();
-  ASSERT_TRUE(FIRST_OBJECTS);
-  const int64_t GLOBAL_ID = FIRST_OBJECTS->objects.front().id;
+  ASSERT_TRUE(TrackerHarness::waitUntil([&]() { return OBJECTS().size() == 1U; }, 2s));
+  const int64_t GLOBAL_ID = OBJECTS().front().id;
   publishBatches(harness.rear(), 15.0, 3, "42", 6.0, 180);
   ASSERT_TRUE(harness.waitForCandidates(2));
   publishBatches(harness.front(), 16.0, 3, "1", 19.0, 190);
   ASSERT_TRUE(harness.waitForCandidates(3));
-  ASSERT_TRUE(TrackerHarness::waitUntil(
-    [&harness]() {
-      const auto OBJECTS = harness.getObjects();
-      return OBJECTS && OBJECTS->objects.size() == 2U;
-    },
-    2s));
-  const auto OBJECTS = harness.getObjects();
-  ASSERT_TRUE(OBJECTS);
+  ASSERT_TRUE(TrackerHarness::waitUntil([&]() { return OBJECTS().size() == 2U; }, 2s));
   std::vector<int64_t> ids;
-  for (const auto& object : OBJECTS->objects)
+  for (const auto& object : OBJECTS())
   {
     ids.push_back(object.id);
   }
   EXPECT_NE(std::ranges::find(ids, GLOBAL_ID), ids.end());
-  const auto VISUALS = harness.getVisuals(ids);
-  ASSERT_TRUE(VISUALS);
-  ASSERT_EQ(VISUALS->visuals.size(), 2U);
-  for (const auto& visuals : VISUALS->visuals)
+  for (const auto ID : ids)
   {
-    ASSERT_FALSE(visuals.image_crops.empty());
-    if (visuals.object_id == GLOBAL_ID)
+    const auto CROPS = harness.db().read([ID](const Tx& tx) { return tx.crops(ID); });
+    ASSERT_FALSE(CROPS.empty());
+    if (ID == GLOBAL_ID)
     {
-      EXPECT_TRUE(std::ranges::any_of(visuals.image_crops, [](const auto& crop) {
-        return !crop.data.empty() && crop.data.front() == 180;
-      }));
+      EXPECT_TRUE(std::ranges::any_of(
+        CROPS, [](const auto& crop) { return !crop.data.empty() && crop.data.front() == 180; }));
     }
   }
 }

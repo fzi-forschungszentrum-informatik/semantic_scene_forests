@@ -1,0 +1,48 @@
+# Copyright (c) 2026 FZI Forschungszentrum Informatik
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+#    * Redistributions of source code must retain the above copyright
+#      notice, this list of conditions and the following disclaimer.
+#
+#    * Redistributions in binary form must reproduce the above copyright
+#      notice, this list of conditions and the following disclaimer in the
+#      documentation and/or other materials provided with the distribution.
+#
+#    * Neither the name of the copyright holder nor the names of its
+#      contributors may be used to endorse or promote products derived from
+#      this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
+# Register object sightings from a source other than the tracker's cameras, e.g. an agent's
+# camera search. The tracker transforms each into its world frame and fuses it in the next
+# global cycle like a camera tracklet: it joins a clearly overlapping track of similar size and
+# accepted label, or starts a new global track (label-checked like any other when the arbiter
+# is on). Global tracks outlive the sighting. The response waits until every observation is
+# decided: fused and published, or rejected. With the arbiter that includes the label check of
+# a new track, which may take several cycles; a merge meanwhile reports the surviving track.
+#
+# Per observation: class_name, detection.header (frame and stamp; a zero stamp means now) and
+# detection.bbox (center, orientation and positive size in that frame) are required;
+# image_crops are optional. id, header and last_seen are ignored. The class whitelist and
+# confidence threshold do not apply; labels the arbiter rejected for the session do.
+ObjectCandidate[] observations
+---
+bool success       # false if any observation was rejected
+string message
+# One entry per observation, in request order.
+int64[] object_ids    # global tracker ID, already in the published snapshot; 0 = rejected
+string[] class_names  # the track's label as published; empty if rejected
+bool[] created        # true: started a new global track; false: joined an existing one

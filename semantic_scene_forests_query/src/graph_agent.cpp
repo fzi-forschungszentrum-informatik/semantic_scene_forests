@@ -158,7 +158,7 @@ std::optional<std::string> GraphAgentSession::nodeName(int64_t id) const
       }
       else
       {
-        // Object class names live in the object manager, not the scene graph.
+        // Object class names come from the scene-graph object data, not the core graph node.
         if (m_object_lookup)
         {
           if (const auto INFO = m_object_lookup(n.id))
@@ -311,7 +311,7 @@ std::expected<std::string, std::string> GraphAgentSession::toolGetObjectInfo(std
   }
   markExpanded(*ID);
 
-  // Object metadata comes from the object manager. When it is unavailable we
+  // Object metadata comes from the scene-graph object data. When it is unavailable we
   // return a well-formed answer (rather than an error) so the model treats it as
   // a known fact and does not keep retrying the same lookup.
   const std::optional<ObjectInfo> INFO = m_object_lookup ? m_object_lookup(*ID) : std::nullopt;
@@ -320,7 +320,7 @@ std::expected<std::string, std::string> GraphAgentSession::toolGetObjectInfo(std
     const json OUT = {{"id", *ID},
                       {"class_name", nullptr},
                       {"note",
-                       "no object-manager metadata available for this object; its class "
+                       "no scene-graph object data available for this object; its class "
                        "and pose are unknown"}};
     return OUT.dump();
   }
@@ -370,7 +370,7 @@ oai::ToolRegistry GraphAgentSession::buildTools()
   registry.add(oai::FunctionTool::make(
     {.name = "list_objects",
      .description =
-       "BOTTOM entry point. List all object nodes with their object-manager class "
+       "BOTTOM entry point. List all object nodes with their scene-graph class "
        "names. Start here for bottom-up (object) search, then walk UP via get_parents.",
      .parameters_schema_json = R"({"type":"object","properties":{},"required":[]})"},
     [this](std::string_view args) {
@@ -423,7 +423,7 @@ oai::ToolRegistry GraphAgentSession::buildTools()
 
   registry.add(oai::FunctionTool::make(
     {.name        = "get_object_info",
-     .description = "Get object-manager metadata (class name, 3D position and size) for an object "
+     .description = "Get scene-graph object data (class name, 3D position and size) for an object "
                     "node.",
      .parameters_schema_json =
        R"({"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]})"},

@@ -43,9 +43,9 @@ find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ManagedObject.msg"
-  "msg/ManagedObjectArray.msg"
   "msg/ObjectCandidate.msg"
   "msg/ObjectVisuals.msg"
+  "srv/AddObservations.srv"
   "srv/GetObjects.srv"
   "srv/GetObjectVisuals.srv"
   "srv/BlockObject.srv"

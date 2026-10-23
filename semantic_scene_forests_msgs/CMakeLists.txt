@@ -36,6 +36,7 @@ endif()
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(builtin_interfaces REQUIRED)
 find_package(vision_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
@@ -46,8 +47,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ObjectNode.msg"
   "msg/ConceptNode.msg"
   "srv/AddSceneContext.srv"
-  "action/UpdateSceneGraph.action"
-  DEPENDENCIES std_msgs vision_msgs sensor_msgs
+  "action/RunWorker.action"
+  DEPENDENCIES builtin_interfaces std_msgs vision_msgs sensor_msgs
 )
 
 ament_package()

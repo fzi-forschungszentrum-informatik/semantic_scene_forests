@@ -135,12 +135,12 @@ void SidePanel::buildLayout()
   action_box->setFrameShape(QFrame::StyledPanel);
   auto* action_layout = new QVBoxLayout{action_box};
   action_layout->setContentsMargins(6, 6, 6, 6);
-  action_layout->addWidget(new QLabel{tr("Update Scene Graph"), action_box});
-  auto* button_row = new QHBoxLayout;
-  m_phase1_button  = new QPushButton{tr("Instance (Phase 1)"), action_box};
-  m_phase2_button  = new QPushButton{tr("Meta (Phase 2)"), action_box};
-  button_row->addWidget(m_phase1_button);
-  button_row->addWidget(m_phase2_button);
+  action_layout->addWidget(new QLabel{tr("Run Workers"), action_box});
+  auto* button_row           = new QHBoxLayout;
+  m_attribute_objects_button = new QPushButton{tr("Attribute Objects"), action_box};
+  m_generate_concepts_button = new QPushButton{tr("Generate Concepts"), action_box};
+  button_row->addWidget(m_attribute_objects_button);
+  button_row->addWidget(m_generate_concepts_button);
   action_layout->addLayout(button_row);
   m_progress_bar = new QProgressBar{action_box};
   m_progress_bar->setRange(0, 100);
@@ -152,8 +152,10 @@ void SidePanel::buildLayout()
   action_layout->addWidget(m_progress_bar);
   action_layout->addWidget(m_progress_status);
   outer->addWidget(action_box);
-  connect(m_phase1_button, &QPushButton::clicked, this, &SidePanel::requestPhase1);
-  connect(m_phase2_button, &QPushButton::clicked, this, &SidePanel::requestPhase2);
+  connect(
+    m_attribute_objects_button, &QPushButton::clicked, this, &SidePanel::requestAttributeObjects);
+  connect(
+    m_generate_concepts_button, &QPushButton::clicked, this, &SidePanel::requestGenerateConcepts);
 
   outer->addStretch(1);
 }
@@ -227,8 +229,8 @@ void SidePanel::setActionProgress(unsigned current, unsigned total, const QStrin
     m_progress_bar->setValue(static_cast<int>(current));
   }
   m_progress_status->setText(status);
-  m_phase1_button->setEnabled(false);
-  m_phase2_button->setEnabled(false);
+  m_attribute_objects_button->setEnabled(false);
+  m_generate_concepts_button->setEnabled(false);
 }
 
 void SidePanel::clearActionProgress(const QString& final_status)
@@ -237,8 +239,8 @@ void SidePanel::clearActionProgress(const QString& final_status)
   m_progress_bar->setRange(0, 100);
   m_progress_bar->setValue(0);
   m_progress_status->setText(final_status);
-  m_phase1_button->setEnabled(true);
-  m_phase2_button->setEnabled(true);
+  m_attribute_objects_button->setEnabled(true);
+  m_generate_concepts_button->setEnabled(true);
 }
 
 } // namespace semantic_scene_forests_visualization_rqt

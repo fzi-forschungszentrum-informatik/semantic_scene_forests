@@ -29,7 +29,7 @@
 # Diagnostic aggregator configuration for the scene graph system.
 #
 # diagnostic_updater prefixes every task name with the node name, so each node's
-# diagnostics appear as "<node>: <task>" (e.g. "object_tracker: Health",
+# diagnostics appear as "<node>: <task>" (e.g.
 # "semantic_scene_forests_query: Connectivity"). One GenericAnalyzer per node therefore just
 # needs to match on that node-name prefix.
 #
@@ -39,21 +39,11 @@
 /**:
   ros__parameters:
     path: Scene Graph
-    object_tracker:
+    scene_graph_manager:
       type: diagnostic_aggregator/GenericAnalyzer
-      path: Object Tracker
+      path: Scene Graph Manager
       timeout: 5.0
-      startswith: ['object_tracker']
-    object_manager:
-      type: diagnostic_aggregator/GenericAnalyzer
-      path: Object Manager
-      timeout: 5.0
-      startswith: ['object_manager']
-    semantic_scene_forests_generation:
-      type: diagnostic_aggregator/GenericAnalyzer
-      path: Scene Graph Generation
-      timeout: 5.0
-      startswith: ['semantic_scene_forests_generation']
+      startswith: ['scene_graph_manager']
     semantic_scene_forests_query:
       type: diagnostic_aggregator/GenericAnalyzer
       path: Scene Graph Query

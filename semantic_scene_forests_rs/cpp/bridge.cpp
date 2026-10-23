@@ -184,8 +184,9 @@ semantic_scene_forests_msgs::msg::SceneGraph toMsg(const GraphRecord& record)
   for (const auto& node : record.objects)
   {
     semantic_scene_forests_msgs::msg::ObjectNode object;
-    object.header = toHeader(node.header);
-    object.id     = node.id;
+    object.header     = toHeader(node.header);
+    object.id         = node.id;
+    object.class_name = std::string(node.class_name);
     message.object_nodes.push_back(std::move(object));
   }
   for (const auto& node : record.concepts)
@@ -323,7 +324,8 @@ GraphRecord NativeGraph::toMessage()
     .header = fromHeader(MESSAGE->header), .objects = {}, .concepts = {}, .edges = {}};
   for (const auto& node : MESSAGE->object_nodes)
   {
-    record.objects.push_back({.header = fromHeader(node.header), .id = node.id});
+    record.objects.push_back(
+      {.header = fromHeader(node.header), .id = node.id, .class_name = node.class_name});
   }
   for (const auto& node : MESSAGE->concept_nodes)
   {

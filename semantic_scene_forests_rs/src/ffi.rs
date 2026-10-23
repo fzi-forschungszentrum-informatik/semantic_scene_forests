@@ -72,6 +72,7 @@ pub(crate) mod bridge {
     struct ObjectRecord {
         header: HeaderRecord,
         id: i64,
+        class_name: String,
     }
 
     struct ConceptRecord {
@@ -196,6 +197,8 @@ impl From<bridge::HeaderRecord> for Header {
     }
 }
 
+// TODO: ObjectRecord drops detection, source and last_updated/last_seen; add them when a Rust
+// consumer needs them.
 impl From<&SceneGraphMsg> for bridge::GraphRecord {
     fn from(message: &SceneGraphMsg) -> Self {
         Self {
@@ -206,6 +209,7 @@ impl From<&SceneGraphMsg> for bridge::GraphRecord {
                 .map(|node| bridge::ObjectRecord {
                     header: (&node.header).into(),
                     id: node.id,
+                    class_name: node.class_name.clone(),
                 })
                 .collect(),
             concepts: message
@@ -240,6 +244,8 @@ impl From<bridge::GraphRecord> for SceneGraphMsg {
                 .map(|node| msg::ObjectNode {
                     header: node.header.into(),
                     id: node.id,
+                    class_name: node.class_name,
+                    ..Default::default()
                 })
                 .collect(),
             concept_nodes: message

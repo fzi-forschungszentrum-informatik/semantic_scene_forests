@@ -38,56 +38,21 @@
   <arg name="enable_diagnostics" default="true"
        description="Run the diagnostic_aggregator to collect /diagnostics into /diagnostics_agg."/>
 
-  <!-- Camera image consumed by the object tracker. -->
-  <arg name="camera_image_topic" default="camera/image"
-       description="Topic name for the camera image input."/>
-
-  <!-- Detections topics feeding the tracker. Only settable when the converter
-       is NOT used; with the converter enabled these are produced internally on
-       vision/detections_2d and vision/detections_3d. -->
-  <arg name="detections_2d_topic" default="vision/detections_2d"
-       description="Topic name for 2D detections input (used only when the converter is disabled)."/>
-  <arg name="detections_3d_topic" default="vision/detections_3d"
-       description="Topic name for 3D detections input (used only when the converter is disabled)."/>
+  <!-- Camera and detection topics are set per camera under tracker.cameras in the config. -->
 
   <node_container pkg="rclcpp_components" exec="component_container_mt"
                   name="scene_graph_container" namespace="" output="screen">
 
-    <!-- Object Tracker Component (converter disabled: read external detections) -->
-    <composable_node pkg="semantic_scene_forests_object_tracker"
-                     plugin="semantic_scene_forests_object_tracker::ObjectTrackerComponent"
-                     name="object_tracker">
-      <param from="$(var config_dir)/object_tracker.yaml"/>
-      <param name="world_frame" value="$(var scene_graph_frame)"/>
-      <param name="use_sim_time" value="$(var use_sim_time)"/>
-      <remap from="detections_2d" to="$(var detections_2d_topic)"/>
-      <remap from="detections_3d" to="$(var detections_3d_topic)"/>
-      <remap from="camera/image" to="$(var camera_image_topic)"/>
-      <remap from="object_candidates" to="object_candidates"/>
-    </composable_node>
-
-    <!-- Object Manager Node -->
-    <composable_node pkg="semantic_scene_forests_object_manager"
-                     plugin="semantic_scene_forests_object_manager::ObjectManagerNode"
-                     name="object_manager">
-      <param from="$(var config_dir)/object_manager.yaml"/>
+    <!-- Scene graph manager: database, scene_graph topic, object services and the workers
+         (tracker, object attribution, concept generation, pruning). -->
+    <composable_node pkg="semantic_scene_forests_manager"
+                     plugin="semantic_scene_forests_manager::SceneGraphManagerNode"
+                     name="scene_graph_manager">
+      <param from="$(var config_dir)/scene_graph_manager.yaml"/>
       <param name="frame_id" value="$(var scene_graph_frame)"/>
+      <param name="tracker.world_frame" value="$(var scene_graph_frame)"/>
       <param name="use_sim_time" value="$(var use_sim_time)"/>
-      <remap from="object_candidates" to="object_candidates"/>
-      <remap from="managed_objects" to="managed_objects"/>
-    </composable_node>
-
-    <!-- Scene Graph Generation Component -->
-    <composable_node pkg="semantic_scene_forests_generation"
-                     plugin="semantic_scene_forests_generation::SceneGraphGenerationNode"
-                     name="semantic_scene_forests_generation">
-      <param from="$(var config_dir)/semantic_scene_forests_generation.yaml"/>
-      <param name="frame_id" value="$(var scene_graph_frame)"/>
-      <param name="use_sim_time" value="$(var use_sim_time)"/>
-      <remap from="/managed_objects" to="/managed_objects"/>
-      <remap from="/scene_graph" to="/scene_graph"/>
-      <remap from="/update_scene_graph" to="/update_scene_graph"/>
-      <remap from="/get_object_visuals" to="/get_object_visuals"/>
+      <extra_arg name="use_intra_process_comms" value="true"/>
     </composable_node>
 
     <!-- Scene Graph Query Component -->
@@ -96,6 +61,7 @@
                      name="semantic_scene_forests_query">
       <param from="$(var config_dir)/semantic_scene_forests_query.yaml"/>
       <param name="use_sim_time" value="$(var use_sim_time)"/>
+      <extra_arg name="use_intra_process_comms" value="true"/>
     </composable_node>
 
   </node_container>

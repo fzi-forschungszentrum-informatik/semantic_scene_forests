@@ -1,11 +1,11 @@
 # semantic_scene_forests_msgs
 
-ROS 2 interface package for scene graph data and graph update actions.
+ROS 2 interface package for scene graph data and worker actions.
 
 ## Task
 
 - Define the wire format shared by graph generation, query, and visualization packages.
-- Carry the current scene graph and graph-update requests over ROS.
+- Carry the current scene graph (including object data) and worker run requests over ROS.
 
 ## Interfaces
 
@@ -18,10 +18,11 @@ ROS 2 interface package for scene graph data and graph update actions.
 
 ### Actions
 
-- `action/UpdateSceneGraph.action`
-  - goal: choose `PHASE_1` or `PHASE_2`
+- `action/RunWorker.action`: manual run of a manager worker (`attribute_objects`,
+  `generate_concepts`)
+  - goal: empty
   - result: `success`, `message`
-  - feedback: current progress and status text
+  - feedback: `current`, `total`, status text
 
 ## Used By
 

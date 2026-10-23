@@ -254,7 +254,7 @@ inline std::expected<std::string, std::string> chatTurn(oai::OpenAIClient& clien
 
   try
   {
-    auto response = client.complete(history);
+    auto response = client.chat({.messages = history});
     if (!response)
     {
       RCLCPP_WARN(logger,
@@ -265,7 +265,7 @@ inline std::expected<std::string, std::string> chatTurn(oai::OpenAIClient& clien
       return std::unexpected("LLM request failed: " + response.error().message);
     }
 
-    std::string content    = response->choice.content.value_or("");
+    std::string content    = response->text();
     auto assistant_message = oai::MessageBuilder::assistant().text(content).build();
     if (!assistant_message)
     {

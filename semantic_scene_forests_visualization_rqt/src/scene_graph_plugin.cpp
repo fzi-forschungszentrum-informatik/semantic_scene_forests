@@ -60,8 +60,8 @@ namespace semantic_scene_forests_visualization_rqt {
 namespace {
 
 constexpr const char* SCENE_GRAPH_TOPIC          = "scene_graph";
-constexpr const char* MANAGED_OBJECTS_TOPIC      = "managed_objects";
-constexpr const char* UPDATE_SCENE_GRAPH_ACTION  = "update_scene_graph";
+constexpr const char* ATTRIBUTE_OBJECTS_ACTION   = "attribute_objects";
+constexpr const char* GENERATE_CONCEPTS_ACTION   = "generate_concepts";
 constexpr const char* PROMPT_LLM_ACTION          = "prompt_llm";
 constexpr const char* FIND_OBJECT_ACTION         = "find_object";
 constexpr const char* GET_OBJECT_VISUALS_SERVICE = "get_object_visuals";
@@ -108,11 +108,11 @@ void SceneGraphPlugin::initPlugin(qt_gui_cpp::PluginContext& context)
 
   // Side panel → plugin / view.
   connect(m_side_panel, &SidePanel::viewModeChanged, this, &SceneGraphPlugin::onViewModeChanged);
-  connect(m_side_panel, &SidePanel::requestPhase1, this, [this]() {
-    sendActionGoal(UpdateSceneGraph::Goal::PHASE_1);
+  connect(m_side_panel, &SidePanel::requestAttributeObjects, this, [this]() {
+    sendActionGoal(m_attribute_objects_client);
   });
-  connect(m_side_panel, &SidePanel::requestPhase2, this, [this]() {
-    sendActionGoal(UpdateSceneGraph::Goal::PHASE_2);
+  connect(m_side_panel, &SidePanel::requestGenerateConcepts, this, [this]() {
+    sendActionGoal(m_generate_concepts_client);
   });
   connect(m_side_panel, &SidePanel::queryRequested, this, &SceneGraphPlugin::onQueryRequested);
   connect(m_side_panel, &SidePanel::queryCancelRequested, this, &SceneGraphPlugin::onQueryCancel);
@@ -131,11 +131,6 @@ void SceneGraphPlugin::initPlugin(qt_gui_cpp::PluginContext& context)
           &SceneGraphPlugin::sceneGraphReceived,
           this,
           &SceneGraphPlugin::onSceneGraphReceived,
-          Qt::QueuedConnection);
-  connect(this,
-          &SceneGraphPlugin::managedObjectsReceived,
-          this,
-          &SceneGraphPlugin::onManagedObjectsReceived,
           Qt::QueuedConnection);
   connect(this,
           &SceneGraphPlugin::visualsReceived,
@@ -171,15 +166,10 @@ void SceneGraphPlugin::initPlugin(qt_gui_cpp::PluginContext& context)
     [this](semantic_scene_forests_msgs::msg::SceneGraph::ConstSharedPtr msg) {
       onSceneGraphMsg(msg);
     });
-  m_managed_objects_sub =
-    node_->create_subscription<semantic_scene_forests_object_msgs::msg::ManagedObjectArray>(
-      MANAGED_OBJECTS_TOPIC,
-      qos,
-      [this](semantic_scene_forests_object_msgs::msg::ManagedObjectArray::ConstSharedPtr msg) {
-        onManagedObjectsMsg(msg);
-      });
-  m_action_client =
-    rclcpp_action::create_client<UpdateSceneGraph>(node_, UPDATE_SCENE_GRAPH_ACTION);
+  m_attribute_objects_client =
+    rclcpp_action::create_client<RunWorker>(node_, ATTRIBUTE_OBJECTS_ACTION);
+  m_generate_concepts_client =
+    rclcpp_action::create_client<RunWorker>(node_, GENERATE_CONCEPTS_ACTION);
   m_prompt_client = rclcpp_action::create_client<PromptLLM>(node_, PROMPT_LLM_ACTION);
   m_find_client   = rclcpp_action::create_client<FindObject>(node_, FIND_OBJECT_ACTION);
   m_visuals_client =
@@ -192,8 +182,8 @@ void SceneGraphPlugin::initPlugin(qt_gui_cpp::PluginContext& context)
 void SceneGraphPlugin::shutdownPlugin()
 {
   m_scene_graph_sub.reset();
-  m_managed_objects_sub.reset();
-  m_action_client.reset();
+  m_attribute_objects_client.reset();
+  m_generate_concepts_client.reset();
   m_prompt_client.reset();
   m_find_client.reset();
   m_prompt_goal.reset();
@@ -231,29 +221,20 @@ void SceneGraphPlugin::onSceneGraphMsg(
     return;
   }
   std::shared_ptr<fzi::semantic_scene_forests::SceneGraph> graph = std::move(parsed.value());
-  {
-    std::lock_guard<std::mutex> lock{m_mutex};
-    m_latest_scene_graph_msg = msg;
-    m_latest_scene_graph     = graph;
-    ++m_latest_message_count;
-  }
-  emit sceneGraphReceived();
-}
-
-void SceneGraphPlugin::onManagedObjectsMsg(
-  semantic_scene_forests_object_msgs::msg::ManagedObjectArray::ConstSharedPtr msg)
-{
   std::unordered_map<int64_t, std::string> names;
-  names.reserve(msg->objects.size());
-  for (const auto& obj : msg->objects)
+  names.reserve(msg->object_nodes.size());
+  for (const auto& obj : msg->object_nodes)
   {
     names.emplace(obj.id, obj.class_name);
   }
   {
     std::lock_guard<std::mutex> lock{m_mutex};
-    m_object_class_names = std::move(names);
+    m_latest_scene_graph_msg = msg;
+    m_latest_scene_graph     = graph;
+    m_object_class_names     = std::move(names);
+    ++m_latest_message_count;
   }
-  emit managedObjectsReceived();
+  emit sceneGraphReceived();
 }
 
 void SceneGraphPlugin::onSceneGraphReceived()
@@ -294,16 +275,6 @@ void SceneGraphPlugin::onSceneGraphReceived()
     m_graph_view->setHasPendingUpdate(true);
     m_side_panel->setMessageStatus(tr("New scene graph available — press ↻ to refresh."));
   }
-}
-
-void SceneGraphPlugin::onManagedObjectsReceived()
-{
-  std::unordered_map<int64_t, std::string> names;
-  {
-    std::lock_guard<std::mutex> lock{m_mutex};
-    names = m_object_class_names;
-  }
-  m_graph_view->setObjectClassNames(std::move(names));
 }
 
 void SceneGraphPlugin::onVisualsReceived(qint64 object_id)
@@ -412,23 +383,21 @@ void SceneGraphPlugin::requestVisuals(int64_t object_id)
     });
 }
 
-void SceneGraphPlugin::sendActionGoal(std::uint8_t phase)
+void SceneGraphPlugin::sendActionGoal(const rclcpp_action::Client<RunWorker>::SharedPtr& client)
 {
-  if (m_action_client == nullptr || !m_action_client->action_server_is_ready())
+  if (client == nullptr || !client->action_server_is_ready())
   {
     m_side_panel->clearActionProgress(tr("Action server not available."));
     return;
   }
-  UpdateSceneGraph::Goal goal;
-  goal.phase = phase;
+  RunWorker::Goal goal;
   m_side_panel->setActionProgress(0, 0, tr("Sending goal…"));
 
-  rclcpp_action::Client<UpdateSceneGraph>::SendGoalOptions options;
-  options.feedback_callback = [this](
-                                GoalHandle::SharedPtr /*handle*/,
-                                const std::shared_ptr<const UpdateSceneGraph::Feedback> feedback) {
+  rclcpp_action::Client<RunWorker>::SendGoalOptions options;
+  options.feedback_callback = [this](const GoalHandle::SharedPtr& /*handle*/,
+                                     const std::shared_ptr<const RunWorker::Feedback>& feedback) {
     emit actionFeedback(
-      feedback->current_object, feedback->total_objects, QString::fromStdString(feedback->status));
+      feedback->current, feedback->total, QString::fromStdString(feedback->status));
   };
   options.result_callback = [this](const GoalHandle::WrappedResult& result) {
     const bool ok = (result.code == rclcpp_action::ResultCode::SUCCEEDED) &&
@@ -437,7 +406,7 @@ void SceneGraphPlugin::sendActionGoal(std::uint8_t phase)
       (result.result != nullptr) ? QString::fromStdString(result.result->message) : QString{};
     emit actionFinished(ok, message);
   };
-  m_action_client->async_send_goal(goal, options);
+  client->async_send_goal(goal, options);
 }
 
 void SceneGraphPlugin::onActionFeedback(unsigned current, unsigned total, QString status)

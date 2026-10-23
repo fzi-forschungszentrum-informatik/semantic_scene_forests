@@ -40,30 +40,11 @@ windows:
       - ros2 run rmw_zenoh_cpp rmw_zenohd
     delay: 2
 
-  - name: object_manager
+  # Manager (tracker, generation and pruning workers) plus the query node in one container.
+  - name: scene_graph_manager
     commands:
       - >
-        ros2 launch semantic_scene_forests_object_manager object_manager.launch.xml
-        enable_tracker:=true
+        ros2 launch semantic_scene_forests_launch scene_graph_combined.launch.xml
+        config_dir:=${config_dir}
         scene_graph_frame:=${scene_graph_frame}
         use_sim_time:=true
-        managed_objects_topic:=managed_objects
-        detections_2d_topic:=vision/detections_2d
-        detections_3d_topic:=vision/detections_3d
-        camera_image_topic:=camera/image
-        object_candidates_topic:=object_candidates
-        tracker_config_file:=${config_dir}/object_tracker.yaml
-        manager_config_file:=${config_dir}/object_manager.yaml
-
-  - name: semantic_scene_forests_generation
-    commands:
-      - >
-        ros2 launch semantic_scene_forests_generation semantic_scene_forests_generation.launch.xml
-        config_file:=${config_dir}/semantic_scene_forests_generation.yaml
-    delay: 1
-
-  - name: semantic_scene_forests_query
-    commands:
-      - >
-        ros2 launch semantic_scene_forests_query semantic_scene_forests_query.launch.xml
-        config_file:=${config_dir}/semantic_scene_forests_query.yaml
