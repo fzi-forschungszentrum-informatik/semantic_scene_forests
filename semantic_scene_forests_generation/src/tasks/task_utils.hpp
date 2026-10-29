@@ -138,6 +138,59 @@ inline std::expected<std::string, std::string> validateConceptLabel(const json& 
   return label;
 }
 
+struct SceneContextAddition
+{
+  int64_t context_node_id;
+  bool created;
+};
+
+inline std::expected<SceneContextAddition, std::string> appendSceneContext(
+  fzi::semantic_scene_forests::SceneGraph& graph, int64_t node_id, const std::string& context)
+{
+  auto label = validateConceptLabel(context);
+  if (!label)
+  {
+    return std::unexpected(label.error());
+  }
+  auto outgoing = graph.outgoingEdges(node_id);
+  if (!outgoing)
+  {
+    return std::unexpected(outgoing.error().message);
+  }
+  for (const auto& [target_id, edge] : *outgoing)
+  {
+    if (edge.label != "has_context")
+    {
+      continue;
+    }
+    const auto TARGET = graph.findNode(target_id);
+    if (TARGET)
+    {
+      const auto* context_node = std::get_if<fzi::semantic_scene_forests::ConceptNode>(&*TARGET);
+      if (context_node && context_node->concept_name == *label)
+      {
+        return SceneContextAddition{.context_node_id = target_id, .created = false};
+      }
+    }
+  }
+  auto added = graph.addConceptNode(*label);
+  if (!added)
+  {
+    return std::unexpected(added.error().message);
+  }
+  if (auto edge = graph.addEdge(node_id, *added, "has_context"); !edge)
+  {
+    // Roll back only this request's new node, never pre-existing graph data.
+    if (auto rollback = graph.removeNode(*added); !rollback)
+    {
+      return std::unexpected(edge.error().message +
+                             "; rollback failed: " + rollback.error().message);
+    }
+    return std::unexpected(edge.error().message);
+  }
+  return SceneContextAddition{.context_node_id = *added, .created = true};
+}
+
 inline TaskResult addUniqueEdge(fzi::semantic_scene_forests::SceneGraph& graph,
                                 int64_t source_id,
                                 int64_t target_id,

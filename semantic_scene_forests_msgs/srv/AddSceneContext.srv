@@ -1,0 +1,10 @@
+# Append agent-supplied context to an existing object or concept node.
+# No existing node or edge is replaced or deleted.
+int64 node_id
+string context
+---
+bool success
+string message
+# Valid only on success. An identical request reuses the existing context node.
+int64 context_node_id
+bool created

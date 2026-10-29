@@ -53,6 +53,7 @@
 #include <diagnostic_updater/diagnostic_updater.hpp>
 #include <diagnostic_updater/publisher.hpp>
 #include <semantic_scene_forests_msgs/action/update_scene_graph.hpp>
+#include <semantic_scene_forests_msgs/srv/add_scene_context.hpp>
 #include <semantic_scene_forests_object_msgs/msg/managed_object.hpp>
 #include <semantic_scene_forests_object_msgs/msg/managed_object_array.hpp>
 #include <semantic_scene_forests_object_msgs/srv/get_object_visuals.hpp>
@@ -78,6 +79,7 @@ private:
   using GetObjectVisuals       = semantic_scene_forests_object_msgs::srv::GetObjectVisuals;
   using ManagedObjectArray     = semantic_scene_forests_object_msgs::msg::ManagedObjectArray;
   using SceneGraphMsg          = semantic_scene_forests_msgs::msg::SceneGraph;
+  using AddSceneContext        = semantic_scene_forests_msgs::srv::AddSceneContext;
 
   // ── ROS infrastructure ──────────────────────────────────────────────────
   rclcpp::Subscription<ManagedObjectArray>::SharedPtr m_objects_sub;
@@ -85,6 +87,7 @@ private:
   rclcpp::TimerBase::SharedPtr m_publish_timer;
   rclcpp::Client<GetObjectVisuals>::SharedPtr m_visuals_client;
   rclcpp_action::Server<UpdateSceneGraphAction>::SharedPtr m_action_server;
+  rclcpp::Service<AddSceneContext>::SharedPtr m_context_service;
 
   // ── Parameters ──────────────────────────────────────────────────────────
   std::shared_ptr<ParamListener> m_param_listener;
@@ -134,6 +137,8 @@ private:
 
   // ── Subscription callback ────────────────────────────────────────────────
   void onManagedObjects(const ManagedObjectArray::SharedPtr& msg);
+  void onAddSceneContext(const AddSceneContext::Request& request,
+                         AddSceneContext::Response& response);
 
   // ── Timer callback ───────────────────────────────────────────────────────
   void publishSceneGraph();
