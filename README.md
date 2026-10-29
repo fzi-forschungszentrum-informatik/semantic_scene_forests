@@ -67,6 +67,23 @@ it. It does not authorize movement or manipulation.
 colcon build --symlink-install --packages-up-to semantic_scene_forests_launch
 ```
 
+## Pre-commit checks
+
+With `pre-commit` installed, run this once per clone to enable checks on commits:
+
+```bash
+pre-commit install
+```
+
+Run the same checks as CI manually with:
+
+```bash
+pre-commit run --all-files --show-diff-on-failure
+```
+
+Review and stage any formatting fixes made by the hooks, then rerun the checks.
+The hooks check formatting and file hygiene; use `colcon build` to verify compilation.
+
 ## Notes
 
 - `semantic_scene_forests_docker/` contains container and dev environment support and is intentionally not a ROS package.

@@ -39,7 +39,7 @@
 #include <thread>
 #include <unordered_set>
 
-#include <ament_index_cpp/get_package_share_path.hpp>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 
 #include <cv_bridge/cv_bridge.hpp>
 
@@ -80,7 +80,8 @@ SceneGraphGenerationNode::SceneGraphGenerationNode(const rclcpp::NodeOptions& op
   else
   {
     prompt_dir =
-      ament_index_cpp::get_package_share_path("semantic_scene_forests_generation") / "resources";
+      fs::path(ament_index_cpp::get_package_share_directory("semantic_scene_forests_generation")) /
+      "resources";
   }
   loadTemplates(prompt_dir.string());
   loadPlugins();

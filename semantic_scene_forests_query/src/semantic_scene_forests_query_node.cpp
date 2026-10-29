@@ -39,7 +39,7 @@
 
 #include <fmt/format.h>
 
-#include <ament_index_cpp/get_package_share_path.hpp>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 
 #include <cv_bridge/cv_bridge.hpp>
 
@@ -96,8 +96,9 @@ SceneGraphQueryNode::SceneGraphQueryNode(const rclcpp::NodeOptions& options)
   }
   else
   {
-    prompt_dir = fs::path(ament_index_cpp::get_package_share_path("semantic_scene_forests_query")) /
-                 "resources";
+    prompt_dir =
+      fs::path(ament_index_cpp::get_package_share_directory("semantic_scene_forests_query")) /
+      "resources";
   }
   loadTemplates(prompt_dir.string());
 
