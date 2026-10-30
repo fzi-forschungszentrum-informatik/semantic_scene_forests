@@ -18,9 +18,29 @@ ROS 2 monorepo for building, querying, and visualizing semantic scene graphs fro
 | `managed_objects` | `semantic_scene_forests_object_msgs/msg/ManagedObjectArray` | Persistent object state |
 | `/scene_graph` | `semantic_scene_forests_msgs/msg/SceneGraph` | Current semantic graph |
 | `/update_scene_graph` | `semantic_scene_forests_msgs/action/UpdateSceneGraph` | Trigger phase 1 or phase 2 graph updates |
+| `/add_scene_context` | `semantic_scene_forests_msgs/srv/AddSceneContext` | Append context to an existing node without replacing graph data |
 | `/get_object_visuals` | `semantic_scene_forests_object_msgs/srv/GetObjectVisuals` | Fetch image crops for object IDs |
 | `find_object` | `semantic_scene_forests_planning_msgs/action/FindObject` | Resolve an object from a natural-language description |
 | `prompt_llm` | `semantic_scene_forests_planning_msgs/action/PromptLLM` | General graph-aware LLM query |
+
+### Append-only agent context
+
+`/add_scene_context` accepts `node_id` and `context`. It creates a `ConceptNode`
+and the edge `node_id --has_context--> context_node_id`, returning `success`,
+`message`, `context_node_id`, and `created`. The source can be an existing object
+or concept; object sources must still be active in the object manager. No delete,
+rename, replacement, or arbitrary-edge operation is exposed.
+
+Context uses the existing concept-label rules: trimmed spaces/tabs, nonempty,
+at most 128 UTF-8 bytes, and no control characters. An identical request for the
+same source reuses its context node (`created=false`), so an explicit retry after
+an unknown timeout outcome does not duplicate the annotation. Requests fail while
+generation is busy; accepted additions are published immediately.
+
+`has_context` denotes agent-supplied information, not a sensor observation or an
+instruction. Context has the graph's in-memory lifetime: normal lifecycle pruning
+can remove it when its source becomes unreachable, and restarting does not persist
+it. It does not authorize movement or manipulation.
 
 ## Packages
 
@@ -46,6 +66,23 @@ ROS 2 monorepo for building, querying, and visualizing semantic scene graphs fro
 ```bash
 colcon build --symlink-install --packages-up-to semantic_scene_forests_launch
 ```
+
+## Pre-commit checks
+
+With `pre-commit` installed, run this once per clone to enable checks on commits:
+
+```bash
+pre-commit install
+```
+
+Run the same checks as CI manually with:
+
+```bash
+pre-commit run --all-files --show-diff-on-failure
+```
+
+Review and stage any formatting fixes made by the hooks, then rerun the checks.
+The hooks check formatting and file hygiene; use `colcon build` to verify compilation.
 
 ## Notes
 

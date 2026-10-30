@@ -27,6 +27,7 @@
 // POSSIBILITY OF SUCH DAMAGE.
 
 #include "semantic_scene_forests_generation_node.hpp"
+#include "tasks/task_utils.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -38,7 +39,7 @@
 #include <thread>
 #include <unordered_set>
 
-#include <ament_index_cpp/get_package_share_path.hpp>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 
 #include <cv_bridge/cv_bridge.hpp>
 
@@ -79,7 +80,8 @@ SceneGraphGenerationNode::SceneGraphGenerationNode(const rclcpp::NodeOptions& op
   else
   {
     prompt_dir =
-      ament_index_cpp::get_package_share_path("semantic_scene_forests_generation") / "resources";
+      fs::path(ament_index_cpp::get_package_share_directory("semantic_scene_forests_generation")) /
+      "resources";
   }
   loadTemplates(prompt_dir.string());
   loadPlugins();
@@ -123,6 +125,13 @@ SceneGraphGenerationNode::SceneGraphGenerationNode(const rclcpp::NodeOptions& op
   m_scene_graph_pub = create_publisher<SceneGraphMsg>("/scene_graph", qos);
 
   m_visuals_client = create_client<GetObjectVisuals>("/get_object_visuals");
+
+  m_context_service =
+    create_service<AddSceneContext>("/add_scene_context",
+                                    [this](const AddSceneContext::Request::SharedPtr& request,
+                                           const AddSceneContext::Response::SharedPtr& response) {
+                                      onAddSceneContext(*request, *response);
+                                    });
 
   m_action_server = rclcpp_action::create_server<UpdateSceneGraphAction>(
     this,
@@ -292,6 +301,43 @@ void SceneGraphGenerationNode::onManagedObjects(const ManagedObjectArray::Shared
     // Removals must become visible immediately, not at the next 1 Hz tick.
     publishSceneGraph();
   }
+}
+
+void SceneGraphGenerationNode::onAddSceneContext(const AddSceneContext::Request& request,
+                                                 AddSceneContext::Response& response)
+{
+  {
+    // Serialize with goal admission so an older inference snapshot cannot overwrite context.
+    std::scoped_lock lock{m_goal_mutex, m_objects_mutex, m_graph_mutex};
+    if (m_goal_active || m_stopping)
+    {
+      response.message = "Scene graph generation is busy or stopping";
+      return;
+    }
+    const auto SOURCE = m_scene_graph.findNode(request.node_id);
+    if (!SOURCE)
+    {
+      response.message = "Source node does not exist";
+      return;
+    }
+    if (std::holds_alternative<fzi::semantic_scene_forests::ObjectNode>(*SOURCE) &&
+        !m_cached_objects.contains(request.node_id))
+    {
+      response.message = "Source object is no longer active";
+      return;
+    }
+    auto added = appendSceneContext(m_scene_graph, request.node_id, request.context);
+    if (!added)
+    {
+      response.message = added.error();
+      return;
+    }
+    response.success         = true;
+    response.context_node_id = added->context_node_id;
+    response.created         = added->created;
+    response.message         = added->created ? "Context added" : "Context already exists";
+  }
+  publishSceneGraph();
 }
 
 // ── Timer callback ────────────────────────────────────────────────────────────
