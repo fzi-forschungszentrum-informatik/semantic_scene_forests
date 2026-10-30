@@ -79,6 +79,8 @@ jobs:
           ADDITIONAL_DEBS: libssl-dev libcurl4-openssl-dev cargo rustc rustfmt libclang-dev python3-pip
           BASEDIR: ${{ github.workspace }}/.build
           UPSTREAM_WORKSPACE: upstream_workspace.yaml
+          # Jazzy/Kilted system Rust is too old for the optional Rust bindings.
+          TARGET_WORKSPACE: ${{ (matrix.distro == 'jazzy' || matrix.distro == 'kilted') && '. -semantic_scene_forests_rs' || '.' }}
           # oai_api: built upstream as plain CMake; rosdep cannot discover it as an ament package.
           # ament_cargo: a colcon build type (colcon-ros-cargo), not a rosdep key.
           ROSDEP_SKIP_KEYS: oai_api ament_cargo
