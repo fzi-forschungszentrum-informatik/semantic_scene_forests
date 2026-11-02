@@ -69,6 +69,7 @@ Act   /update_scene_graph  semantic_scene_forests_msgs/UpdateSceneGraph      (se
 |-----------|---------|
 | `server_url` | `""` (configure externally) |
 | `api_key` | `""` |
+| `extra_body` | `""` (JSON object string merged into every LLM request, e.g. OpenRouter `provider` routing) |
 | `frame_id` | `"world"` |
 | `prompt_dir` | `""` (falls back to `share/semantic_scene_forests_generation/resources`) |
 | `phase1_model` | `Qwen/Qwen3-VL-8B-Instruct` |

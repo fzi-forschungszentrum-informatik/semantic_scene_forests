@@ -91,21 +91,35 @@ SceneGraphGenerationNode::SceneGraphGenerationNode(const rclcpp::NodeOptions& op
     std::chrono::seconds{std::max<int64_t>(1, m_params.llm_connect_timeout_seconds)};
   const auto LLM_REQUEST_TIMEOUT =
     std::chrono::seconds{std::max<int64_t>(1, m_params.llm_request_timeout_seconds)};
-  m_phase1_client.emplace(oai::ClientBuilder{}
-                            .baseUrl(m_params.server_url)
-                            .apiKey(m_params.api_key)
-                            .model(m_params.phase1_model)
-                            .connectTimeout(LLM_CONNECT_TIMEOUT)
-                            .requestTimeout(LLM_REQUEST_TIMEOUT)
-                            .build());
-
-  m_phase2_client.emplace(oai::ClientBuilder{}
-                            .baseUrl(m_params.server_url)
-                            .apiKey(m_params.api_key)
-                            .model(m_params.phase2_model)
-                            .connectTimeout(LLM_CONNECT_TIMEOUT)
-                            .requestTimeout(LLM_REQUEST_TIMEOUT)
-                            .build());
+  // oai-api silently ignores a non-object extra body, so reject typos at startup.
+  nlohmann::json extra_body;
+  if (!m_params.extra_body.empty())
+  {
+    extra_body = nlohmann::json::parse(m_params.extra_body, nullptr, false);
+    if (!extra_body.is_object())
+    {
+      throw std::invalid_argument(
+        "extra_body must be a JSON object (double quotes, lowercase true/false): " +
+        m_params.extra_body);
+    }
+  }
+  const auto make_client = [&](const std::string& model) {
+    return oai::ClientBuilder{}
+      .baseUrl(m_params.server_url)
+      .apiKey(m_params.api_key)
+      .model(model)
+      // OpenRouter app attribution: the referer URL is the app identity, the title its name.
+      .header("HTTP-Referer",
+              "https://github.com/fzi-forschungszentrum-informatik/semantic_scene_forests/tree/"
+              "main/semantic_scene_forests_generation")
+      .header("X-OpenRouter-Title", "semantic_scene_forests_generation")
+      .extraBody(extra_body)
+      .connectTimeout(LLM_CONNECT_TIMEOUT)
+      .requestTimeout(LLM_REQUEST_TIMEOUT)
+      .build();
+  };
+  m_phase1_client.emplace(make_client(m_params.phase1_model));
+  m_phase2_client.emplace(make_client(m_params.phase2_model));
 
   // QoS matching the Rust implementation
   auto qos = rclcpp::QoS(1).reliable().transient_local();

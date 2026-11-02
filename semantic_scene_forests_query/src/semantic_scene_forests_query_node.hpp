@@ -104,6 +104,7 @@ private:
   // ── Parameters ──────────────────────────────────────────────────────────
   std::shared_ptr<ParamListener> m_param_listener;
   Params m_params;
+  nlohmann::json m_extra_body; // parsed once from the read-only extra_body parameter
 
   // ── Prompt templates ────────────────────────────────────────────────────
   TemplateMap m_templates;

@@ -85,6 +85,17 @@ SceneGraphQueryNode::SceneGraphQueryNode(const rclcpp::NodeOptions& options)
 {
   m_param_listener = std::make_shared<ParamListener>(get_node_parameters_interface());
   m_params         = m_param_listener->get_params();
+  // oai-api silently ignores a non-object extra body, so reject typos at startup.
+  if (!m_params.extra_body.empty())
+  {
+    m_extra_body = nlohmann::json::parse(m_params.extra_body, nullptr, false);
+    if (!m_extra_body.is_object())
+    {
+      throw std::invalid_argument(
+        "extra_body must be a JSON object (double quotes, lowercase true/false): " +
+        m_params.extra_body);
+    }
+  }
 
   m_diagnostic_updater.setHardwareID("semantic_scene_forests_query");
   m_diagnostic_updater.add("Connectivity", this, &SceneGraphQueryNode::onConnectivityDiagnostic);
@@ -466,8 +477,14 @@ oai::OpenAIClient SceneGraphQueryNode::makeClient() const
     .baseUrl(m_params.server_url)
     .apiKey(m_params.api_key)
     .model(m_params.model)
+    // OpenRouter app attribution: the referer URL is the app identity, the title its name.
+    .header("HTTP-Referer",
+            "https://github.com/fzi-forschungszentrum-informatik/semantic_scene_forests/tree/main/"
+            "semantic_scene_forests_query")
+    .header("X-OpenRouter-Title", "semantic_scene_forests_query")
     .temperature(static_cast<float>(m_params.temperature))
     .maxTokens(m_params.max_tokens)
+    .extraBody(m_extra_body)
     .connectTimeout(CONNECT_TIMEOUT)
     .requestTimeout(REQUEST_TIMEOUT)
     .build();
