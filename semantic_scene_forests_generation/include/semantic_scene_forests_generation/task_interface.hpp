@@ -59,7 +59,7 @@ using TaskResult  = std::expected<void, std::string>;
 // Executed once per managed object in Phase 1. The history vector is
 // pre-populated with the system message and the object-setup user message
 // (with image crops). Tasks append their own user prompt, call
-// client.complete(history), and update the scene graph.
+// client.chat({.messages = history}), and update the scene graph.
 // ---------------------------------------------------------------------------
 
 class SEMANTIC_SCENE_FORESTS_GENERATION_PUBLIC IObjectTask

@@ -687,7 +687,7 @@ void SceneGraphGenerationNode::executePhase1(const std::shared_ptr<GoalHandle>& 
     }
 
     // Send setup and get acknowledgement
-    auto ack = phase1_client.complete(history);
+    auto ack = phase1_client.chat({.messages = history});
     if (!ack)
     {
       m_llm_errors.increment(ack.error().message);
@@ -695,8 +695,7 @@ void SceneGraphGenerationNode::executePhase1(const std::shared_ptr<GoalHandle>& 
             ack.error().message);
       return;
     }
-    auto acknowledgement =
-      oai::MessageBuilder::assistant().text(ack->choice.content.value_or("")).build();
+    auto acknowledgement = oai::MessageBuilder::assistant().text(ack->text()).build();
     if (!acknowledgement)
     {
       abort("Phase 1 failed to build the setup acknowledgement: " + acknowledgement.error());
@@ -839,15 +838,14 @@ void SceneGraphGenerationNode::executePhase2(const std::shared_ptr<GoalHandle>& 
   }
   history.push_back(std::move(*setup_message));
 
-  auto ack = phase2_client.complete(history);
+  auto ack = phase2_client.chat({.messages = history});
   if (!ack)
   {
     m_llm_errors.increment(ack.error().message);
     abort("Phase 2 setup request failed: " + ack.error().message);
     return;
   }
-  auto acknowledgement =
-    oai::MessageBuilder::assistant().text(ack->choice.content.value_or("")).build();
+  auto acknowledgement = oai::MessageBuilder::assistant().text(ack->text()).build();
   if (!acknowledgement)
   {
     abort("Phase 2 failed to build the setup acknowledgement: " + acknowledgement.error());

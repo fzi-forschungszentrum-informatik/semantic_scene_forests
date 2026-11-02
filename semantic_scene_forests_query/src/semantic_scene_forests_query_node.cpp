@@ -390,9 +390,10 @@ std::expected<std::string, std::string> SceneGraphQueryNode::inspectObjectVisual
   }
 
   auto client    = makeClient();
-  auto response2 = client.complete(
-    {oai::MessageBuilder::system().text("You are a precise vision assistant.").build().value(),
-     std::move(*user_msg)});
+  auto response2 = client.chat(
+    {.messages = {
+       oai::MessageBuilder::system().text("You are a precise vision assistant.").build().value(),
+       std::move(*user_msg)}});
   if (!response2)
   {
     m_llm_errors.increment(response2.error().message);
@@ -400,7 +401,7 @@ std::expected<std::string, std::string> SceneGraphQueryNode::inspectObjectVisual
                                        response2.error().http_status,
                                        response2.error().message)};
   }
-  return response2->choice.content.value_or("");
+  return response2->text();
 }
 
 std::string SceneGraphQueryNode::renderSystemPrompt(const std::string& template_key) const
