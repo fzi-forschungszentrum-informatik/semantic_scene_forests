@@ -32,11 +32,15 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <functional>
 #include <limits>
 #include <set>
 #include <stdexcept>
 #include <utility>
+
+#include <nlohmann/json.hpp>
+#include <oai_api/builder.hpp>
 
 namespace semantic_scene_forests_object_tracker {
 
@@ -134,6 +138,45 @@ ObjectTrackerComponent::ObjectTrackerComponent(const rclcpp::NodeOptions& option
     this->create_publisher<semantic_scene_forests_object_msgs::msg::ObjectCandidateArray>(
       "object_candidate_snapshots", pub_qos);
   publishSnapshot();
+  if (m_params.snapshot_rate_hz > 0.0)
+  {
+    // Default callback group: mutually exclusive with the camera callbacks, so no extra lock.
+    m_snapshot_timer =
+      this->create_wall_timer(std::chrono::duration<double>(1.0 / m_params.snapshot_rate_hz),
+                              [this] { publishSnapshot(); });
+  }
+
+  if (m_params.arbiter.enabled && m_params.arbiter.api_key.empty())
+  {
+    RCLCPP_WARN(this->get_logger(), "arbiter.enabled but arbiter.api_key is empty; arbiter off");
+  }
+  else if (m_params.arbiter.enabled)
+  {
+    nlohmann::json extra_body;
+    if (!m_params.arbiter.extra_body.empty())
+    {
+      extra_body = nlohmann::json::parse(m_params.arbiter.extra_body, nullptr, false);
+      if (!extra_body.is_object())
+      {
+        throw std::invalid_argument("arbiter.extra_body must be a JSON object: " +
+                                    m_params.arbiter.extra_body);
+      }
+    }
+    m_arbiter_client.emplace(
+      oai::ClientBuilder{}
+        .baseUrl(m_params.arbiter.server_url)
+        .apiKey(m_params.arbiter.api_key)
+        .model(m_params.arbiter.model)
+        // OpenRouter app attribution: the referer URL is the app identity, the title its name.
+        .header("HTTP-Referer",
+                "https://github.com/fzi-forschungszentrum-informatik/semantic_scene_forests/tree/"
+                "main/semantic_scene_forests_object_tracker")
+        .header("X-OpenRouter-Title", "semantic_scene_forests_object_tracker")
+        .extraBody(extra_body)
+        .connectTimeout(std::chrono::seconds{5})
+        .requestTimeout(std::chrono::seconds{m_params.arbiter.request_timeout_seconds})
+        .build());
+  }
 
   RCLCPP_INFO(this->get_logger(),
               "ObjectTrackerComponent started with %zu cameras. World frame: %s",
@@ -180,71 +223,99 @@ bool ObjectTrackerComponent::isRecent(const TrackedObject& object,
          rclcpp::Duration::from_seconds(m_params.reacquisition_timeout);
 }
 
-void ObjectTrackerComponent::replaceRememberedTracks(const rclcpp::Time& current_time)
+std::optional<detail::TrackPair>
+ObjectTrackerComponent::reconcileStaleTracks(const rclcpp::Time& current_time)
 {
-  // Build the complete recent-confirmed/remembered bipartite graph before removing
-  // anything, so established recent neighbors still count as ambiguity blockers.
-  // Only newly confirmed or explicitly pending ambiguous IDs may retire a partner.
-  std::vector<std::vector<size_t>> partners(m_tracked_objects.size());
-  for (size_t i = 0; i < m_tracked_objects.size(); ++i)
+  // A stale track (confirmed, not seen for reacquisition_timeout) meets a confirmed recent
+  // track at its pose: a similar object reactivates the stale identity, anything else
+  // replaces it. With the arbiter, replacement is decided from the crops instead.
+  std::optional<detail::TrackPair> to_arbitrate;
+  std::vector<detail::TrackPair> reactivate; // {stale id, recent id}
+  std::set<uint64_t> retired;
+  std::set<uint64_t> used;
+  for (const auto& stale : m_tracked_objects)
   {
-    const auto& recent = *m_tracked_objects[i];
-    if (!recent.confirmed || !isRecent(recent, current_time))
+    if (!stale->confirmed || isRecent(*stale, current_time))
     {
       continue;
     }
-    for (size_t j = 0; j < m_tracked_objects.size(); ++j)
+    const TrackedObject* best = nullptr;
+    double best_cover         = 0.0;
+    for (const auto& recent : m_tracked_objects)
     {
-      const auto& remembered = *m_tracked_objects[j];
-      if (!remembered.confirmed || isRecent(remembered, current_time) ||
-          recent.last_seen <= remembered.last_seen ||
-          (recent.getPosition() - remembered.getPosition()).norm() > m_params.replacement_distance)
+      if (!recent->confirmed || !isRecent(*recent, current_time) ||
+          used.contains(recent->track_id) || recent->last_seen <= stale->last_seen)
       {
         continue;
       }
-      const Eigen::Vector3d ratios =
-        recent.bbox3d_size.cwiseMax(remembered.bbox3d_size)
-          .cwiseQuotient(recent.bbox3d_size.cwiseMin(remembered.bbox3d_size));
-      if ((ratios.array() <= m_params.replacement_max_size_ratio).all())
+      // Fraction of the stale box occupied by the recent one.
+      const double COVER = TrackedObject::coveredFraction(recent->getPosition(),
+                                                          recent->bbox3d_size,
+                                                          stale->getPosition(),
+                                                          stale->bbox3d_size,
+                                                          m_params.overlap_min_extent);
+      if (COVER > best_cover)
       {
-        partners[i].push_back(j);
-        partners[j].push_back(i);
+        best_cover = COVER;
+        best       = recent.get();
       }
     }
-  }
-
-  std::set<uint64_t> retired;
-  std::set<uint64_t> pending;
-  for (size_t i = 0; i < partners.size(); ++i)
-  {
-    const auto& candidate = *m_tracked_objects[i];
-    if (!m_replacement_candidates.contains(candidate.track_id) ||
-        !isRecent(candidate, current_time))
+    if (!best)
     {
       continue;
     }
-    if (partners[i].size() == 1 && partners[partners[i][0]].size() == 1)
+    const double OVERLAP =
+      TrackedObject::overlapOfSmaller(*stale, *best, m_params.overlap_min_extent);
+    const auto PAIR = std::minmax(stale->track_id, best->track_id);
+    if (TrackedObject::sizesCompatible(
+          stale->bbox3d_size, best->bbox3d_size, m_params.association_max_size_ratio) &&
+        OVERLAP >= m_params.merge_overlap_threshold)
     {
-      const auto j = partners[i][0];
-      retired.insert(m_tracked_objects[j]->track_id);
-      RCLCPP_INFO(this->get_logger(),
-                  "Replacing remembered track %lu with recent track %lu",
-                  m_tracked_objects[j]->track_id,
-                  m_tracked_objects[i]->track_id);
+      reactivate.emplace_back(stale->track_id, best->track_id);
+      used.insert(best->track_id);
     }
-    else if (!partners[i].empty())
+    else if (m_arbiter_client && !m_arbitrated_pairs.contains(PAIR) &&
+             OVERLAP > m_params.arbiter.min_overlap)
     {
-      pending.insert(candidate.track_id);
+      // Something is at the stale pose but geometry can't say what: the arbiter decides.
+      if (!to_arbitrate)
+      {
+        to_arbitrate = detail::TrackPair{stale->track_id, best->track_id};
+      }
+    }
+    else if (best_cover >= m_params.replacement_overlap_threshold)
+    {
+      // Without an arbiter answer (disabled, or the request failed) replace on coverage.
+      retired.insert(stale->track_id);
+      RCLCPP_INFO(this->get_logger(),
+                  "Replacing stale track %lu with track %lu",
+                  stale->track_id,
+                  best->track_id);
     }
   }
-  m_replacement_candidates = std::move(pending);
+
+  for (const auto& [stale_id, recent_id] : reactivate)
+  {
+    const auto INDEX = [this](uint64_t id) {
+      return static_cast<size_t>(
+        std::ranges::find_if(m_tracked_objects,
+                             [id](const auto& obj) { return obj->track_id == id; }) -
+        m_tracked_objects.begin());
+    };
+    RCLCPP_DEBUG(this->get_logger(), "Reactivating stale track %lu with %lu", stale_id, recent_id);
+    mergeTrackPair(INDEX(stale_id), INDEX(recent_id));
+  }
   std::erase_if(m_tracked_objects,
                 [&retired](const auto& object) { return retired.contains(object->track_id); });
+  return to_arbitrate;
 }
 
 void ObjectTrackerComponent::publishSnapshot()
 {
-  semantic_scene_forests_object_msgs::msg::ObjectCandidateArray snapshot;
+  // unique_ptr lets intra-process delivery move the snapshot (crops included) without a copy.
+  auto snapshot_ptr =
+    std::make_unique<semantic_scene_forests_object_msgs::msg::ObjectCandidateArray>();
+  auto& snapshot           = *snapshot_ptr;
   snapshot.header.stamp    = this->now();
   snapshot.header.frame_id = m_world_frame;
   for (const auto& obj : m_tracked_objects)
@@ -262,12 +333,12 @@ void ObjectTrackerComponent::publishSnapshot()
     candidate.image_crops = obj->getCrops();
     snapshot.objects.push_back(std::move(candidate));
   }
-  m_candidates_pub->publish(snapshot);
+  m_candidates_pub->publish(std::move(snapshot_ptr));
 }
 
 void ObjectTrackerComponent::mergeOverlappingTracks(const rclcpp::Time& current_time)
 {
-  double threshold = m_params.merge_iou_threshold;
+  const double THRESHOLD = m_params.merge_overlap_threshold;
   std::set<size_t> removed;
 
   for (size_t i = 0; i < m_tracked_objects.size(); ++i)
@@ -289,13 +360,13 @@ void ObjectTrackerComponent::mergeOverlappingTracks(const rclcpp::Time& current_
         continue;
       }
 
-      // TODO: Implement better name matching for similar but not equal names.
-      if (tracked_object->class_name != other_tracked_object->class_name)
-      {
-        continue;
-      }
-
-      if (TrackedObject::bbox3dOverlap(*tracked_object, *other_tracked_object) > threshold)
+      // Class-agnostic: clearly overlapping boxes are one object; mergeFrom joins
+      // the label histories and the vote picks the label.
+      if (TrackedObject::sizesCompatible(tracked_object->bbox3d_size,
+                                         other_tracked_object->bbox3d_size,
+                                         m_params.association_max_size_ratio) &&
+          TrackedObject::overlapOfSmaller(
+            *tracked_object, *other_tracked_object, m_params.overlap_min_extent) >= THRESHOLD)
       {
         if (tracked_object->track_id < other_tracked_object->track_id)
         {
@@ -322,14 +393,246 @@ void ObjectTrackerComponent::mergeOverlappingTracks(const rclcpp::Time& current_
       {
         kept.push_back(std::move(m_tracked_objects[i]));
       }
-      else
-      {
-        // Retirement authority belongs to an identity, not its merged estimate.
-        m_replacement_candidates.erase(m_tracked_objects[i]->track_id);
-      }
     }
     m_tracked_objects = std::move(kept);
   }
+}
+
+void ObjectTrackerComponent::mergeTrackPair(size_t i, size_t j)
+{
+  // Same survivor rule as mergeOverlappingTracks: the older identity is kept.
+  if (m_tracked_objects[i]->track_id > m_tracked_objects[j]->track_id)
+  {
+    std::swap(i, j);
+  }
+  m_tracked_objects[i]->mergeFrom(*m_tracked_objects[j]);
+  m_tracked_objects.erase(m_tracked_objects.begin() + static_cast<std::ptrdiff_t>(j));
+}
+
+void ObjectTrackerComponent::applyArbiterResult(const rclcpp::Time& current_time)
+{
+  std::optional<ArbiterResult> result;
+  {
+    const std::scoped_lock LOCK{m_arbiter_mutex};
+    result = std::exchange(m_arbiter_result, std::nullopt);
+  }
+  if (!result)
+  {
+    return;
+  }
+  // Every asked pair is memoized, whatever the outcome: arbitration is a last resort.
+  m_arbitrated_pairs.insert(std::minmax(result->a_id, result->b_id));
+  if (!result->same_probability)
+  {
+    m_arbiter_errors.increment(result->error);
+    return;
+  }
+  ++m_identity_decisions;
+
+  const auto FIND = [this](uint64_t id) {
+    return std::ranges::find_if(m_tracked_objects,
+                                [id](const auto& obj) { return obj->track_id == id; });
+  };
+  const auto A    = FIND(result->a_id);
+  const auto B    = FIND(result->b_id);
+  const bool SAME = *result->same_probability >= m_params.arbiter.same_object_probability;
+  RCLCPP_INFO(this->get_logger(),
+              "Identity decision for %s tracks %lu/%lu: p(same)=%.2f label='%s' -> %s",
+              result->stale_replacement ? "stale/recent" : "overlapping",
+              result->a_id,
+              result->b_id,
+              *result->same_probability,
+              result->label.c_str(),
+              SAME ? "merge" : (result->stale_replacement ? "replace" : "keep"));
+  if (!SAME && result->stale_replacement && A != m_tracked_objects.end() &&
+      !isRecent(**A, current_time))
+  {
+    m_tracked_objects.erase(A); // Something else now occupies the stale track's pose.
+    ++m_identity_replacements;
+    return;
+  }
+  if (!SAME || A == m_tracked_objects.end() || B == m_tracked_objects.end())
+  {
+    return;
+  }
+  const auto I           = static_cast<size_t>(A - m_tracked_objects.begin());
+  const auto J           = static_cast<size_t>(B - m_tracked_objects.begin());
+  const auto SURVIVOR_ID = std::min(result->a_id, result->b_id);
+  mergeTrackPair(I, J);
+  if (!result->label.empty())
+  {
+    (*FIND(SURVIVOR_ID))->setDecidedLabel(result->label);
+  }
+  ++m_identity_merges;
+}
+
+void ObjectTrackerComponent::startArbiter(const rclcpp::Time& current_time,
+                                          const std::optional<detail::TrackPair>& replacement)
+{
+  const auto NOW = std::chrono::steady_clock::now();
+  if (m_last_arbiter_start &&
+      NOW - *m_last_arbiter_start <
+        std::chrono::duration<double>(m_params.arbiter.min_interval_seconds))
+  {
+    return;
+  }
+  {
+    const std::scoped_lock LOCK{m_arbiter_mutex};
+    if (m_arbiter_active || m_arbiter_result)
+    {
+      return; // Reject while busy; no queue.
+    }
+  }
+
+  // Stale replacements first; otherwise an ambiguous partial overlap of recent tracks.
+  std::optional<std::pair<size_t, size_t>> pair;
+  if (replacement)
+  {
+    const auto INDEX = [this](uint64_t id) {
+      return static_cast<size_t>(
+        std::ranges::find_if(m_tracked_objects,
+                             [id](const auto& obj) { return obj->track_id == id; }) -
+        m_tracked_objects.begin());
+    };
+    pair = std::pair{INDEX(replacement->first), INDEX(replacement->second)};
+  }
+  else
+  {
+    pair = detail::findAmbiguousPair(
+      m_tracked_objects,
+      [this, &current_time](const TrackedObject& obj) {
+        return obj.confirmed && isRecent(obj, current_time);
+      },
+      m_params.arbiter.min_overlap,
+      m_params.merge_overlap_threshold,
+      m_params.association_max_size_ratio,
+      m_params.overlap_min_extent,
+      m_arbitrated_pairs);
+  }
+  if (!pair)
+  {
+    return;
+  }
+  const auto& first  = *m_tracked_objects[pair->first];
+  const auto& second = *m_tracked_objects[pair->second];
+  ArbiterRequest request{.stale_replacement = replacement.has_value(),
+                         .a_id              = first.track_id,
+                         .b_id              = second.track_id,
+                         .a_label           = first.class_name,
+                         .b_label           = second.class_name,
+                         .a_crops           = first.getCrops(),
+                         .b_crops           = second.getCrops(),
+                         .a_size            = first.bbox3d_size,
+                         .b_size            = second.bbox3d_size,
+                         .center_distance   = (first.getPosition() - second.getPosition()).norm()};
+
+  {
+    const std::scoped_lock LOCK{m_arbiter_mutex};
+    m_arbiter_active = true;
+  }
+  m_last_arbiter_start = NOW;
+  // The previous worker has published its result and is finishing; join it before reuse.
+  m_arbiter_worker =
+    std::jthread([this, request = std::move(request), model = m_params.arbiter.model](
+                   const std::stop_token& stop) {
+      std::optional<ArbiterResult> result;
+      if (!stop.stop_requested())
+      {
+        result = runArbiter(*m_arbiter_client, model, request);
+      }
+      const std::scoped_lock LOCK{m_arbiter_mutex};
+      m_arbiter_active = false;
+      if (!stop.stop_requested())
+      {
+        m_arbiter_result = std::move(result);
+      }
+    });
+}
+
+ObjectTrackerComponent::ArbiterResult ObjectTrackerComponent::runArbiter(
+  const oai::OpenAIClient& client, const std::string& model, const ArbiterRequest& request)
+{
+  ArbiterResult result{
+    .stale_replacement = request.stale_replacement, .a_id = request.a_id, .b_id = request.b_id};
+
+  auto builder      = oai::MessageBuilder::user();
+  const auto IMAGES = [&builder](const std::string& title,
+                                 const std::vector<sensor_msgs::msg::Image>& crops) {
+    builder.text(title);
+    for (const auto& crop : crops)
+    {
+      builder.image(cv_bridge::toCvCopy(crop, "bgr8")->image);
+    }
+  };
+  const auto SIZE = [](const Eigen::Vector3d& v) { return nlohmann::json{v.x(), v.y(), v.z()}; };
+  try
+  {
+    IMAGES("Track A image crops:", request.a_crops);
+    IMAGES("Track B image crops:", request.b_crops);
+  }
+  catch (const cv_bridge::Exception& e)
+  {
+    result.error = std::string("crop conversion: ") + e.what();
+    return result;
+  }
+  builder.json(
+    {{"track_a", {{"detector_label", request.a_label}, {"size_m", SIZE(request.a_size)}}},
+     {"track_b", {{"detector_label", request.b_label}, {"size_m", SIZE(request.b_size)}}},
+     {"center_distance_m", request.center_distance}});
+  auto message = builder.build();
+  if (!message)
+  {
+    result.error = "message build: " + message.error();
+    return result;
+  }
+
+  oai::DecisionRequest decision;
+  decision.format = oai::DecisionFormat::OPENROUTER;
+  decision.model  = model;
+  decision.input  = std::vector<oai::Message>{std::move(*message)};
+  decision.questions.emplace_back(oai::PredicateQuestion{
+    .name           = "same_object",
+    .instructions   = request.stale_replacement
+                        ? "Track A was seen earlier at a place where track B is seen now. Do the "
+                          "image crops of track A and track B show the same physical object, or "
+                          "was A replaced by something else? Detector labels are often wrong; "
+                          "judge by appearance."
+                        : "Two tracks from a robot's object tracker have partially overlapping 3D "
+                          "boxes. Do the image crops of track A and track B show the same physical "
+                          "object? Detector labels are often wrong; judge by appearance.",
+    .true_criteria  = "A and B show the same physical object instance.",
+    .false_criteria = "A and B show different physical objects."});
+  const bool ASK_LABEL = request.a_label != request.b_label;
+  if (ASK_LABEL)
+  {
+    decision.questions.emplace_back(oai::ChoiceQuestion{
+      .name         = "label",
+      .instructions = "If they are the same object, which label names it better?",
+      .choices      = {{.value = request.a_label, .description = "label of track A"},
+                       {.value = request.b_label, .description = "label of track B"}}});
+  }
+
+  auto response = client.decide(decision);
+  if (!response)
+  {
+    result.error = response.error().message;
+    return result;
+  }
+  const auto& answers = response->answers;
+  if (answers.empty() || answers[0].type != "predicate" || !answers[0].probability)
+  {
+    result.error = answers.empty() ? "no answers" : "unusable answer: " + answers[0].type;
+    return result;
+  }
+  result.same_probability = answers[0].probability;
+  // An invalid or missing choice leaves the label empty: the vote stays in charge.
+  const auto CHOICE =
+    ASK_LABEL && answers.size() > 1 ? answers[1].choice.value_or("") : request.a_label;
+  if (CHOICE == request.a_label || CHOICE == request.b_label)
+  {
+    result.label = CHOICE;
+  }
+  return result;
 }
 
 std::optional<sensor_msgs::msg::Image> ObjectTrackerComponent::cropImagePatch(
@@ -473,15 +776,48 @@ void ObjectTrackerComponent::syncedCallbackVision(
     transformed_detections.push_back(std::move(trans_det));
   }
 
-  std::vector<std::unique_ptr<CombinedDetection>> detections;
+  std::vector<DetectionAdapter> detections;
   detections.reserve(transformed_detections.size());
-  for (auto& trans_det : transformed_detections)
+  for (const auto& trans_det : transformed_detections)
   {
-    auto combined   = std::make_unique<CombinedDetection>();
-    combined->det2d = trans_det.det2d;
-    combined->det3d = &trans_det.det3d;
-    detections.push_back(std::move(combined));
+    const CombinedDetection COMBINED{.det2d = trans_det.det2d, .det3d = &trans_det.det3d};
+    detections.push_back(DetectionAdapter{.class_name = COMBINED.className(),
+                                          .class_id   = 0,
+                                          .score      = COMBINED.score(),
+                                          .bbox3d     = COMBINED.bbox3D(),
+                                          .bbox2d     = COMBINED.bbox2D(),
+                                          .frame_id   = m_world_frame});
   }
+
+  // YOLOE often reports one object several times per frame under different labels. Keep the
+  // highest-scoring detection of each similar-sized, clearly overlapping group.
+  std::ranges::sort(detections, std::greater{}, &DetectionAdapter::score);
+  const auto BOX = [](const DetectionAdapter& det) {
+    const auto& b = det.bbox3d;
+    return std::pair{Eigen::Vector3d(b.center.position.x, b.center.position.y, b.center.position.z),
+                     Eigen::Vector3d(b.size.x, b.size.y, b.size.z)};
+  };
+  std::vector<DetectionAdapter> kept_detections;
+  for (const auto& det : detections)
+  {
+    const auto [center, size] = BOX(det);
+    const bool DUPLICATE      = std::ranges::any_of(kept_detections, [&](const auto& other) {
+      const auto [other_center, other_size] = BOX(other);
+      const double OVERLAP =
+        std::max(TrackedObject::coveredFraction(
+                   center, size, other_center, other_size, m_params.overlap_min_extent),
+                 TrackedObject::coveredFraction(
+                   other_center, other_size, center, size, m_params.overlap_min_extent));
+      return TrackedObject::sizesCompatible(
+               size, other_size, m_params.association_max_size_ratio) &&
+             OVERLAP >= m_params.merge_overlap_threshold;
+    });
+    if (!DUPLICATE)
+    {
+      kept_detections.push_back(det);
+    }
+  }
+  detections = std::move(kept_detections);
 
   camera.last_update_time  = current_time;
   const auto TRACKING_TIME = std::max(m_last_update_time.value_or(current_time), current_time);
@@ -503,134 +839,55 @@ void ObjectTrackerComponent::syncedCallbackVision(
   std::vector<int> det_to_track(detections.size(), -1);
   std::set<size_t> obj_matched;
 
-  // Stage 1: Confirmed tracks (relaxed gate)
-  for (size_t d = 0; d < detections.size(); ++d)
-  {
-    if (det_to_track[d] >= 0)
+  // Labels flicker, so association is class-agnostic: geometry (distance, Mahalanobis
+  // gate, comparable size) decides identity and the label is voted per track.
+  const auto ASSOCIATE = [&](bool confirmed_stage, double gate) {
+    for (size_t d = 0; d < detections.size(); ++d)
     {
-      continue;
-    }
-    const auto& det = *detections[d];
-
-    double best_dist = std::numeric_limits<double>::max();
-    int best_idx     = -1;
-
-    for (size_t o = 0; o < m_tracked_objects.size(); ++o)
-    {
-      auto& obj = m_tracked_objects[o];
-      if (!obj->confirmed || !isRecent(*obj, current_time) || obj_matched.contains(o))
+      if (det_to_track[d] >= 0)
       {
         continue;
       }
-      if (det.className() != obj->class_name)
+      const auto& det    = detections[d];
+      const auto& center = det.bbox3d.center.position;
+      const Eigen::Vector3d DET_SIZE(det.bbox3d.size.x, det.bbox3d.size.y, det.bbox3d.size.z);
+
+      double best_dist = std::numeric_limits<double>::max();
+      int best_idx     = -1;
+      for (size_t o = 0; o < m_tracked_objects.size(); ++o)
       {
-        continue;
+        auto& obj = m_tracked_objects[o];
+        if (obj->confirmed != confirmed_stage || obj_matched.contains(o) ||
+            (confirmed_stage && !isRecent(*obj, current_time)))
+        {
+          continue;
+        }
+        if ((Eigen::Vector3d(center.x, center.y, center.z) - obj->getPosition()).norm() >
+              m_params.max_association_distance ||
+            !TrackedObject::sizesCompatible(
+              DET_SIZE, obj->bbox3d_size, m_params.association_max_size_ratio))
+        {
+          continue;
+        }
+        const double DIST = obj->mahalanobisDistance(det);
+        if (DIST < gate && DIST < best_dist)
+        {
+          best_dist = DIST;
+          best_idx  = static_cast<int>(o);
+        }
       }
 
-      DetectionAdapter adapter;
-      adapter.class_name = det.className();
-      adapter.class_id   = 0;
-      adapter.score      = det.score();
-      adapter.bbox3d     = det.bbox3D();
-      adapter.bbox2d     = det.bbox2D();
-      adapter.frame_id   = m_world_frame;
-
-      const auto& center = adapter.bbox3d.center.position;
-      if ((Eigen::Vector3d(center.x, center.y, center.z) - obj->getPosition()).norm() >
-          m_params.max_association_distance)
+      if (best_idx >= 0)
       {
-        continue;
-      }
-      double dist = obj->mahalanobisDistance(adapter);
-      if (dist < m_params.gate_threshold_confirmed && dist < best_dist)
-      {
-        best_dist = dist;
-        best_idx  = static_cast<int>(o);
-      }
-    }
-
-    if (best_idx >= 0)
-    {
-      DetectionAdapter adapter;
-      adapter.class_name = detections[d]->className();
-      adapter.class_id   = 0;
-      adapter.score      = detections[d]->score();
-      adapter.bbox3d     = detections[d]->bbox3D();
-      adapter.bbox2d     = detections[d]->bbox2D();
-      adapter.frame_id   = m_world_frame;
-
-      m_tracked_objects[best_idx]->update(adapter, current_time);
-      det_to_track[d] = best_idx;
-      obj_matched.insert(best_idx);
-    }
-  }
-
-  // Stage 2: Unconfirmed tracks (strict gate)
-  for (size_t d = 0; d < detections.size(); ++d)
-  {
-    if (det_to_track[d] >= 0)
-    {
-      continue;
-    }
-    const auto& det = *detections[d];
-
-    double best_dist = std::numeric_limits<double>::max();
-    int best_idx     = -1;
-
-    for (size_t o = 0; o < m_tracked_objects.size(); ++o)
-    {
-      auto& obj = m_tracked_objects[o];
-      if (obj->confirmed || obj_matched.contains(o))
-      {
-        continue;
-      }
-      if (det.className() != obj->class_name)
-      {
-        continue;
-      }
-
-      DetectionAdapter adapter;
-      adapter.class_name = det.className();
-      adapter.class_id   = 0;
-      adapter.score      = det.score();
-      adapter.bbox3d     = det.bbox3D();
-      adapter.bbox2d     = det.bbox2D();
-      adapter.frame_id   = m_world_frame;
-
-      const auto& center = adapter.bbox3d.center.position;
-      if ((Eigen::Vector3d(center.x, center.y, center.z) - obj->getPosition()).norm() >
-          m_params.max_association_distance)
-      {
-        continue;
-      }
-      double dist = obj->mahalanobisDistance(adapter);
-      if (dist < m_params.gate_threshold_strict && dist < best_dist)
-      {
-        best_dist = dist;
-        best_idx  = static_cast<int>(o);
+        auto& object = *m_tracked_objects[best_idx];
+        object.update(det, current_time);
+        det_to_track[d] = best_idx;
+        obj_matched.insert(best_idx);
       }
     }
-
-    if (best_idx >= 0)
-    {
-      DetectionAdapter adapter;
-      adapter.class_name = detections[d]->className();
-      adapter.class_id   = 0;
-      adapter.score      = detections[d]->score();
-      adapter.bbox3d     = detections[d]->bbox3D();
-      adapter.bbox2d     = detections[d]->bbox2D();
-      adapter.frame_id   = m_world_frame;
-
-      auto& object = *m_tracked_objects[best_idx];
-      object.update(adapter, current_time);
-      if (object.confirmed)
-      {
-        m_replacement_candidates.insert(object.track_id);
-      }
-      det_to_track[d] = best_idx;
-      obj_matched.insert(best_idx);
-    }
-  }
+  };
+  ASSOCIATE(true, m_params.gate_threshold_confirmed); // Stage 1: confirmed tracks (relaxed gate)
+  ASSOCIATE(false, m_params.gate_threshold_strict);   // Stage 2: unconfirmed tracks (strict gate)
 
   // Remembered storage lasts for this session and may grow without positive replacement
   // evidence. Never evict remembered identities merely to admit an active track.
@@ -650,16 +907,8 @@ void ObjectTrackerComponent::syncedCallbackVision(
       break;
     }
 
-    DetectionAdapter adapter;
-    adapter.class_name = detections[d]->className();
-    adapter.class_id   = 0;
-    adapter.score      = detections[d]->score();
-    adapter.bbox3d     = detections[d]->bbox3D();
-    adapter.bbox2d     = detections[d]->bbox2D();
-    adapter.frame_id   = m_world_frame;
-
     m_tracked_objects.push_back(
-      std::make_unique<TrackedObject>(adapter,
+      std::make_unique<TrackedObject>(detections[d],
                                       current_time,
                                       m_next_track_id,
                                       m_params.measurement_noise_std,
@@ -668,10 +917,6 @@ void ObjectTrackerComponent::syncedCallbackVision(
                                       static_cast<size_t>(m_params.max_crops_per_object),
                                       m_params.bbox_size_alpha));
     det_to_track[d] = static_cast<int>(m_tracked_objects.size() - 1);
-    if (m_tracked_objects.back()->confirmed)
-    {
-      m_replacement_candidates.insert(m_next_track_id);
-    }
     ++active_count;
     m_next_track_id++;
   }
@@ -694,7 +939,7 @@ void ObjectTrackerComponent::syncedCallbackVision(
       continue;
     }
 
-    auto crop = cropImagePatch(cv_image->image, detections[d]->bbox2D(), m_params.crop_padding);
+    auto crop = cropImagePatch(cv_image->image, detections[d].bbox2d, m_params.crop_padding);
     if (crop)
     {
       crop->header = img_msg->header;
@@ -702,9 +947,20 @@ void ObjectTrackerComponent::syncedCallbackVision(
     }
   }
 
-  replaceRememberedTracks(TRACKING_TIME);
+  if (m_arbiter_client)
+  {
+    applyArbiterResult(TRACKING_TIME);
+  }
+  const auto REPLACEMENT = reconcileStaleTracks(TRACKING_TIME);
   mergeOverlappingTracks(TRACKING_TIME);
-  publishSnapshot();
+  if (m_arbiter_client)
+  {
+    startArbiter(TRACKING_TIME, REPLACEMENT);
+  }
+  if (!m_snapshot_timer)
+  {
+    publishSnapshot();
+  }
 
   m_last_update_time = TRACKING_TIME;
 }
@@ -737,6 +993,13 @@ void ObjectTrackerComponent::onHealthDiagnostic(diagnostic_updater::DiagnosticSt
     tf_errors += camera->tf_errors.count();
   }
   m_crop_errors.report(stat, "Crop");
+  if (m_arbiter_client)
+  {
+    stat.add("Identity decisions", m_identity_decisions);
+    stat.add("Identity merges", m_identity_merges);
+    stat.add("Identity replacements", m_identity_replacements);
+    m_arbiter_errors.report(stat, "Identity decision");
+  }
 
   if (tf_errors > 0 || m_crop_errors.count() > 0)
   {

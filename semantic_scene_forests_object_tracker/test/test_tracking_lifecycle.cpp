@@ -61,15 +61,16 @@ protected:
                                           {"measurement_noise_std", 0.01},
                                           {"gate_threshold_confirmed", 1000.0},
                                           {"gate_threshold_strict", 1000.0},
-                                          {"max_crops_per_object", 2}};
+                                          {"max_crops_per_object", 2},
+                                          {"snapshot_rate_hz", 0.0}};
     params.insert(params.end(), overrides.begin(), overrides.end());
     tracker =
       std::make_shared<ObjectTrackerComponent>(rclcpp::NodeOptions().parameter_overrides(params));
     io    = std::make_shared<rclcpp::Node>("tracking_lifecycle_io");
     det2  = io->create_publisher<vision_msgs::msg::Detection2DArray>("detections_2d",
-                                                                     rclcpp::SensorDataQoS());
+                                                                    rclcpp::SensorDataQoS());
     det3  = io->create_publisher<vision_msgs::msg::Detection3DArray>("detections_3d",
-                                                                     rclcpp::SensorDataQoS());
+                                                                    rclcpp::SensorDataQoS());
     image = io->create_publisher<sensor_msgs::msg::Image>("camera/image", rclcpp::SensorDataQoS());
     snapshots = io->create_subscription<Snapshot>("object_candidate_snapshots",
                                                   rclcpp::QoS(1).reliable().transient_local(),
@@ -236,87 +237,71 @@ TEST_F(TrackingLifecycle, PhysicalGateRejectsDistantRecentDetection)
   EXPECT_EQ(latest.objects[1].last_seen.sec, 13);
 }
 
-TEST_F(TrackingLifecycle, StalenessPrecedesMatchingAndOnlyConfirmedReplacementRetiresOldId)
+TEST_F(TrackingLifecycle, StaleTrackIsReactivatedBySimilarObject)
 {
   start();
   confirm({{0}});
   ASSERT_EQ(latest.objects.size(), 1u);
   const auto old_id = latest.objects[0].id;
-  batch(17, {{0.05}});
+  batch(17, {{0.05}}); // Stale: the detection starts a tentative track first.
   ASSERT_EQ(latest.objects.size(), 1u);
   EXPECT_EQ(latest.objects[0].id, old_id);
   EXPECT_EQ(latest.objects[0].last_seen.sec, 11);
-  batch(18, {{0.05}});
+  batch(18, {{0.05}}); // Confirmed at the stale pose: reactivate and update the old identity.
   ASSERT_EQ(latest.objects.size(), 1u);
-  EXPECT_NE(latest.objects[0].id, old_id);
+  EXPECT_EQ(latest.objects[0].id, old_id);
   EXPECT_EQ(latest.objects[0].last_seen.sec, 18);
 }
-
-TEST_F(TrackingLifecycle, DifferentClassMayReplaceRememberedObject)
+TEST_F(TrackingLifecycle, StaleReactivationIgnoresLabel)
 {
   start();
   confirm({{0}});
   batch(17, {{0, "chair"}});
   batch(18, {{0, "chair"}});
   ASSERT_EQ(latest.objects.size(), 1u);
-  EXPECT_EQ(latest.objects[0].class_name, "chair");
-  EXPECT_EQ(latest.objects[0].id, 2);
+  EXPECT_EQ(latest.objects[0].id, 1);
+  EXPECT_EQ(latest.objects[0].last_seen.sec, 18);
 }
 
-TEST_F(TrackingLifecycle, AmbiguousRememberedPartnersAreKeptAndReconsidered)
+TEST_F(TrackingLifecycle, DifferentObjectAtStalePoseReplacesIt)
 {
   start();
-  confirm({{0, "old_a"}, {0.3, "old_b"}});
-  batch(17, {{0.15, "new"}});
-  batch(18, {{0.15, "new"}});
-  ASSERT_EQ(latest.objects.size(), 3u);
-  batch(19, {{-0.02, "new"}});
-  ASSERT_EQ(latest.objects.size(), 2u);
-  EXPECT_EQ(latest.objects[0].class_name, "old_b");
-  EXPECT_EQ(latest.objects[1].class_name, "new");
+  confirm({{0, "box", 0.4}});
+  batch(17, {{0, "table", 1.0}});
+  batch(18, {{0, "table", 1.0}});
+  ASSERT_EQ(latest.objects.size(), 1u);
+  EXPECT_NE(latest.objects[0].id, 1);
+  EXPECT_NEAR(latest.objects[0].detection.bbox.size.x, 1.0, 1e-6);
 }
-
-TEST_F(TrackingLifecycle, AmbiguityIncludesRecentCandidatesNotObservedInCurrentBatch)
-{
-  start();
-  confirm({{0, "old"}});
-  batch(17, {{-0.1, "new_a"}, {0.1, "new_b"}});
-  batch(18, {{-0.1, "new_a"}, {0.1, "new_b"}});
-  ASSERT_EQ(latest.objects.size(), 3u);
-  batch(19, {{-0.1, "new_a"}});
-  EXPECT_EQ(latest.objects.size(), 3u);
-  batch(25, {}); // All remembered: an older identity must never retire a newer one.
-  EXPECT_EQ(latest.objects.size(), 3u);
-}
-
-TEST_F(TrackingLifecycle, ReplacementRequiresComparableDimensionsNotOverlapAlone)
+TEST_F(TrackingLifecycle, FlickeringLabelUpdatesSameTrack)
 {
   start();
   confirm({{0}});
-  batch(17, {{0, "large", 1.2}});
-  batch(18, {{0, "large", 1.2}});
-  EXPECT_EQ(latest.objects.size(), 2u);
-}
-
-TEST_F(TrackingLifecycle, RememberedOverlapCannotBypassReplacementDistance)
-{
-  start();
-  confirm({{0, "box", 2.0}});
-  batch(17, {{0.3, "box", 2.0}});
-  batch(18, {{0.3, "box", 2.0}});
-  EXPECT_EQ(latest.objects.size(), 2u);
-}
-
-TEST_F(TrackingLifecycle, RecentDifferentClassObjectIsNotReplaced)
-{
-  start();
-  confirm({{0}});
+  const auto id = latest.objects[0].id;
   batch(12, {{0, "chair"}});
   batch(13, {{0, "chair"}});
+  ASSERT_EQ(latest.objects.size(), 1u);
+  EXPECT_EQ(latest.objects[0].id, id);
+  EXPECT_EQ(latest.objects[0].last_seen.sec, 13);
+}
+
+TEST_F(TrackingLifecycle, SizeIncompatibleDetectionStartsNewTrack)
+{
+  start();
+  confirm({{0}});
+  batch(12, {{0, "box", 1.0}});
+  batch(13, {{0, "box", 1.0}});
   ASSERT_EQ(latest.objects.size(), 2u);
   EXPECT_EQ(latest.objects[0].last_seen.sec, 11);
 }
 
+TEST_F(TrackingLifecycle, SameFrameDuplicateDetectionsBecomeOneTrack)
+{
+  start();
+  confirm({{0, "box"}, {0.05, "crate"}}); // One object, two labels in the same frame.
+  ASSERT_EQ(latest.objects.size(), 1u);
+  EXPECT_EQ(latest.objects[0].id, 1);
+}
 TEST_F(TrackingLifecycle, TentativeLifetimeUsesUnconfirmedTimeoutNotReacquisitionTimeout)
 {
   start();
@@ -387,9 +372,10 @@ TEST_F(TrackingLifecycle, FailedImageConversionDoesNotConsumeObservationBatch)
   batch(17, {{0.1}});
   ASSERT_EQ(latest.objects.size(), 1u);
   EXPECT_EQ(latest.objects[0].last_seen.sec, 11);
-  batch(18, {{0.1}});
+  batch(18, {{0.1}}); // Stale track reactivated by the second accepted batch.
   ASSERT_EQ(latest.objects.size(), 1u);
-  EXPECT_EQ(latest.objects[0].id, 2);
+  EXPECT_EQ(latest.objects[0].id, 1);
+  EXPECT_EQ(latest.objects[0].last_seen.sec, 18);
 }
 
 TEST_F(TrackingLifecycle, ConfiguredDimensionAlphaReachesTrackFilter)
@@ -417,11 +403,11 @@ TEST_F(TrackingLifecycle, ApproximatelySynchronizedBatchUsesThreeDimensionalStam
   EXPECT_EQ(latest.objects[0].detection.header.stamp.nanosec, 0u);
 }
 
-TEST_F(TrackingLifecycle, EstablishedNeighborDoesNotGainReplacementAuthorityThroughAge)
+TEST_F(TrackingLifecycle, NonOverlappingStaleNeighborIsKept)
 {
   start();
-  confirm({{0, "a"}, {0.1, "b"}});
-  for (int seconds = 12; seconds <= 17; ++seconds)
+  confirm({{0, "a"}, {0.45, "b"}});
+  for (int seconds = 12; seconds <= 18; ++seconds)
   {
     batch(seconds, {{0, "a"}});
   }
@@ -430,25 +416,6 @@ TEST_F(TrackingLifecycle, EstablishedNeighborDoesNotGainReplacementAuthorityThro
   EXPECT_EQ(latest.objects[1].id, 2);
   EXPECT_EQ(latest.objects[1].last_seen.sec, 11);
 }
-
-TEST_F(TrackingLifecycle, SuccessfulReplacementDoesNotGrantPermanentRetirementAuthority)
-{
-  start();
-  confirm({{0, "old"}});
-  batch(17, {{0.1, "a"}});
-  batch(18, {{0.1, "a"}});
-  ASSERT_EQ(latest.objects.size(), 1u);
-  batch(19, {{0.2, "b"}});
-  batch(20, {{0.2, "b"}});
-  for (int seconds = 21; seconds <= 26; ++seconds)
-  {
-    batch(seconds, {{0.1, "a"}});
-  }
-  ASSERT_EQ(latest.objects.size(), 2u);
-  EXPECT_EQ(latest.objects[0].class_name, "a");
-  EXPECT_EQ(latest.objects[1].class_name, "b");
-}
-
 TEST_F(TrackingLifecycle, EpochObservationStampIsPublishedExactly)
 {
   start({{"confirmation_threshold", 1}});
@@ -476,10 +443,13 @@ TEST_F(TrackingLifecycle, EpochReacquisitionBoundaryIsExactToOneNanosecond)
   batch(1792713605, {{0}}, 123456789);
   ASSERT_EQ(latest.objects.size(), 1u);
   EXPECT_EQ(latest.objects[0].id, 1);
-  batch(1792713610, {{0}}, 123456790); // Five seconds plus one nanosecond.
-  ASSERT_EQ(latest.objects.size(), 1u);
-  EXPECT_EQ(latest.objects[0].id, 2);
+  // Five seconds plus one nanosecond: stale, so the detection starts track 2, which then
+  // reactivates track 1. The far object reveals the consumed ID by getting 3.
+  batch(1792713610, {{0}, {3}}, 123456790);
+  ASSERT_EQ(latest.objects.size(), 2u);
+  EXPECT_EQ(latest.objects[0].id, 1);
   EXPECT_EQ(latest.objects[0].last_seen.nanosec, 123456790u);
+  EXPECT_EQ(latest.objects[1].id, 3);
 }
 
 TEST_F(TrackingLifecycle, RejectsCommonInvalidLifecycleParameters)

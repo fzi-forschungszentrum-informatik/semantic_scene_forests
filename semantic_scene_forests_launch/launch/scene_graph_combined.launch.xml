@@ -38,6 +38,9 @@
   <arg name="enable_diagnostics" default="true"
        description="Run the diagnostic_aggregator to collect /diagnostics into /diagnostics_agg."/>
 
+  <arg name="openrouter_api_key" default="$(env OPENROUTER_API_KEY '')"
+       description="OpenRouter key for the tracker's identity arbiter (Decisions API)."/>
+
   <!-- Camera image consumed by the object tracker. -->
   <arg name="camera_image_topic" default="camera/image"
        description="Topic name for the camera image input."/>
@@ -61,11 +64,13 @@
                      name="object_tracker">
       <param from="$(var config_dir)/object_tracker.yaml"/>
       <param name="world_frame" value="$(var scene_graph_frame)"/>
+      <param name="arbiter.api_key" value="$(var openrouter_api_key)"/>
       <param name="use_sim_time" value="$(var use_sim_time)"/>
       <remap from="detections_2d" to="$(var detections_2d_topic)"/>
       <remap from="detections_3d" to="$(var detections_3d_topic)"/>
       <remap from="camera/image" to="$(var camera_image_topic)"/>
       <remap from="object_candidate_snapshots" to="$(var object_candidate_snapshots_topic)"/>
+      <extra_arg name="use_intra_process_comms" value="true"/>
     </composable_node>
 
     <!-- Object Manager Node -->
@@ -77,6 +82,7 @@
       <param name="use_sim_time" value="$(var use_sim_time)"/>
       <remap from="object_candidate_snapshots" to="$(var object_candidate_snapshots_topic)"/>
       <remap from="managed_objects" to="managed_objects"/>
+      <extra_arg name="use_intra_process_comms" value="true"/>
     </composable_node>
 
     <!-- Scene Graph Generation Component -->
@@ -90,6 +96,7 @@
       <remap from="/scene_graph" to="/scene_graph"/>
       <remap from="/update_scene_graph" to="/update_scene_graph"/>
       <remap from="/get_object_visuals" to="/get_object_visuals"/>
+      <extra_arg name="use_intra_process_comms" value="true"/>
     </composable_node>
 
     <!-- Scene Graph Query Component -->
@@ -98,6 +105,7 @@
                      name="semantic_scene_forests_query">
       <param from="$(var config_dir)/semantic_scene_forests_query.yaml"/>
       <param name="use_sim_time" value="$(var use_sim_time)"/>
+      <extra_arg name="use_intra_process_comms" value="true"/>
     </composable_node>
 
   </node_container>

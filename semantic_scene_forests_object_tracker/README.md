@@ -51,12 +51,13 @@ Detector IDs are local synchronization keys only. They are not persistent
 identity: equal IDs from different cameras do not force an association, and a
 detector may recycle an ID for a different object. The tracker allocates the
 global IDs sent to the manager and associates
-observations using class labels and calibrated geometry in `world_frame`. A
+observations class-agnostically using calibrated geometry in `world_frame`; detector labels
+flicker, so each track's label is a majority vote over its observations. A
 stationary object seen first by one camera and later by another can therefore
 keep the same global ID even when the local detector IDs differ. A moving object
 that changes world position beyond the geometric gate needs motion or appearance
 evidence that this tracker does not provide.
-Nearby same-class objects can still be confused by the geometric matcher.
+Nearby objects of comparable size can still be confused by the geometric matcher.
 
 All cameras must use a common clock, compatible class labels, and valid TF from
 each detection frame to `world_frame`. Configure the manager with the same
@@ -65,6 +66,14 @@ frame. Crops retain their source image headers and are bounded by the shared
 restart the tracker and manager together when resetting the tracker ID allocator.
 
 Snapshots use reliable, transient-local, depth-1 QoS, including an initial empty snapshot.
+They are published at `snapshot_rate_hz` (default 2 Hz) rather than per camera frame, because
+each snapshot carries every confirmed object with its crops; `0` publishes after every
+synchronized frame (used by the tests). The combined launch enables intra-process comms so
+the snapshot moves to the manager without serialization.
+
+TODO: if the container still drops input, the six raw camera image streams arriving over
+zenoh are the next suspect; co-locate the tracker with the detector nodes or use compressed
+images.
 One tracker owns this topic. Override it using `object_candidate_snapshots_topic` in the
 tracker, manager or combined launch; the old per-candidate topic/argument is retired.
 
@@ -78,25 +87,34 @@ tracker, manager or combined launch; the old per-candidate topic/argument is ret
   observation time. Detection geometry/header are in the world frame. Snapshot/candidate
   headers instead carry publication time. Prediction/publication never advance observation time.
 - Confirmed tracks remain **recent** through the inclusive `reacquisition_timeout` boundary.
-  Ordinary same-class association requires both the Mahalanobis gate and
-  `max_association_distance`. Association age uses the incoming observation time, so a delayed
-  camera can continue observing an object; prediction and snapshot aging use the latest
-  accepted time across cameras. Brief occlusion can preserve an ID.
-- Older confirmed tracks are **remembered**: they remain in snapshots, are not ordinarily
-  matched, and stop accumulating prediction uncertainty. A new detection starts a new ID;
-  an identical returning object and a physical replacement cannot reliably be distinguished.
-- After association and confirmation, a recent newly confirmed candidate may retire a
-  remembered object only within `replacement_distance` and `replacement_max_size_ratio`
-  on every world-AABB dimension. Classes may differ. Recent/currently observed objects,
-  tentative candidates, overlap alone, or ambiguous many-to-one/one-to-many pairs do not
-  authorize removal. Unresolved pairs may be reconsidered while candidates remain recent.
-  A successful replacement keeps the new ID and never inherits operator overrides.
-- Duplicate merging applies only to recent tracks and preserves the existing survivor-ID
-  rule, newest coherent observation state and bounded crop/history merge. The final snapshot
-  follows replacement and merging, so retired IDs cannot linger downstream.
-- The active-track cap counts tentative/recent tracks, not remembered tracks. Expired tentative
-  tracks are pruned before admission; remembered objects are never evicted just to make room.
-  Without positive replacement evidence, remembered storage can grow for the session lifetime.
+  Ordinary association requires the Mahalanobis gate, `max_association_distance` and a
+  similar size (largest dimensions within `association_max_size_ratio`); labels are not
+  compared. Association age uses the incoming observation time, so a delayed camera can
+  continue observing an object; prediction and snapshot aging use the latest accepted time
+  across cameras. Brief occlusion can preserve an ID.
+- Overlap is the fraction of the smaller box inside the other, with extents padded to
+  `overlap_min_extent`: depth often yields near-zero extents along the viewing ray, which makes
+  IoU and raw volumes meaningless. Same-frame detections of one object (YOLOE often reports
+  several labels) are reduced to the highest-scoring one before association.
+- Older confirmed tracks are **stale**: they remain in snapshots, are not matched directly and
+  stop accumulating prediction uncertainty. When a confirmed recent track appears at a stale
+  track's pose:
+  - similar size and overlap >= `merge_overlap_threshold`: the stale track is **reactivated**
+    (keeps its ID, takes the new state, crops and labels);
+  - otherwise, with the arbiter enabled, the Decisions API compares both tracks' crops and
+    either reactivates (same object) or **replaces** the stale track (something else);
+  - without an arbiter answer (disabled or failed), the stale track is replaced when the new
+    track covers at least `replacement_overlap_threshold` of it.
+- Recent tracks of similar size overlapping by at least `merge_overlap_threshold` are merged
+  (older ID survives, newest observation state, bounded crop/history merge). Partially
+  overlapping recent pairs (`arbiter.min_overlap` < overlap < `merge_overlap_threshold`) go to
+  the arbiter. With p(same) >= `arbiter.same_object_probability` they are merged and the
+  chosen label sticks until a new label is observed. The arbiter has one request in flight at
+  a time, at most one per `arbiter.min_interval_seconds` (1 s), and asks each pair once. The
+  key is passed by the combined launch from `OPENROUTER_API_KEY`. The final snapshot follows
+  reactivation, replacement and merging, so retired IDs cannot linger downstream.
+- The active-track cap counts tentative/recent tracks, not stale tracks. Expired tentative
+  tracks are pruned before admission; stale objects are never evicted just to make room.
 
 ## Initial tuning (not calibrated)
 
@@ -104,8 +122,10 @@ tracker, manager or combined launch; the old per-candidate topic/argument is ret
 |---|---|---|
 | `reacquisition_timeout` | 5.0 s | Inclusive ordinary identity-reuse age |
 | `max_association_distance` | 0.5 m | Hard physical association cap |
-| `replacement_distance` | 0.2 m | Maximum replacement center displacement |
-| `replacement_max_size_ratio` | 2.0 | Maximum per-axis larger/smaller AABB dimension ratio |
+| `association_max_size_ratio` | 2.0 | Maximum ratio of largest box dimensions for "similar" |
+| `merge_overlap_threshold` | 0.5 | Overlap of the smaller box that means one object |
+| `replacement_overlap_threshold` | 0.5 | Coverage of a stale box for replacement without arbiter |
+| `overlap_min_extent` | 0.1 m | Box extent padding for overlap computations |
 | `bbox_size_alpha` | 0.2 | Measurement weight in dimension filtering |
 
 Confirmation count and unconfirmed timeout remain unchanged. Tune distance/size thresholds

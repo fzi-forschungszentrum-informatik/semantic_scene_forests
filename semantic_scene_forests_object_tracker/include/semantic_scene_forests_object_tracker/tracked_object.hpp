@@ -30,6 +30,8 @@
 
 #include <cstdint>
 #include <deque>
+#include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -71,8 +73,24 @@ public:
   Eigen::Matrix3d getPositionCovariance() const;
   double mahalanobisDistance(const DetectionAdapter& detection);
 
-  static double bbox3dOverlap(const TrackedObject& a, const TrackedObject& b);
+  // Fraction of box b's volume inside box a. Extents are padded to min_extent first: depth
+  // often gives near-zero extents along the viewing ray, which makes raw volumes meaningless.
+  static double coveredFraction(const Eigen::Vector3d& center_a,
+                                const Eigen::Vector3d& size_a,
+                                const Eigen::Vector3d& center_b,
+                                const Eigen::Vector3d& size_b,
+                                double min_extent);
+  // Fraction of the smaller box inside the other: 1 when one box contains the other. Unlike IoU
+  // it stays high for partial-view boxes of one object.
+  static double overlapOfSmaller(const TrackedObject& a, const TrackedObject& b, double min_extent);
+  // True when the largest dimensions differ by at most max_ratio. Per-axis ratios are useless
+  // here: depth often yields a near-zero extent along the viewing direction.
+  static bool sizesCompatible(const Eigen::Vector3d& a, const Eigen::Vector3d& b, double max_ratio);
   void mergeFrom(const TrackedObject& other);
+
+  // Externally decided label; it wins over the majority vote until a label not
+  // seen at decision time is observed. Rejects labels outside the class history.
+  bool setDecidedLabel(const std::string& label);
 
   vision_msgs::msg::Detection3D toDetection3D() const;
 
@@ -101,6 +119,10 @@ private:
 
   std::unordered_map<std::string, int> m_class_history;
   std::unordered_map<std::string, int> m_class_id_map;
+  std::optional<std::string> m_decided_label;
+  std::set<std::string> m_decided_over;
+
+  void refreshClassName();
 
   std::deque<sensor_msgs::msg::Image> m_crops;
   size_t m_max_crops;

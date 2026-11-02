@@ -77,6 +77,7 @@ rclcpp::NodeOptions twoCameraOptions()
 {
   rclcpp::NodeOptions options;
   options.append_parameter_override("world_frame", "map");
+  options.append_parameter_override("snapshot_rate_hz", 0.0);
   options.append_parameter_override("camera_names", std::vector<std::string>{"front", "rear"});
   options.append_parameter_override("cameras.front.detections_2d_topic", "/front/detections_2d");
   options.append_parameter_override("cameras.front.detections_3d_topic", "/front/detections_3d");
@@ -90,13 +91,15 @@ rclcpp::NodeOptions twoCameraOptions()
 rclcpp::NodeOptions commonTrackerOptions(int confirmation_threshold      = 3,
                                          double gate_threshold_strict    = 3.0,
                                          double gate_threshold_confirmed = 10.0,
-                                         double merge_iou_threshold      = 0.6)
+                                         double merge_overlap_threshold      = 0.6)
 {
   auto options = twoCameraOptions();
   options.append_parameter_override("confirmation_threshold", confirmation_threshold);
   options.append_parameter_override("gate_threshold_strict", gate_threshold_strict);
   options.append_parameter_override("gate_threshold_confirmed", gate_threshold_confirmed);
-  options.append_parameter_override("merge_iou_threshold", merge_iou_threshold);
+  options.append_parameter_override("merge_overlap_threshold", merge_overlap_threshold);
+  // These scenarios grow boxes abruptly; size gating is covered in test_tracking_lifecycle.
+  options.append_parameter_override("association_max_size_ratio", 100.0);
   options.append_parameter_override("crop_padding", 0);
   options.append_parameter_override("max_crops_per_object", 20);
   return options;
@@ -113,6 +116,7 @@ rclcpp::NodeOptions defaultTrackerOptions()
                      "-r",
                      "camera/image:=/remapped/image"});
   options.append_parameter_override("world_frame", "map");
+  options.append_parameter_override("snapshot_rate_hz", 0.0);
   options.append_parameter_override("confirmation_threshold", 3);
   options.append_parameter_override("crop_padding", 0);
   options.append_parameter_override("max_crops_per_object", 20);
@@ -230,14 +234,14 @@ public:
                           int confirmation_threshold      = 3,
                           double gate_threshold_strict    = 3.0,
                           double gate_threshold_confirmed = 10.0,
-                          double merge_iou_threshold      = 0.6)
+                          double merge_overlap_threshold      = 0.6)
   {
     m_source_node = std::make_shared<rclcpp::Node>("multi_camera_test_source");
     m_tracker     = std::make_shared<ObjectTrackerComponent>(
       two_cameras ? commonTrackerOptions(confirmation_threshold,
                                          gate_threshold_strict,
                                          gate_threshold_confirmed,
-                                         merge_iou_threshold)
+                                         merge_overlap_threshold)
                   : defaultTrackerOptions());
 
     const auto SENSOR_QOS = rclcpp::SensorDataQoS();

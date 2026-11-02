@@ -91,7 +91,7 @@ object_tracker:
   reacquisition_timeout:
     type: double
     default_value: 5.0
-    description: "Maximum observation age in seconds for ordinary identity reuse."
+    description: "Observation age in seconds after which a confirmed track is stale (reactivated or replaced on revisit)."
     validation:
       gt<>: [0.0]
   max_association_distance:
@@ -100,18 +100,12 @@ object_tracker:
     description: "Hard center-distance association limit in meters, in addition to Mahalanobis gating."
     validation:
       gt<>: [0.0]
-  replacement_distance:
+  replacement_overlap_threshold:
     type: double
-    default_value: 0.2
-    description: "Maximum center distance in meters for unambiguous remembered-object replacement."
+    default_value: 0.5
+    description: "Fraction of a stale track's box a confirmed recent track must cover to replace it when the arbiter is disabled or failed."
     validation:
-      gt<>: [0.0]
-  replacement_max_size_ratio:
-    type: double
-    default_value: 2.0
-    description: "Maximum larger/smaller ratio on every world-AABB dimension for replacement."
-    validation:
-      gt_eq<>: [1.0]
+      bounds<>: [0.0, 1.0]
   bbox_size_alpha:
     type: double
     default_value: 0.2
@@ -143,12 +137,18 @@ object_tracker:
     description: "Seconds after last observation before an unconfirmed track is deleted."
     validation:
       gt<>: [0.0]
-  merge_iou_threshold:
+  merge_overlap_threshold:
     type: double
-    default_value: 0.6
-    description: "Minimum 3D bbox IoU to merge overlapping confirmed tracks of the same class."
+    default_value: 0.5
+    description: "Minimum intersection over the smaller box volume for two similar-sized tracks (or same-frame detections) to be one object."
     validation:
       bounds<>: [0.0, 1.0]
+  overlap_min_extent:
+    type: double
+    default_value: 0.1
+    description: "Box extents are padded to this size (m) before computing overlaps; depth yields near-zero extents along the viewing ray."
+    validation:
+      gt<>: [0.0]
   class_whitelist:
     type: string_array
     default_value: []
@@ -168,3 +168,67 @@ object_tracker:
     description: "Maximum number of cropped image patches to store per tracked object."
     validation:
       gt<>: [0]
+  snapshot_rate_hz:
+    type: double
+    default_value: 2.0
+    description: "Snapshot publish rate. 0 publishes after every synchronized camera frame."
+    read_only: true
+    validation:
+      gt_eq<>: [0.0]
+  association_max_size_ratio:
+    type: double
+    default_value: 2.0
+    description: "Maximum ratio of the largest world-AABB dimensions for two boxes to count as a similar object (association, merge, reactivation)."
+    validation:
+      gt_eq<>: [1.0]
+  arbiter:
+    enabled:
+      type: bool
+      default_value: false
+      description: "Ask the Decisions API whether partially overlapping tracks are the same object (last resort)."
+      read_only: true
+    server_url:
+      type: string
+      default_value: "https://openrouter.ai/api/alpha"
+      description: "OpenRouter Decisions API base URL."
+      read_only: true
+    api_key:
+      type: string
+      default_value: ""
+      description: "API key for the Decisions API."
+      read_only: true
+    model:
+      type: string
+      default_value: "openai/gpt-6-luna-decisions"
+      description: "Decisions model."
+      read_only: true
+    extra_body:
+      type: string
+      default_value: ""
+      description: "JSON object merged into every Decisions request body, e.g. OpenRouter provider routing. Empty sends nothing extra."
+      read_only: true
+    request_timeout_seconds:
+      type: int
+      default_value: 60
+      description: "Maximum time allowed for one Decisions HTTP request."
+      read_only: true
+      validation:
+        gt<>: [0]
+    min_interval_seconds:
+      type: double
+      default_value: 1.0
+      description: "Minimum wall-clock time between two Decisions requests."
+      validation:
+        gt_eq<>: [0.0]
+    min_overlap:
+      type: double
+      default_value: 0.1
+      description: "Pairs with overlap in (min_overlap, merge_overlap_threshold) are ambiguous and may be arbitrated."
+      validation:
+        bounds<>: [0.0, 1.0]
+    same_object_probability:
+      type: double
+      default_value: 0.8
+      description: "Minimum same-object probability to merge an arbitrated pair."
+      validation:
+        bounds<>: [0.0, 1.0]
