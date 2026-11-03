@@ -205,10 +205,10 @@ object_tracker:
     provider:
       type: string
       default_value: "openrouter"
-      description: "Decisions provider: openai (https://api.openai.com/v1, e.g. gpt-6-luna), openrouter (https://openrouter.ai/api/alpha, e.g. openai/gpt-6-luna-decisions) or ollama (http://localhost:11434/v1, e.g. clef-flash)."
+      description: "Decisions provider: openai (https://api.openai.com/v1, e.g. gpt-6-luna), openrouter (https://openrouter.ai/api/alpha, e.g. openai/gpt-6-luna-decisions) ollama (http://localhost:11434/v1, e.g. clef-flash) or vllm (http://localhost:8000/v1, e.g. vllm-sr/d3-nano)."
       read_only: true
       validation:
-        one_of<>: [["openai", "openrouter", "ollama"]]
+        one_of<>: [["openai", "openrouter", "ollama", "vllm"]]
     enabled:
       type: bool
       default_value: false
@@ -222,7 +222,7 @@ object_tracker:
     api_key:
       type: string
       default_value: ""
-      description: "API key; empty falls back to OPENAI_API_KEY / OPENROUTER_API_KEY. Required for openai and openrouter, not for ollama."
+      description: "API key; empty falls back to OPENAI_API_KEY / OPENROUTER_API_KEY. Required for openai and openrouter, not for ollama or vllm."
       read_only: true
     model:
       type: string

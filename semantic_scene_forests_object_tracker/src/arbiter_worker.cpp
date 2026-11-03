@@ -54,6 +54,10 @@ std::optional<oai::DecisionFormat> parseDecisionProvider(std::string_view provid
   {
     return oai::DecisionFormat::OLLAMA;
   }
+  if (provider == "vllm")
+  {
+    return oai::DecisionFormat::VLLM;
+  }
   return std::nullopt;
 }
 
@@ -62,18 +66,20 @@ DecideFn makeDecisionClient(const object_tracker::Params::Arbiter& params)
   const auto FORMAT = parseDecisionProvider(params.provider);
   if (!FORMAT)
   {
-    throw std::invalid_argument("arbiter.provider must be openai, openrouter or ollama: " +
+    throw std::invalid_argument("arbiter.provider must be openai, openrouter, ollama or vllm: " +
                                 params.provider);
   }
   // Keys stay out of committed configs: an empty key falls back to the provider's env variable.
+  // Local servers (Ollama, vLLM) need no key.
+  const bool LOCAL = FORMAT == oai::DecisionFormat::OLLAMA || FORMAT == oai::DecisionFormat::VLLM;
   std::string api_key = params.api_key;
-  if (api_key.empty() && FORMAT != oai::DecisionFormat::OLLAMA)
+  if (api_key.empty() && !LOCAL)
   {
     const char* env =
       std::getenv(FORMAT == oai::DecisionFormat::OPENAI ? "OPENAI_API_KEY" : "OPENROUTER_API_KEY");
     api_key = env ? env : "";
   }
-  if (api_key.empty() && FORMAT != oai::DecisionFormat::OLLAMA)
+  if (api_key.empty() && !LOCAL)
   {
     throw std::invalid_argument("arbiter.api_key (or OPENAI_API_KEY / OPENROUTER_API_KEY) is "
                                 "required for provider " +
@@ -182,7 +188,7 @@ ArbiterResult ArbiterWorker::decide(const DecideFn& decide,
                        .a_id              = request.a_id,
                        .b_id              = request.b_id};
 
-  // Crops go into the shared input as base64 images (required by Ollama).
+  // Crops go into the shared input as base64 images (required by Ollama and vLLM).
   auto builder      = oai::MessageBuilder::user();
   const auto IMAGES = [&builder](const std::string& title, const auto& crops) {
     builder.text(title);

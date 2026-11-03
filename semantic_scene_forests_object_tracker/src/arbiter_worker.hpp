@@ -83,7 +83,7 @@ struct ArbiterResult
 using DecideFn =
   std::function<std::expected<oai::DecisionResponse, oai::ApiError>(const oai::DecisionRequest&)>;
 
-// "openai" | "openrouter" | "ollama" -> wire format; nullopt for anything else.
+// "openai" | "openrouter" | "ollama" | "vllm" -> wire format; nullopt for anything else.
 std::optional<oai::DecisionFormat> parseDecisionProvider(std::string_view provider);
 
 // Builds the Decisions API client from the arbiter.* parameters. Throws std::invalid_argument

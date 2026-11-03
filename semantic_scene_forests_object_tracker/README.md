@@ -118,9 +118,10 @@ tracker, manager or combined launch; the old per-candidate topic/argument is ret
   are the same object and which label fits. p(same) >= `arbiter.same_object_probability`
   merges the pair and records both labels as accepted, so later tracklets with either label link
   without a new request; otherwise the pair is recorded as distinct and never merged (a stale
-  one is replaced). Each pair is asked once. `arbiter.provider` selects `openai`, `openrouter`
-  or `ollama`; `server_url` and `model` must match it. An empty `api_key` falls back to
-  `OPENAI_API_KEY` / `OPENROUTER_API_KEY` (Ollama needs none).
+  one is replaced). Each pair is asked once. `arbiter.provider` selects `openai`, `openrouter`,
+  `ollama` or `vllm` (`vllm serve vllm-sr/d3-nano`, `http://localhost:8000/v1`); `server_url`
+  and `model` must match it. An empty `api_key` falls back to `OPENAI_API_KEY` /
+  `OPENROUTER_API_KEY` (Ollama and vLLM need none).
 
 ## Initial tuning (not calibrated)
 
