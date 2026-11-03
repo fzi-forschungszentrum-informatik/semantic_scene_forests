@@ -129,7 +129,8 @@ CameraTracker::process(const vision_msgs::msg::Detection2DArray& det2d_msg,
                        const vision_msgs::msg::Detection3DArray& det3d_msg,
                        const sensor_msgs::msg::Image& image_msg,
                        const TransformLookup& world_transform,
-                       const object_tracker::Params& params)
+                       const object_tracker::Params& params,
+                       const std::set<std::string>& rejected_labels)
 {
   const rclcpp::Time CURRENT_TIME(det3d_msg.header.stamp);
   // shortcut: source clocks must be monotonic; restart with the manager after replay time resets.
@@ -163,7 +164,7 @@ CameraTracker::process(const vision_msgs::msg::Detection2DArray& det2d_msg,
     if (hypothesis.score < params.confidence_threshold ||
         (!whitelist.empty() &&
          std::ranges::find(whitelist, hypothesis.class_id) == whitelist.end()) ||
-        !has3dBox(*pair.det3d))
+        rejected_labels.contains(hypothesis.class_id) || !has3dBox(*pair.det3d))
     {
       continue;
     }

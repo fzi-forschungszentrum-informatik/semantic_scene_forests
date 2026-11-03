@@ -110,7 +110,7 @@ tracker, manager or combined launch; the old per-candidate topic/argument is ret
   arbiter answers two yes/no questions in one call: "do the crops show a <label>?" and "is
   <label> a physical object rather than a room or area category (kitchen, office, hallway)?".
   If both reach `arbiter.label_probability`, the label is confirmed (it sticks until a new label
-  appears); otherwise the track is removed as a false positive. A failed request publishes the track with its voted label. Reactivated stale tracks
+  appears); otherwise the track is removed as a false positive. If p(physical object) is also below the threshold, the label is rejected for the session: all its tracks are removed and its detections are dropped like non-whitelisted classes. A failed request publishes the track with its voted label. Reactivated stale tracks
   are not checked again.
 - **Arbiter** (`ArbiterWorker`, `arbiter.enabled`): a background thread works through a request
   queue (label checks and stale pairs first) back to back, without a rate limit; the global cycle only enqueues

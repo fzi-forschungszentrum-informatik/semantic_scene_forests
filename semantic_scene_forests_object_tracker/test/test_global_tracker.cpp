@@ -194,6 +194,19 @@ TEST_F(GlobalTrackerTest, NewTrackIsHeldUntilTheArbiterConfirmsItsLabel)
   EXPECT_EQ(global.stats(params).label_rejections, 1u);
 }
 
+TEST_F(GlobalTrackerTest, LabelThatIsNoObjectIsIgnoredForTheSession)
+{
+  cycle(
+    {tracklet("front", 1, 10, 0.0, "kitchen"), tracklet("rear", 1, 10, 5.0, "kitchen")}, {}, true);
+  auto no_object               = labelCheck(1, 0.1);
+  no_object.object_probability = 0.1;
+  const auto REQUESTS =
+    cycle({tracklet("left", 1, 11, 9.0, "kitchen")}, {no_object}, true); // Track 2 goes too.
+  EXPECT_TRUE(REQUESTS.empty());
+  EXPECT_TRUE(global.tracks().empty());
+  EXPECT_TRUE(global.rejectedLabels().contains("kitchen"));
+}
+
 TEST_F(GlobalTrackerTest, FailedLabelCheckPublishesAndNoCheckWithoutArbiter)
 {
   cycle({tracklet("front", 1, 10, 0.0)}, {}, true);

@@ -250,6 +250,21 @@ void GlobalTracker::applyResult(const ArbiterResult& result, const object_tracke
       retire(result.a_id);
       ++m_label_rejections;
     }
+    if (!CORRECT && result.object_probability &&
+        *result.object_probability < params.arbiter.label_probability &&
+        m_rejected_labels.insert(track->class_name).second)
+    {
+      RCLCPP_WARN(m_logger,
+                  "Label '%s' is not a physical object; ignoring it from now on",
+                  track->class_name.c_str());
+      for (const auto& other : m_tracks)
+      {
+        if (other->class_name == track->class_name && !m_removed.contains(other->track_id))
+        {
+          retire(other->track_id);
+        }
+      }
+    }
     return;
   }
   const auto PAIR = pairOf(result.a_id, result.b_id);
@@ -413,6 +428,10 @@ std::vector<ArbiterRequest> GlobalTracker::cycle(const std::vector<Tracklet>& tr
   std::vector<ArbiterRequest> label_checks;
   for (const auto& tracklet : tracklets)
   {
+    if (m_rejected_labels.contains(tracklet.class_name))
+    {
+      continue; // Its link (if any) is dropped below.
+    }
     const LinkKey KEY{tracklet.camera, tracklet.local_id};
     alive.insert(KEY);
     if (const auto IT = m_links.find(KEY); IT != m_links.end())

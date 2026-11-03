@@ -209,7 +209,9 @@ void ObjectTrackerComponent::onCameraFrame(CameraInput& camera,
       return std::nullopt;
     }
   };
-  const auto RESULT = camera.tracker->process(det2d_msg, det3d_msg, img_msg, LOOKUP, PARAMS);
+  const auto REJECTED = m_rejected_labels.load();
+  const auto RESULT =
+    camera.tracker->process(det2d_msg, det3d_msg, img_msg, LOOKUP, PARAMS, *REJECTED);
   auto tracklets    = camera.tracker->tracklets();
 
   const std::scoped_lock LOCK{camera.mutex};
@@ -243,6 +245,11 @@ void ObjectTrackerComponent::onGlobalCycle()
   }
   const auto RESULTS = m_arbiter ? m_arbiter->drainResults() : std::vector<ArbiterResult>{};
   auto requests      = m_global->cycle(tracklets, RESULTS, PARAMS, m_arbiter != nullptr);
+  if (m_global->rejectedLabels().size() != m_rejected_labels.load()->size()) // only grows
+  {
+    m_rejected_labels.store(
+      std::make_shared<const std::set<std::string>>(m_global->rejectedLabels()));
+  }
   for (auto& request : requests)
   {
     m_arbiter->enqueue(std::move(request));

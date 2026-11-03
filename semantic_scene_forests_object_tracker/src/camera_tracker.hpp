@@ -32,6 +32,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -78,12 +79,14 @@ public:
 
   CameraTracker(std::string camera, int rotation_cw, rclcpp::Logger logger);
 
-  // One exactly synchronized frame. Rejected frames leave the tracker unchanged.
+  // One exactly synchronized frame. Rejected frames leave the tracker unchanged. Detections
+  // with a rejected label are dropped like those missing from the class whitelist.
   FrameResult process(const vision_msgs::msg::Detection2DArray& det2d_msg,
                       const vision_msgs::msg::Detection3DArray& det3d_msg,
                       const sensor_msgs::msg::Image& image_msg,
                       const TransformLookup& world_transform,
-                      const object_tracker::Params& params);
+                      const object_tracker::Params& params,
+                      const std::set<std::string>& rejected_labels);
 
   std::vector<Tracklet> tracklets() const;
   size_t trackCount() const { return m_tracks.size(); }

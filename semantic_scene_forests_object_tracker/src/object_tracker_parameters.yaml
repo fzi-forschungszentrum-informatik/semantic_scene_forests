@@ -250,7 +250,7 @@ object_tracker:
     label_probability:
       type: double
       default_value: 0.5
-      description: "Minimum probability that a new track's label is right; below it the track is removed as a false positive."
+      description: "Minimum probability that a new track's label is right; below it the track is removed as a false positive. If p(physical object) is also below it, the label is ignored for the rest of the session like a non-whitelisted class."
       validation:
         bounds<>: [0.0, 1.0]
     same_object_probability:

@@ -28,8 +28,10 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -124,6 +126,9 @@ private:
   // Global state: only touched from m_global_group (and the constructor).
   std::unique_ptr<GlobalTracker> m_global;
   std::unique_ptr<ArbiterWorker> m_arbiter;
+  // Labels rejected by the arbiter, published by the global cycle to the camera callbacks.
+  std::atomic<std::shared_ptr<const std::set<std::string>>> m_rejected_labels{
+    std::make_shared<const std::set<std::string>>()};
 
   // Snapshot of global stats for diagnostics.
   std::mutex m_stats_mutex;

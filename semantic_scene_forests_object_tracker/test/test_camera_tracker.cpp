@@ -96,7 +96,7 @@ protected:
       transform.transform.rotation.w = 1.0;
       return transform;
     };
-    return tracker.process(two, three, image, IDENTITY, params);
+    return tracker.process(two, three, image, IDENTITY, params, {});
   }
 
   object_tracker::Params params;

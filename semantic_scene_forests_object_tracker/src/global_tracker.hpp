@@ -59,7 +59,9 @@ namespace semantic_scene_forests_object_tracker {
 // Arbiter answers are recorded for the session: "same" merges and accepts both labels,
 // "different" keeps the pair apart for good. With the arbiter, a new global track is held back
 // (not published) until a label check confirms its label; a rejected label removes it as a
-// false positive, a failed check publishes it with the voted label.
+// false positive, a failed check publishes it with the voted label. A label the arbiter calls
+// no physical object (a room or scene) is rejected for the session: its tracks are removed and
+// later tracklets with it are ignored, as if it were missing from the class whitelist.
 class GlobalTracker
 {
 public:
@@ -93,6 +95,8 @@ public:
   // True while a new track waits for its label check; held tracks are not published.
   bool isHeld(const TrackedObject& track) const { return m_held.contains(track.track_id); }
   Stats stats(const object_tracker::Params& params) const;
+  // Labels the arbiter judged not to be physical objects; only grows.
+  const std::set<std::string>& rejectedLabels() const { return m_rejected_labels; }
 
 private:
   using LinkKey = std::pair<std::string, uint64_t>; // {camera, local id}
@@ -124,6 +128,7 @@ private:
   std::set<TrackPair> m_failed;         // request failed: fall back to the overlap rule
   std::set<uint64_t> m_removed;         // merged/retired this cycle, erased at safe points
   std::set<uint64_t> m_held;            // new tracks waiting for their label check
+  std::set<std::string> m_rejected_labels; // not physical objects, ignored for the session
   std::optional<rclcpp::Time> m_latest; // latest observation time across all cameras
   uint64_t m_next_id{1};
   size_t m_decisions{0};
