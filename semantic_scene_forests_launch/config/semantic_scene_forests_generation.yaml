@@ -30,6 +30,9 @@ semantic_scene_forests_generation:
   ros__parameters:
     server_url: "http://ids-gpu-01.fzi.de:30001/v1"
     api_key: ""
+    # JSON object merged into every request; keep the single quotes (ROS parses bare {} as YAML).
+    # e.g. '{"provider": {"order": ["anthropic"], "allow_fallbacks": false}}'
+    extra_body: ""
     frame_id: "map"
     prompt_dir: ""
     phase1_model: "Qwen/Qwen3-VL-8B-Instruct"
