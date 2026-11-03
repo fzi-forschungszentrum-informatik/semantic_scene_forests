@@ -38,9 +38,6 @@
   <arg name="enable_diagnostics" default="true"
        description="Run the diagnostic_aggregator to collect /diagnostics into /diagnostics_agg."/>
 
-  <arg name="openrouter_api_key" default="$(env OPENROUTER_API_KEY '')"
-       description="OpenRouter key for the tracker's identity arbiter (Decisions API)."/>
-
   <!-- Camera image consumed by the object tracker. -->
   <arg name="camera_image_topic" default="camera/image"
        description="Topic name for the camera image input."/>
@@ -64,7 +61,6 @@
                      name="object_tracker">
       <param from="$(var config_dir)/object_tracker.yaml"/>
       <param name="world_frame" value="$(var scene_graph_frame)"/>
-      <param name="arbiter.api_key" value="$(var openrouter_api_key)"/>
       <param name="use_sim_time" value="$(var use_sim_time)"/>
       <remap from="detections_2d" to="$(var detections_2d_topic)"/>
       <remap from="detections_3d" to="$(var detections_3d_topic)"/>

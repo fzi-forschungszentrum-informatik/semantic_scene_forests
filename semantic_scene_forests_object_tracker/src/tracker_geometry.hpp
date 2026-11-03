@@ -28,18 +28,10 @@
 
 #pragma once
 
-#include <cstdint>
-#include <functional>
-#include <memory>
 #include <optional>
-#include <set>
-#include <utility>
-#include <vector>
 
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <vision_msgs/msg/bounding_box3_d.hpp>
-
-#include "semantic_scene_forests_object_tracker/tracked_object.hpp"
 
 namespace semantic_scene_forests_object_tracker {
 namespace detail {
@@ -53,20 +45,6 @@ namespace detail {
 std::optional<vision_msgs::msg::BoundingBox3D>
 transformBoundingBoxToFrame(const vision_msgs::msg::BoundingBox3D& bbox,
                             const geometry_msgs::msg::TransformStamped& transform);
-
-using TrackPair = std::pair<uint64_t, uint64_t>; // {lower id, higher id}
-
-// First pair of eligible tracks that geometry cannot settle: similar sizes and an overlap of
-// the smaller box in (min_overlap, max_overlap) (clear overlaps merge, the rest stay separate).
-// Pairs in `decided` were already arbitrated and are never returned again.
-std::optional<std::pair<size_t, size_t>>
-findAmbiguousPair(const std::vector<std::unique_ptr<TrackedObject>>& tracks,
-                  const std::function<bool(const TrackedObject&)>& eligible,
-                  double min_overlap,
-                  double max_overlap,
-                  double max_size_ratio,
-                  double min_extent,
-                  const std::set<TrackPair>& decided);
 
 } // namespace detail
 } // namespace semantic_scene_forests_object_tracker

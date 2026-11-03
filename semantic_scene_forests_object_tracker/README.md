@@ -23,21 +23,22 @@ Tracking package that converts detections into persistent object candidates for 
 | Subscribe | `camera/image` | `sensor_msgs/msg/Image` |
 | Publish | `object_candidate_snapshots` | `semantic_scene_forests_object_msgs/msg/ObjectCandidateArray` |
 
-The tracker has one independently synchronized input triple per configured camera:
-`detections_2d`, `detections_3d`, and `camera/image`. Each 2D and 3D array must
-contain matching nonempty detector IDs, and an image is required for the
-corresponding observation. IDs must be unique within each camera's batch;
-they may change or repeat across frames and cameras. A silent camera does not
-hold up other cameras; a missing transform skips that camera's batch after the
+The tracker has one input triple per configured camera: `detections_2d`, `detections_3d` and
+`camera/image`. The three messages of a frame must carry the **identical** stamp (exact-time
+sync, queue `sync_queue_size`); mismatched frames are dropped. Each 2D and 3D array must contain
+matching nonempty detector IDs; IDs only pair the 2D and 3D detections of one frame. A silent
+camera does not hold up other cameras; a missing transform skips that camera's frame after the
 TF lookup timeout.
 
 ### Configuration
 
 `camera_names` is a nonempty, unique startup-only list. Each name selects a
-`cameras.<name>` entry with `detections_2d_topic`, `detections_3d_topic`, and
-`image_topic`. The shipped single-camera configuration uses the `default`
-camera and the logical topics `detections_2d`, `detections_3d`, and
-`camera/image`, so the existing launch remaps continue to work.
+`cameras.<name>` entry with `detections_2d_topic`, `detections_3d_topic`, `image_topic` and
+`image_rotation` (0/90/180/270 degrees clockwise). The rotation is applied to the image and the
+2D boxes before cropping, so crops come out upright; 3D boxes are TF geometry and unaffected.
+The shipped single-camera configuration uses the `default` camera and the logical topics
+`detections_2d`, `detections_3d`, and `camera/image`, so the existing launch remaps continue to
+work.
 
 The two-camera example is
 `config/object_tracker_multi_camera.yaml`. It uses explicit absolute topics
@@ -47,17 +48,11 @@ hot-reloaded.
 
 ### Object identity and coordinate requirements
 
-Detector IDs are local synchronization keys only. They are not persistent
-identity: equal IDs from different cameras do not force an association, and a
-detector may recycle an ID for a different object. The tracker allocates the
-global IDs sent to the manager and associates
-observations class-agnostically using calibrated geometry in `world_frame`; detector labels
-flicker, so each track's label is a majority vote over its observations. A
-stationary object seen first by one camera and later by another can therefore
-keep the same global ID even when the local detector IDs differ. A moving object
-that changes world position beyond the geometric gate needs motion or appearance
-evidence that this tracker does not provide.
-Nearby objects of comparable size can still be confused by the geometric matcher.
+Detector IDs are local synchronization keys only. The tracker allocates the global IDs sent to
+the manager. Labels never gate a geometric match inside a camera; each track's label is a vote
+over its observations. Across cameras and revisits, labels and the arbiter decide (see below).
+A moving object that changes world position beyond the geometric gate needs motion or
+appearance evidence that this tracker does not provide.
 
 All cameras must use a common clock, compatible class labels, and valid TF from
 each detection frame to `world_frame`. Configure the manager with the same
@@ -66,9 +61,8 @@ frame. Crops retain their source image headers and are bounded by the shared
 restart the tracker and manager together when resetting the tracker ID allocator.
 
 Snapshots use reliable, transient-local, depth-1 QoS, including an initial empty snapshot.
-They are published at `snapshot_rate_hz` (default 2 Hz) rather than per camera frame, because
-each snapshot carries every confirmed object with its crops; `0` publishes after every
-synchronized frame (used by the tests). The combined launch enables intra-process comms so
+They are published by the global cycle at `snapshot_rate_hz` (default 5 Hz, must be > 0) and
+contain every global track with its crops. The combined launch enables intra-process comms so
 the snapshot moves to the manager without serialization.
 
 TODO: if the container still drops input, the six raw camera image streams arriving over
@@ -77,50 +71,64 @@ images.
 One tracker owns this topic. Override it using `object_candidate_snapshots_topic` in the
 tracker, manager or combined launch; the old per-candidate topic/argument is retired.
 
-## Observation and identity semantics
+## Architecture and identity semantics
 
-- A batch is accepted only after synchronizing 2D/3D detections and the image. Identity
-  aging uses the **3D observation stamp**, not wall time. Duplicate/out-of-order batches from the same camera
-  are dropped without state changes. Restart tracker and manager together before rewinding
-  or looping a recording; do not mix observation time domains.
-- Candidate `last_seen` and `detection.header.stamp` retain the exact latest accepted 3D
-  observation time. Detection geometry/header are in the world frame. Snapshot/candidate
-  headers instead carry publication time. Prediction/publication never advance observation time.
-- Confirmed tracks remain **recent** through the inclusive `reacquisition_timeout` boundary.
-  Ordinary association requires the Mahalanobis gate, `max_association_distance` and a
-  similar size (largest dimensions within `association_max_size_ratio`); labels are not
-  compared. Association age uses the incoming observation time, so a delayed camera can
-  continue observing an object; prediction and snapshot aging use the latest accepted time
-  across cameras. Brief occlusion can preserve an ID.
-- Overlap is the fraction of the smaller box inside the other, with extents padded to
-  `overlap_min_extent`: depth often yields near-zero extents along the viewing ray, which makes
-  IoU and raw volumes meaningless. Same-frame detections of one object (YOLOE often reports
-  several labels) are reduced to the highest-scoring one before association.
-- Older confirmed tracks are **stale**: they remain in snapshots, are not matched directly and
-  stop accumulating prediction uncertainty. When a confirmed recent track appears at a stale
-  track's pose:
-  - similar size and overlap >= `merge_overlap_threshold`: the stale track is **reactivated**
-    (keeps its ID, takes the new state, crops and labels);
-  - otherwise, with the arbiter enabled, the Decisions API compares both tracks' crops and
-    either reactivates (same object) or **replaces** the stale track (something else);
-  - without an arbiter answer (disabled or failed), the stale track is replaced when the new
-    track covers at least `replacement_overlap_threshold` of it.
-- Recent tracks of similar size overlapping by at least `merge_overlap_threshold` are merged
-  (older ID survives, newest observation state, bounded crop/history merge). Partially
-  overlapping recent pairs (`arbiter.min_overlap` < overlap < `merge_overlap_threshold`) go to
-  the arbiter. With p(same) >= `arbiter.same_object_probability` they are merged and the
-  chosen label sticks until a new label is observed. The arbiter has one request in flight at
-  a time, at most one per `arbiter.min_interval_seconds` (1 s), and asks each pair once. The
-  key is passed by the combined launch from `OPENROUTER_API_KEY`. The final snapshot follows
-  reactivation, replacement and merging, so retired IDs cannot linger downstream.
-- The active-track cap counts tentative/recent tracks, not stale tracks. Expired tentative
-  tracks are pruned before admission; stale objects are never evicted just to make room.
+```
+ camera A (own callback group)        camera B ...           global cycle (own group, timer)
+ ExactTime(2D, 3D, image)                                     collect all mailboxes
+ CameraTracker: rotate, filter, TF,                           GlobalTracker: link / merge /
+ dedup, predict, associate, crops  ─► mailbox (tracklets) ─►  reactivate / replace / arbiter
+                                                              publish snapshot
+                                     ArbiterWorker thread ◄─► request / result queues
+```
+
+- **Per camera** (`CameraTracker`): a frame is accepted only if its stamp is newer than the
+  camera's last accepted frame (restart tracker and manager together before rewinding a
+  recording). Detections below `confidence_threshold`, outside `class_whitelist` or without a 3D
+  box are dropped; boxes are transformed to `world_frame`; same-frame duplicates (similar size,
+  overlap >= `merge_overlap_threshold`) keep the highest score. Association is class-agnostic:
+  confirmed tracks first (gate `gate_threshold_confirmed`), then tentative ones
+  (`gate_threshold_strict`), both within `max_association_distance` and similar size
+  (largest dimensions within `association_max_size_ratio`). Tracks confirm after
+  `confirmation_threshold` observations; tentative tracks end after `unconfirmed_track_timeout`,
+  confirmed ones `local_track_timeout` after their last observation.
+- **Tracklets**: each accepted frame posts the camera's confirmed tracks to its mailbox.
+- **Global** (`GlobalTracker`, every cycle):
+  - a tracklet stays linked to its global track while it lives; several tracklets (cameras) may
+    link to one global track, which takes one Kalman update per new tracklet observation and
+    collects the crops;
+  - a new tracklet links to a global track (stale or not) with similar size, overlap >=
+    `merge_overlap_threshold` and an accepted label; otherwise it starts a new global track;
+  - two global tracks of similar size overlapping by more than `arbiter.min_overlap` merge
+    (older ID survives) when a label is accepted by the other and the overlap is clear;
+    otherwise (label conflict or partial overlap) the pair goes to the arbiter. Without an
+    arbiter, or after a failed request, clear overlaps merge and partial ones stay apart;
+  - a global track is **stale** after `stale_timeout` (60 s) unseen. A similar track at its pose
+    reactivates it (via the rules above); a differently sized track covering at least
+    `replacement_overlap_threshold` of it **replaces** it.
+- **Label check** (arbiter only): a new global track is held back from the snapshot until the
+  arbiter answers two yes/no questions in one call: "do the crops show a <label>?" and "is
+  <label> a physical object rather than a room or area category (kitchen, office, hallway)?".
+  If both reach `arbiter.label_probability`, the label is confirmed (it sticks until a new label
+  appears); otherwise the track is removed as a false positive. A failed request publishes the track with its voted label. Reactivated stale tracks
+  are not checked again.
+- **Arbiter** (`ArbiterWorker`, `arbiter.enabled`): a background thread works through a request
+  queue (label checks and stale pairs first) back to back, without a rate limit; the global cycle only enqueues
+  and drains. It sends both tracks' crops (base64) plus labels and sizes and asks whether they
+  are the same object and which label fits. p(same) >= `arbiter.same_object_probability`
+  merges the pair and records both labels as accepted, so later tracklets with either label link
+  without a new request; otherwise the pair is recorded as distinct and never merged (a stale
+  one is replaced). Each pair is asked once. `arbiter.provider` selects `openai`, `openrouter`
+  or `ollama`; `server_url` and `model` must match it. An empty `api_key` falls back to
+  `OPENAI_API_KEY` / `OPENROUTER_API_KEY` (Ollama needs none).
 
 ## Initial tuning (not calibrated)
 
 | Parameter | Initial value | Meaning |
 |---|---|---|
-| `reacquisition_timeout` | 5.0 s | Inclusive ordinary identity-reuse age |
+| `local_track_timeout` | 5.0 s | End of a camera's track after its last observation |
+| `stale_timeout` | 60.0 s | Global track becomes stale (reactivate or replace on revisit) |
+| `sync_queue_size` | 100 | Exact-sync queue; must cover detector latency at the image rate |
 | `max_association_distance` | 0.5 m | Hard physical association cap |
 | `association_max_size_ratio` | 2.0 | Maximum ratio of largest box dimensions for "similar" |
 | `merge_overlap_threshold` | 0.5 | Overlap of the smaller box that means one object |
@@ -134,10 +142,11 @@ parameter machinery. The world-frame box transform algorithm remains unchanged.
 
 ## Validation
 
-`test_bbox_transform.cpp`, `test_tracked_object.cpp` and `test_tracking_lifecycle.cpp`
-cover geometry, observation bookkeeping and the tracker node's lifecycle using synthetic
-inputs. `test_multi_camera_tracker.cpp` covers camera handover, delayed observations, snapshot
-retirement and manager integration. Generation and query nodes are not launched. No dataset
+`test_bbox_transform.cpp`, `test_tracked_object.cpp`, `test_image_rotation.cpp`,
+`test_camera_tracker.cpp` and `test_global_tracker.cpp` cover the
+plain classes with synthetic inputs (no ROS threads, no HTTP). `test_multi_camera_tracker.cpp`
+covers exact sync, camera handover, delayed observations, snapshot retirement and manager
+integration. Generation and query nodes are not launched. No dataset
 or hardware calibration is implied.
 
 ## Entry Points

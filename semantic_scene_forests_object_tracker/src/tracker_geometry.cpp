@@ -28,7 +28,6 @@
 
 #include "tracker_geometry.hpp"
 
-#include <algorithm>
 #include <cmath>
 
 #include <tf2/LinearMath/Matrix3x3.hpp>
@@ -123,40 +122,6 @@ transformBoundingBoxToFrame(const vision_msgs::msg::BoundingBox3D& bbox,
   world_bbox.size.y               = world_extents.y();
   world_bbox.size.z               = world_extents.z();
   return world_bbox;
-}
-
-std::optional<std::pair<size_t, size_t>>
-findAmbiguousPair(const std::vector<std::unique_ptr<TrackedObject>>& tracks,
-                  const std::function<bool(const TrackedObject&)>& eligible,
-                  double min_overlap,
-                  double max_overlap,
-                  double max_size_ratio,
-                  double min_extent,
-                  const std::set<TrackPair>& decided)
-{
-  for (size_t i = 0; i < tracks.size(); ++i)
-  {
-    if (!eligible(*tracks[i]))
-    {
-      continue;
-    }
-    for (size_t j = i + 1; j < tracks.size(); ++j)
-    {
-      const auto& a = *tracks[i];
-      const auto& b = *tracks[j];
-      if (!eligible(b) || decided.contains(std::minmax(a.track_id, b.track_id)) ||
-          !TrackedObject::sizesCompatible(a.bbox3d_size, b.bbox3d_size, max_size_ratio))
-      {
-        continue;
-      }
-      const double OVERLAP = TrackedObject::overlapOfSmaller(a, b, min_extent);
-      if (OVERLAP > min_overlap && OVERLAP < max_overlap)
-      {
-        return std::pair{i, j};
-      }
-    }
-  }
-  return std::nullopt;
 }
 
 } // namespace semantic_scene_forests_object_tracker::detail

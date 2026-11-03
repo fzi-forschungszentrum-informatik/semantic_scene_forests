@@ -34,19 +34,26 @@ object_tracker:
         detections_2d_topic: "detections_2d"
         detections_3d_topic: "detections_3d"
         image_topic: "camera/image"
+        image_rotation: 0
+    sync_queue_size: 100
     max_trackable_objects: 400
     gate_threshold_strict: 3.0
     gate_threshold_confirmed: 10.0
     # Initial tuning only: calibrate for large furniture versus small tabletop objects.
-    reacquisition_timeout: 5.0
+    local_track_timeout: 5.0
+    stale_timeout: 60.0
     max_association_distance: 0.5
-    replacement_distance: 0.2
-    replacement_max_size_ratio: 2.0
+    replacement_overlap_threshold: 0.5
     bbox_size_alpha: 0.2
     confidence_threshold: 0.7
     measurement_noise_std: 0.4
     process_noise_std: 0.05
     confirmation_threshold: 3
-    merge_iou_threshold: 0.3
+    merge_overlap_threshold: 0.5
+    overlap_min_extent: 0.1
     crop_padding: 10
     max_crops_per_object: 5
+    snapshot_rate_hz: 5.0
+    association_max_size_ratio: 2.0
+    arbiter:
+      enabled: false

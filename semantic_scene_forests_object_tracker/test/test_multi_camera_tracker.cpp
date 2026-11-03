@@ -77,7 +77,7 @@ rclcpp::NodeOptions twoCameraOptions()
 {
   rclcpp::NodeOptions options;
   options.append_parameter_override("world_frame", "map");
-  options.append_parameter_override("snapshot_rate_hz", 0.0);
+  options.append_parameter_override("snapshot_rate_hz", 100.0);
   options.append_parameter_override("camera_names", std::vector<std::string>{"front", "rear"});
   options.append_parameter_override("cameras.front.detections_2d_topic", "/front/detections_2d");
   options.append_parameter_override("cameras.front.detections_3d_topic", "/front/detections_3d");
@@ -91,14 +91,14 @@ rclcpp::NodeOptions twoCameraOptions()
 rclcpp::NodeOptions commonTrackerOptions(int confirmation_threshold      = 3,
                                          double gate_threshold_strict    = 3.0,
                                          double gate_threshold_confirmed = 10.0,
-                                         double merge_overlap_threshold      = 0.6)
+                                         double merge_overlap_threshold  = 0.6)
 {
   auto options = twoCameraOptions();
   options.append_parameter_override("confirmation_threshold", confirmation_threshold);
   options.append_parameter_override("gate_threshold_strict", gate_threshold_strict);
   options.append_parameter_override("gate_threshold_confirmed", gate_threshold_confirmed);
   options.append_parameter_override("merge_overlap_threshold", merge_overlap_threshold);
-  // These scenarios grow boxes abruptly; size gating is covered in test_tracking_lifecycle.
+  // These scenarios grow boxes abruptly; size gating is covered in test_camera_tracker.
   options.append_parameter_override("association_max_size_ratio", 100.0);
   options.append_parameter_override("crop_padding", 0);
   options.append_parameter_override("max_crops_per_object", 20);
@@ -116,7 +116,7 @@ rclcpp::NodeOptions defaultTrackerOptions()
                      "-r",
                      "camera/image:=/remapped/image"});
   options.append_parameter_override("world_frame", "map");
-  options.append_parameter_override("snapshot_rate_hz", 0.0);
+  options.append_parameter_override("snapshot_rate_hz", 100.0);
   options.append_parameter_override("confirmation_threshold", 3);
   options.append_parameter_override("crop_padding", 0);
   options.append_parameter_override("max_crops_per_object", 20);
@@ -234,7 +234,7 @@ public:
                           int confirmation_threshold      = 3,
                           double gate_threshold_strict    = 3.0,
                           double gate_threshold_confirmed = 10.0,
-                          double merge_overlap_threshold      = 0.6)
+                          double merge_overlap_threshold  = 0.6)
   {
     m_source_node = std::make_shared<rclcpp::Node>("multi_camera_test_source");
     m_tracker     = std::make_shared<ObjectTrackerComponent>(
@@ -548,6 +548,25 @@ TEST(MultiCameraTracker, CameraInputsDoNotCrossPair)
   }
 }
 
+TEST(MultiCameraTracker, ExactSyncDropsFramesWithMismatchedStamps)
+{
+  TrackerHarness harness;
+  ASSERT_TRUE(harness.ready());
+  for (int index = 0; index < 3; ++index)
+  {
+    const auto STAMP = rclcpp::Time(static_cast<int64_t>((3.0 + index * 0.01) * 1e9));
+    harness.front().publish(STAMP, "7", 4.0, 30, true, true, false);
+    harness.front().publish(STAMP + rclcpp::Duration::from_nanoseconds(1000000),
+                            "7",
+                            4.0,
+                            30,
+                            false,
+                            false,
+                            true); // Image 1 ms later: not the same frame.
+  }
+  EXPECT_TRUE(harness.noCandidatesFor(300ms));
+}
+
 TEST(MultiCameraTracker, OverlappingCamerasShareGlobalTrackAndCropHistory)
 {
   TrackerHarness harness;
@@ -635,12 +654,16 @@ TEST(MultiCameraTracker, DelayedAndDuplicateSourceFramesDoNotReverseTrackTime)
   ASSERT_TRUE(harness.waitForCandidates(1));
   const auto BEFORE       = harness.candidates();
   const auto BEFORE_STAMP = rclcpp::Time(BEFORE.back().last_seen).nanoseconds();
-  publishBatches(harness.rear(), 9.9, 1, "2", 6.0, 120);
-  ASSERT_TRUE(harness.waitForCandidates(BEFORE.size() + 1));
+  // The rear camera confirms the same object from older frames: it joins the global track
+  // without moving its observation time backwards.
+  publishBatches(harness.rear(), 9.9, 3, "2", 6.0, 120);
+  ASSERT_TRUE(harness.waitUntil(
+    [&harness]() { return containsCrop(harness.candidates().back(), 120, "rear_frame"); }, 2s));
   const auto AFTER_DELAYED = harness.candidates();
+  EXPECT_EQ(candidateIds(AFTER_DELAYED).size(), 1U);
   EXPECT_GE(rclcpp::Time(AFTER_DELAYED.back().last_seen).nanoseconds(), BEFORE_STAMP);
-  EXPECT_TRUE(containsCrop(AFTER_DELAYED.back(), 120, "rear_frame"));
-  harness.rear().publish(rclcpp::Time(static_cast<int64_t>(9.9e9)), "2", 6.0, 121);
+  // A duplicate of the rear camera's last frame is rejected.
+  harness.rear().publish(rclcpp::Time(static_cast<int64_t>(9.92e9)), "2", 6.0, 121);
   EXPECT_TRUE(harness.noCropTagFor(121, 300ms));
   harness.front().publish(rclcpp::Time(static_cast<int64_t>(10.1e9)), "1", 4.0, 130);
   ASSERT_TRUE(harness.waitForCandidates(BEFORE.size() + 2));

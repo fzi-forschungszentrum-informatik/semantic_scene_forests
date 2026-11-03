@@ -63,6 +63,10 @@ generate_parameter_library(object_tracker_parameters
 # Tracker component library
 add_library(object_tracker_component SHARED
   src/object_tracker_component.cpp
+  src/arbiter_worker.cpp
+  src/camera_tracker.cpp
+  src/global_tracker.cpp
+  src/image_rotation.cpp
   src/tracked_object.cpp
   src/tracker_geometry.cpp
 )
@@ -118,8 +122,11 @@ if(BUILD_TESTING)
   ament_add_gtest(test_tracked_object test/test_tracked_object.cpp)
   target_link_libraries(test_tracked_object object_tracker_component)
   target_include_directories(test_tracked_object PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-  ament_add_gtest(test_tracking_lifecycle test/test_tracking_lifecycle.cpp)
-  target_link_libraries(test_tracking_lifecycle object_tracker_component)
+  foreach(unit_test test_image_rotation test_camera_tracker test_global_tracker)
+    ament_add_gtest(${unit_test} test/${unit_test}.cpp)
+    target_link_libraries(${unit_test} object_tracker_component)
+    target_include_directories(${unit_test} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  endforeach()
   target_include_directories(test_bbox_transform PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
 

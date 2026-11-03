@@ -228,6 +228,16 @@ bool TrackedObject::setDecidedLabel(const std::string& label)
   return true;
 }
 
+std::set<std::string> TrackedObject::labels() const
+{
+  std::set<std::string> result;
+  for (const auto& [name, count] : m_class_history)
+  {
+    result.insert(name);
+  }
+  return result;
+}
+
 void TrackedObject::refreshClassName()
 {
   if (m_decided_label && std::ranges::all_of(m_class_history, [this](const auto& entry) {

@@ -91,6 +91,8 @@ public:
   // Externally decided label; it wins over the majority vote until a label not
   // seen at decision time is observed. Rejects labels outside the class history.
   bool setDecidedLabel(const std::string& label);
+  // Every label this track was observed with.
+  std::set<std::string> labels() const;
 
   vision_msgs::msg::Detection3D toDetection3D() const;
 

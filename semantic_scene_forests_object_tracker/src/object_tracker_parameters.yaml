@@ -54,19 +54,33 @@ object_tracker:
       image_topic:
         type: string
         default_value: "camera/image"
-        description: "Image synchronized with this camera's detections."
+        description: "Image synchronized with this camera's detections (identical stamps)."
         read_only: true
         validation:
           not_empty<>: []
+      image_rotation:
+        type: int
+        default_value: 0
+        description: "Clockwise rotation (deg) applied to this camera's image and 2D boxes so crops are upright. 3D boxes are unaffected."
+        read_only: true
+        validation:
+          one_of<>: [[0, 90, 180, 270]]
   world_frame:
     type: string
     default_value: "map"
     description: "Target coordinate frame for all tracked 3D bounding boxes."
     read_only: true
+  sync_queue_size:
+    type: int
+    default_value: 100
+    description: "Exact-time sync queue per input. Must hold the images that arrive while the detector works on a frame (about 10 s at 10 Hz)."
+    read_only: true
+    validation:
+      gt<>: [0]
   max_trackable_objects:
     type: int
     default_value: 1000
-    description: "Maximum tentative and recent tracks; remembered objects do not count."
+    description: "Maximum tentative and confirmed tracks per camera."
     read_only: true
     validation:
       gt<>: [0]
@@ -88,10 +102,16 @@ object_tracker:
     description: "Minimum detection confidence score to accept a detection."
     validation:
       bounds<>: [0.0, 1.0]
-  reacquisition_timeout:
+  local_track_timeout:
     type: double
     default_value: 5.0
-    description: "Observation age in seconds after which a confirmed track is stale (reactivated or replaced on revisit)."
+    description: "A camera's confirmed track ends this many seconds after its last observation; identity across revisits lives in the global tracks."
+    validation:
+      gt<>: [0.0]
+  stale_timeout:
+    type: double
+    default_value: 60.0
+    description: "A global track is stale after this many seconds unseen; a new track at its pose then reactivates or replaces it."
     validation:
       gt<>: [0.0]
   max_association_distance:
@@ -103,7 +123,7 @@ object_tracker:
   replacement_overlap_threshold:
     type: double
     default_value: 0.5
-    description: "Fraction of a stale track's box a confirmed recent track must cover to replace it when the arbiter is disabled or failed."
+    description: "Fraction of a stale global track's box that a differently sized track must cover to replace it."
     validation:
       bounds<>: [0.0, 1.0]
   bbox_size_alpha:
@@ -170,11 +190,11 @@ object_tracker:
       gt<>: [0]
   snapshot_rate_hz:
     type: double
-    default_value: 2.0
-    description: "Snapshot publish rate. 0 publishes after every synchronized camera frame."
+    default_value: 5.0
+    description: "Rate of the global reconciliation cycle, which also publishes the snapshot."
     read_only: true
     validation:
-      gt_eq<>: [0.0]
+      gt<>: [0.0]
   association_max_size_ratio:
     type: double
     default_value: 2.0
@@ -182,20 +202,27 @@ object_tracker:
     validation:
       gt_eq<>: [1.0]
   arbiter:
+    provider:
+      type: string
+      default_value: "openrouter"
+      description: "Decisions provider: openai (https://api.openai.com/v1, e.g. gpt-6-luna), openrouter (https://openrouter.ai/api/alpha, e.g. openai/gpt-6-luna-decisions) or ollama (http://localhost:11434/v1, e.g. clef-flash)."
+      read_only: true
+      validation:
+        one_of<>: [["openai", "openrouter", "ollama"]]
     enabled:
       type: bool
       default_value: false
-      description: "Ask the Decisions API whether partially overlapping tracks are the same object (last resort)."
+      description: "Let the Decisions API decide label conflicts and partial overlaps between global tracks."
       read_only: true
     server_url:
       type: string
       default_value: "https://openrouter.ai/api/alpha"
-      description: "OpenRouter Decisions API base URL."
+      description: "Decisions API base URL; must match the provider."
       read_only: true
     api_key:
       type: string
       default_value: ""
-      description: "API key for the Decisions API."
+      description: "API key; empty falls back to OPENAI_API_KEY / OPENROUTER_API_KEY. Required for openai and openrouter, not for ollama."
       read_only: true
     model:
       type: string
@@ -214,16 +241,16 @@ object_tracker:
       read_only: true
       validation:
         gt<>: [0]
-    min_interval_seconds:
-      type: double
-      default_value: 1.0
-      description: "Minimum wall-clock time between two Decisions requests."
-      validation:
-        gt_eq<>: [0.0]
     min_overlap:
       type: double
       default_value: 0.1
-      description: "Pairs with overlap in (min_overlap, merge_overlap_threshold) are ambiguous and may be arbitrated."
+      description: "Global tracks of similar size overlapping by more than this count as a geometric overlap (merge or arbiter)."
+      validation:
+        bounds<>: [0.0, 1.0]
+    label_probability:
+      type: double
+      default_value: 0.5
+      description: "Minimum probability that a new track's label is right; below it the track is removed as a false positive."
       validation:
         bounds<>: [0.0, 1.0]
     same_object_probability:
