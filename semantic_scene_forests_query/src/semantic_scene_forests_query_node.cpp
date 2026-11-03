@@ -240,8 +240,7 @@ void SceneGraphQueryNode::onManagedObjects(const ManagedObjectArray::SharedPtr& 
 {
   m_objects_freq->tick();
   // Complete managed-object arrays are authoritative. Blocked legacy rows are
-  // not active. The membership epoch changes only when the active id set
-  // changes, so in-flight query results can be checked for staleness.
+  // not active.
   std::unordered_map<int64_t, ManagedObject> next;
   for (const auto& obj : msg->objects)
   {
@@ -251,22 +250,6 @@ void SceneGraphQueryNode::onManagedObjects(const ManagedObjectArray::SharedPtr& 
     }
   }
   const std::scoped_lock LOCK{m_objects_mutex};
-  bool changed = next.size() != m_cached_objects.size();
-  if (!changed)
-  {
-    for (const auto& [id, obj] : next)
-    {
-      if (!m_cached_objects.contains(id))
-      {
-        changed = true;
-        break;
-      }
-    }
-  }
-  if (changed)
-  {
-    ++m_objects_epoch;
-  }
   m_cached_objects   = std::move(next);
   m_objects_received = true;
 }
@@ -282,7 +265,6 @@ SceneGraphQueryNode::snapshotGraph() const
   SceneGraphMsg msg;
   std::unordered_set<int64_t> active_ids;
   bool received{false};
-  std::uint64_t epoch{0};
   {
     const std::scoped_lock LOCK{m_objects_mutex, m_graph_mutex};
     if (!m_last_graph)
@@ -291,7 +273,6 @@ SceneGraphQueryNode::snapshotGraph() const
     }
     msg      = *m_last_graph;
     received = m_objects_received;
-    epoch    = m_objects_epoch;
     active_ids.reserve(m_cached_objects.size());
     for (const auto& [id, obj] : m_cached_objects)
     {
@@ -324,8 +305,7 @@ SceneGraphQueryNode::snapshotGraph() const
   {
     object_ids.insert(node.id);
   }
-  return SceneSnapshot{
-    .graph = std::move(*graph), .object_ids = std::move(object_ids), .epoch = epoch};
+  return SceneSnapshot{.graph = std::move(*graph), .object_ids = std::move(object_ids)};
 }
 
 std::optional<ObjectInfo> SceneGraphQueryNode::lookupObject(int64_t id) const
@@ -533,8 +513,7 @@ SceneGraphQueryNode::runAgent(const std::string& system_prompt_key,
   RCLCPP_INFO(get_logger(), "[agent] final answer: %s", answer->c_str());
   return AgentOutcome{.text                = std::move(*answer),
                       .expanded            = session.expandedNodes(),
-                      .snapshot_object_ids = std::move(snapshot->object_ids),
-                      .membership_epoch    = snapshot->epoch};
+                      .snapshot_object_ids = std::move(snapshot->object_ids)};
 }
 
 void SceneGraphQueryNode::guardedTerminal(const std::function<void()>& terminal)
@@ -748,17 +727,12 @@ SceneGraphQueryNode::validateFindObjectAnswer(const AgentOutcome& outcome) const
   }
   const bool FOUND = FOUND_FIELD->get<bool>();
 
-  // Receipt + epoch gate for BOTH positive and negative answers: any result
-  // computed against outdated membership is stale and must not terminalize.
+  // Objects come and go while the agent runs; only the selected id is re-checked below.
   {
     const std::scoped_lock LOCK{m_objects_mutex};
     if (!m_objects_received)
     {
       return std::unexpected{"no authoritative managed-object state received yet"};
-    }
-    if (m_objects_epoch != outcome.membership_epoch)
-    {
-      return std::unexpected{"object membership changed during the query (stale result)"};
     }
   }
 
@@ -777,8 +751,7 @@ SceneGraphQueryNode::validateFindObjectAnswer(const AgentOutcome& outcome) const
 
   if (!FOUND)
   {
-    // A genuine negative on unchanged membership is a completed, unsuccessful
-    // lookup.
+    // A genuine negative is a completed, unsuccessful lookup.
     return result;
   }
 
@@ -931,23 +904,10 @@ void SceneGraphQueryNode::executePromptLLM(const std::shared_ptr<PromptLLMGoal>&
       auto outcome = runAgent("prompt_llm/system_prompt", GOAL->query, ON_EXPAND, SHOULD_STOP);
       if (outcome)
       {
-        // Reject free-form answers computed against outdated membership.
-        std::uint64_t epoch_now = 0;
-        {
-          const std::scoped_lock LOCK{m_objects_mutex};
-          epoch_now = m_objects_epoch;
-        }
-        if (epoch_now == outcome->membership_epoch)
-        {
-          result->success  = true;
-          result->message  = "ok";
-          result->response = outcome->text;
-          completion       = Completion::SUCCEED;
-        }
-        else
-        {
-          abort_reason = "object membership changed during the query (stale result)";
-        }
+        result->success  = true;
+        result->message  = "ok";
+        result->response = outcome->text;
+        completion       = Completion::SUCCEED;
       }
       else
       {

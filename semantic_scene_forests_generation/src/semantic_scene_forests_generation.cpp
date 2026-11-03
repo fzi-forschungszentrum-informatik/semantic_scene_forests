@@ -298,12 +298,11 @@ void SceneGraphGenerationNode::onManagedObjects(const ManagedObjectArray::Shared
     {
       // Eagerly remove absent objects and everything that became unreachable
       // from the retained objects; pose-only refreshes never enter here.
-      ++m_membership_revision;
       if (auto retained = m_scene_graph.retainObjectNodes(active_ids); !retained)
       {
         // TODO: a failed live reconcile leaves removed nodes published until the
-        // next membership change retries it; commit-time reconciliation and the
-        // revision bump above still keep stale inference out of the live graph.
+        // next membership change retries it; commit-time reconciliation still keeps
+        // removed objects out of the live graph.
         RCLCPP_ERROR(get_logger(),
                      "Failed to reconcile the live graph with the active objects: %s",
                      retained.error().message.c_str());
@@ -587,20 +586,18 @@ void SceneGraphGenerationNode::executePhase1(const std::shared_ptr<GoalHandle>& 
     feedback->status = "Processing object " + std::to_string(obj.id) + " (" + obj.class_name + ")";
     goal_handle->publish_feedback(feedback);
 
-    // Capture the graph and membership revision before any external IO so
-    // the whole per-object call window is covered by the commit-time guard.
+    // Snapshot per object so earlier commits and live removals are included.
     auto state_snapshot = snapshotState();
     if (!state_snapshot)
     {
       abort("Phase 1 failed to snapshot the scene state: " + state_snapshot.error());
       return;
     }
-    if (state_snapshot->revision != initial_state->revision)
+    if (std::ranges::none_of(state_snapshot->objects,
+                             [&obj](const auto& active) { return active.id == obj.id; }))
     {
-      abort("Phase 1 failed: scene membership changed since the phase started (revision " +
-            std::to_string(state_snapshot->revision) +
-            " != " + std::to_string(initial_state->revision) + ")");
-      return;
+      ++processed; // Removed since the phase started; nothing to describe.
+      continue;
     }
 
     // ── Fetch image crops ────────────────────────────────────────────────
@@ -763,7 +760,7 @@ void SceneGraphGenerationNode::executePhase1(const std::shared_ptr<GoalHandle>& 
       cancel();
       return;
     }
-    if (auto committed = commitGraph(*state_snapshot->graph, state_snapshot->revision); !committed)
+    if (auto committed = commitGraph(*state_snapshot->graph); !committed)
     {
       abort("Phase 1 failed to commit the scene graph: " + committed.error());
       return;
@@ -896,7 +893,7 @@ void SceneGraphGenerationNode::executePhase2(const std::shared_ptr<GoalHandle>& 
     cancel();
     return;
   }
-  if (auto committed = commitGraph(*state_snapshot->graph, state_snapshot->revision); !committed)
+  if (auto committed = commitGraph(*state_snapshot->graph); !committed)
   {
     abort("Phase 2 failed to commit the scene graph: " + committed.error());
     return;
@@ -918,7 +915,6 @@ SceneGraphGenerationNode::snapshotState()
 
   StateSnapshot state;
   state.graph    = std::move(*snapshot);
-  state.revision = m_membership_revision;
   state.objects.reserve(m_cached_objects.size());
   for (const auto& [id, object] : m_cached_objects)
   {
@@ -929,17 +925,9 @@ SceneGraphGenerationNode::snapshotState()
 }
 
 std::expected<void, std::string>
-SceneGraphGenerationNode::commitGraph(fzi::semantic_scene_forests::SceneGraph& candidate,
-                                      const std::uint64_t expected_revision)
+SceneGraphGenerationNode::commitGraph(fzi::semantic_scene_forests::SceneGraph& candidate)
 {
   std::scoped_lock lock{m_objects_mutex, m_graph_mutex};
-
-  if (m_membership_revision != expected_revision)
-  {
-    return std::unexpected("scene graph membership changed since the snapshot (revision " +
-                           std::to_string(expected_revision) +
-                           " != " + std::to_string(m_membership_revision) + ")");
-  }
 
   std::unordered_set<int64_t> active_ids;
   active_ids.reserve(m_cached_objects.size());

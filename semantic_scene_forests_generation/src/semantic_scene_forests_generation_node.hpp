@@ -112,10 +112,6 @@ private:
     m_cached_objects;
   std::mutex m_graph_mutex;
   fzi::semantic_scene_forests::SceneGraph m_scene_graph;
-  // Authoritative managed-object membership epoch, guarded by m_graph_mutex.
-  // Incremented whenever the active object id set changes so inference work
-  // snapshotted against an older membership is rejected at commit time.
-  std::uint64_t m_membership_revision{0};
 
   // One update owns the LLM clients and graph commit path at a time.
   std::mutex m_goal_mutex;
@@ -164,12 +160,11 @@ private:
   void executePhase2(const std::shared_ptr<GoalHandle>& goal_handle,
                      const std::stop_token& stop_token);
 
-  // One consistent capture of graph, managed objects, and membership epoch.
+  // One consistent capture of graph and managed objects.
   struct StateSnapshot
   {
     std::unique_ptr<fzi::semantic_scene_forests::SceneGraph> graph;
     std::vector<semantic_scene_forests_object_msgs::msg::ManagedObject> objects;
-    std::uint64_t revision{0};
   };
 
   [[nodiscard]] std::expected<StateSnapshot, std::string> snapshotState();
@@ -189,12 +184,12 @@ private:
   // requested stop token (teardown) publishes nothing.
   void stopGoal(const std::shared_ptr<GoalHandle>& goal_handle, const std::stop_token& stop_token);
 
-  // Swaps the candidate into the live graph only when the membership epoch is
-  // still the one the candidate was built against. The candidate is reconciled
-  // against the authoritative object membership first, so plugin-added
-  // unmanaged objects and unreachable concepts cannot enter the live graph.
+  // Swaps the candidate into the live graph. Between snapshot and commit the live
+  // graph only loses objects (removals), so reconciling the candidate against the
+  // current object membership applies the same removals; plugin-added unmanaged
+  // objects and unreachable concepts cannot enter the live graph.
   [[nodiscard]] std::expected<void, std::string>
-  commitGraph(fzi::semantic_scene_forests::SceneGraph& candidate, std::uint64_t expected_revision);
+  commitGraph(fzi::semantic_scene_forests::SceneGraph& candidate);
   void clearActiveGoal();
 };
 

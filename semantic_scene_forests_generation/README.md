@@ -36,8 +36,8 @@ The graph is published at 1 Hz with reliable, transient-local QoS.
   objects, their incident edges, and concepts no longer reachable from any retained object are
   removed, while concepts shared with retained objects and their transitive ancestors survive.
   An empty managed array empties the graph.
-- In-flight updates are rejected if object membership changes during inference; paid LLM
-  work is not retried automatically.
+- Updates keep running while objects come and go: each commit drops objects that were removed
+  meanwhile, and Phase 1 skips objects that are gone before their turn.
 
 ## Exported Components
 
