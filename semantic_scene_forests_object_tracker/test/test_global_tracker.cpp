@@ -194,6 +194,16 @@ TEST_F(GlobalTrackerTest, NewTrackIsHeldUntilTheArbiterConfirmsItsLabel)
   EXPECT_EQ(global.stats(params).label_rejections, 1u);
 }
 
+TEST_F(GlobalTrackerTest, RejectedTrackletIsNotRecreatedWhileItLives)
+{
+  const std::vector<Tracklet> TRACKLETS{tracklet("front", 1, 10, 0.0, "assemble")};
+  cycle(TRACKLETS, {}, true);
+  EXPECT_TRUE(cycle(TRACKLETS, {labelCheck(1, 0.06)}, true).empty()); // Same local track.
+  EXPECT_TRUE(global.tracks().empty());
+  cycle({}, {}, true); // The local track ended; a new one is checked again.
+  EXPECT_EQ(cycle({tracklet("front", 2, 20, 0.0, "assemble")}, {}, true).size(), 1u);
+}
+
 TEST_F(GlobalTrackerTest, LabelThatIsNoObjectIsIgnoredForTheSession)
 {
   cycle(

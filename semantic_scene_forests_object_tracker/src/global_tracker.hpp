@@ -129,6 +129,7 @@ private:
   std::set<uint64_t> m_removed;         // merged/retired this cycle, erased at safe points
   std::set<uint64_t> m_held;            // new tracks waiting for their label check
   std::set<std::string> m_rejected_labels; // not physical objects, ignored for the session
+  std::set<LinkKey> m_rejected_links;      // camera tracks of rejected tracks, ignored while alive
   std::optional<rclcpp::Time> m_latest; // latest observation time across all cameras
   uint64_t m_next_id{1};
   size_t m_decisions{0};

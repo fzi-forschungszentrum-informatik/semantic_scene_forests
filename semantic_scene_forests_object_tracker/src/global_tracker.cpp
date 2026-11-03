@@ -247,6 +247,14 @@ void GlobalTracker::applyResult(const ArbiterResult& result, const object_tracke
     }
     else
     {
+      // Its camera tracks would otherwise start a new track (and check) every cycle.
+      for (const auto& [key, link] : m_links)
+      {
+        if (link.global_id == result.a_id)
+        {
+          m_rejected_links.insert(key);
+        }
+      }
       retire(result.a_id);
       ++m_label_rejections;
     }
@@ -434,6 +442,10 @@ std::vector<ArbiterRequest> GlobalTracker::cycle(const std::vector<Tracklet>& tr
     }
     const LinkKey KEY{tracklet.camera, tracklet.local_id};
     alive.insert(KEY);
+    if (m_rejected_links.contains(KEY))
+    {
+      continue;
+    }
     if (const auto IT = m_links.find(KEY); IT != m_links.end())
     {
       if (auto* track = find(IT->second.global_id))
@@ -491,6 +503,7 @@ std::vector<ArbiterRequest> GlobalTracker::cycle(const std::vector<Tracklet>& tr
     }
   }
   std::erase_if(m_links, [&alive](const auto& entry) { return !alive.contains(entry.first); });
+  std::erase_if(m_rejected_links, [&alive](const auto& key) { return !alive.contains(key); });
 
   auto requests = std::move(label_checks);
   auto pairs    = reconcilePairs(params, arbiter_enabled);
