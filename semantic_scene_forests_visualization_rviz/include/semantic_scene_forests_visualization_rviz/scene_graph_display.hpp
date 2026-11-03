@@ -146,6 +146,7 @@ private:
   rviz_common::properties::ColorProperty* m_object_color_property{nullptr};
   rviz_common::properties::FloatProperty* m_object_scale_property{nullptr};
   rviz_common::properties::BoolProperty* m_show_labels_property{nullptr};
+  rviz_common::properties::FloatProperty* m_stale_after_property{nullptr};
   rviz_common::properties::RosTopicProperty* m_managed_objects_topic_property{nullptr};
   rviz_common::properties::QosProfileProperty* m_qos_profile_property{nullptr};
   rclcpp::QoS m_qos_profile{5};
