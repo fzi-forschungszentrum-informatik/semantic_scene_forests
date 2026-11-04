@@ -22,6 +22,7 @@ Tracking package that converts detections into persistent object candidates for 
 | Subscribe | `detections_3d` | `vision_msgs/msg/Detection3DArray` |
 | Subscribe | `camera/image` | `sensor_msgs/msg/Image` |
 | Publish | `object_candidate_snapshots` | `semantic_scene_forests_object_msgs/msg/ObjectCandidateArray` |
+| Service | `add_observations` | `semantic_scene_forests_object_msgs/srv/AddObservations` |
 
 The tracker has one input triple per configured camera: `detections_2d`, `detections_3d` and
 `camera/image`. The three messages of a frame must carry the **identical** stamp (exact-time
@@ -29,6 +30,25 @@ sync, queue `sync_queue_size`); mismatched frames are dropped. Each 2D and 3D ar
 matching nonempty detector IDs; IDs only pair the 2D and 3D detections of one frame. A silent
 camera does not hold up other cameras; a missing transform skips that camera's frame after the
 TF lookup timeout.
+
+### Manual observations
+
+`add_observations` registers sightings from a source other than the configured cameras, e.g.
+an agent's camera search, so that every object, wherever it was seen, gets its ID from this
+tracker. Each observation (class name, framed 3D box with positive size, optional crops) is
+transformed into `world_frame` using TF at its stamp (a zero stamp means now) and joins the next
+global cycle as a tracklet of the reserved source `<manual>`. Negative timestamps and
+unavailable transforms reject that observation. The usual global rules
+apply: it links to a clearly overlapping, similar-sized track with an accepted label (updating
+its pose and crops), or it starts a new global track, held for the arbiter's label check when
+the arbiter is on. The response waits until every observation of the request is decided:
+until then its tracklets are reposted each cycle (an unchanged stamp is not applied twice),
+so their links follow merges and end when a label check removes the track. It is sent after
+the snapshot of the deciding cycle, with one global ID (0 = rejected), the published class
+name and a `created` flag per observation. Global tracks are never timed out, so a manual
+track stays after its tracklet ends. `class_whitelist` and
+`confidence_threshold` do not apply; labels rejected for the session do. The service shares
+the global callback group, so requests never race the cycle.
 
 ### Configuration
 

@@ -94,6 +94,12 @@ public:
   bool isStale(const TrackedObject& track, const object_tracker::Params& params) const;
   // True while a new track waits for its label check; held tracks are not published.
   bool isHeld(const TrackedObject& track) const { return m_held.contains(track.track_id); }
+  bool isHeld(uint64_t id) const { return m_held.contains(id); }
+  // Global track a tracklet of the last cycle is linked to; nullopt if it was skipped or its
+  // track was removed. Links end in the first cycle that no longer contains the tracklet.
+  std::optional<uint64_t> linkedTrack(const std::string& camera, uint64_t local_id) const;
+  // The ID the next new global track gets; IDs only grow.
+  uint64_t nextId() const { return m_next_id; }
   Stats stats(const object_tracker::Params& params) const;
   // Labels the arbiter judged not to be physical objects; only grows.
   const std::set<std::string>& rejectedLabels() const { return m_rejected_labels; }
@@ -123,14 +129,14 @@ private:
   std::vector<std::unique_ptr<TrackedObject>> m_tracks;
   std::map<LinkKey, Link> m_links;
   std::map<uint64_t, std::set<std::string>> m_accepted_labels;
-  std::set<TrackPair> m_distinct;       // arbiter: different objects, never merged
-  std::set<TrackPair> m_asked;          // queued or answered, never asked again
-  std::set<TrackPair> m_failed;         // request failed: fall back to the overlap rule
-  std::set<uint64_t> m_removed;         // merged/retired this cycle, erased at safe points
-  std::set<uint64_t> m_held;            // new tracks waiting for their label check
+  std::set<TrackPair> m_distinct;          // arbiter: different objects, never merged
+  std::set<TrackPair> m_asked;             // queued or answered, never asked again
+  std::set<TrackPair> m_failed;            // request failed: fall back to the overlap rule
+  std::set<uint64_t> m_removed;            // merged/retired this cycle, erased at safe points
+  std::set<uint64_t> m_held;               // new tracks waiting for their label check
   std::set<std::string> m_rejected_labels; // not physical objects, ignored for the session
   std::set<LinkKey> m_rejected_links;      // camera tracks of rejected tracks, ignored while alive
-  std::optional<rclcpp::Time> m_latest; // latest observation time across all cameras
+  std::optional<rclcpp::Time> m_latest;    // latest observation time across all cameras
   uint64_t m_next_id{1};
   size_t m_decisions{0};
   size_t m_merges{0};

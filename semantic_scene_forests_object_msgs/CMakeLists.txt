@@ -47,6 +47,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ObjectCandidate.msg"
   "msg/ObjectCandidateArray.msg"
   "msg/ObjectVisuals.msg"
+  "srv/AddObservations.srv"
   "srv/GetObjects.srv"
   "srv/GetObjectVisuals.srv"
   "srv/BlockObject.srv"

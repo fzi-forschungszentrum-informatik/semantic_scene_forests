@@ -38,10 +38,14 @@
 #include "arbiter_worker.hpp"
 #include "camera_tracker.hpp"
 #include "global_tracker.hpp"
+#include "tracker_geometry.hpp"
 
 namespace semantic_scene_forests_object_tracker {
 
 namespace {
+
+// Tracklet camera of add_observations sightings; camera names are user-chosen identifiers.
+const std::string MANUAL_SOURCE = "<manual>";
 
 // message_filters >= 7 (Kilted onwards) takes an rclcpp::QoS; message_filters 6 (Jazzy) only
 // accepts an rmw_qos_profile_t. Select the available overload at compile time so the package
@@ -171,6 +175,15 @@ ObjectTrackerComponent::ObjectTrackerComponent(const rclcpp::NodeOptions& option
     std::chrono::duration<double>(1.0 / PARAMS.snapshot_rate_hz),
     [this] { onGlobalCycle(); },
     m_global_group);
+  // Same group as the cycle: requests and the cycle never run at the same time.
+  m_add_observations_srv = this->create_service<AddObservations>(
+    "add_observations",
+    [this](const std::shared_ptr<rmw_request_id_t> header,
+           const std::shared_ptr<AddObservations::Request> request) {
+      onAddObservations(header, request);
+    },
+    rclcpp::ServicesQoS(),
+    m_global_group);
 
   RCLCPP_INFO(this->get_logger(),
               "ObjectTrackerComponent started with %zu cameras. World frame: %s",
@@ -212,7 +225,7 @@ void ObjectTrackerComponent::onCameraFrame(CameraInput& camera,
   const auto REJECTED = m_rejected_labels.load();
   const auto RESULT =
     camera.tracker->process(det2d_msg, det3d_msg, img_msg, LOOKUP, PARAMS, *REJECTED);
-  auto tracklets    = camera.tracker->tracklets();
+  auto tracklets = camera.tracker->tracklets();
 
   const std::scoped_lock LOCK{camera.mutex};
   switch (RESULT)
@@ -234,6 +247,132 @@ void ObjectTrackerComponent::onCameraFrame(CameraInput& camera,
   camera.crop_errors  = camera.tracker->cropErrors();
 }
 
+void ObjectTrackerComponent::onAddObservations(
+  const std::shared_ptr<rmw_request_id_t>& header,
+  const std::shared_ptr<AddObservations::Request>& request)
+{
+  PendingObservations pending;
+  pending.header = header;
+  for (const auto& observation : request->observations)
+  {
+    const auto& detection = observation.detection;
+    rclcpp::Time stamp{0, 0, RCL_ROS_TIME};
+    std::string error;
+    std::optional<vision_msgs::msg::BoundingBox3D> box;
+    if (observation.class_name.empty())
+    {
+      error = "empty class_name";
+    }
+    else if (detection.header.frame_id.empty())
+    {
+      error = "empty detection frame";
+    }
+    else if (detection.header.stamp.sec < 0)
+    {
+      error = "negative detection timestamp";
+    }
+    else if (m_global->rejectedLabels().contains(observation.class_name))
+    {
+      error = "label '" + observation.class_name + "' was rejected for this session";
+    }
+    else
+    {
+      stamp = detection.header.stamp.sec == 0 && detection.header.stamp.nanosec == 0
+                ? this->now()
+                : rclcpp::Time(detection.header.stamp, RCL_ROS_TIME);
+      try
+      {
+        const auto TRANSFORM = m_tf_buffer.lookupTransform(
+          m_world_frame, detection.header.frame_id, stamp, rclcpp::Duration::from_seconds(0.1));
+        box = detail::transformBoundingBoxToFrame(detection.bbox, TRANSFORM);
+        if (!box)
+        {
+          error = "non-finite geometry, nonpositive size or invalid orientation";
+        }
+      }
+      catch (const tf2::TransformException& ex)
+      {
+        error = std::string("no transform to ") + m_world_frame + ": " + ex.what();
+      }
+    }
+    if (!error.empty())
+    {
+      RCLCPP_WARN(this->get_logger(),
+                  "add_observations: rejecting '%s': %s",
+                  observation.class_name.c_str(),
+                  error.c_str());
+      pending.local_ids.emplace_back(std::nullopt);
+      pending.errors.push_back(std::move(error));
+      continue;
+    }
+    const auto& center = box->center.position;
+    pending.tracklets.push_back(Tracklet{
+      .camera     = MANUAL_SOURCE,
+      .local_id   = m_manual_next_id,
+      .last_seen  = stamp,
+      .position   = {center.x, center.y, center.z},
+      .size       = {box->size.x, box->size.y, box->size.z},
+      .class_name = observation.class_name,
+      .score      = 1.0,
+      .crops =
+        std::make_shared<const std::vector<sensor_msgs::msg::Image>>(observation.image_crops)});
+    pending.local_ids.emplace_back(m_manual_next_id++);
+    pending.errors.emplace_back();
+  }
+  m_manual_pending.push_back(std::move(pending));
+}
+
+void ObjectTrackerComponent::answerObservations(uint64_t first_new_id)
+{
+  std::erase_if(m_manual_pending, [&](PendingObservations& pending) {
+    if (!pending.first_new_id)
+    {
+      pending.first_new_id = first_new_id; // this cycle fused them
+    }
+    std::vector<std::optional<uint64_t>> ids;
+    for (const auto& local_id : pending.local_ids)
+    {
+      ids.push_back(local_id ? m_global->linkedTrack(MANUAL_SOURCE, *local_id) : std::nullopt);
+      if (ids.back() && m_global->isHeld(*ids.back()))
+      {
+        return false; // label check still running; ask again next cycle
+      }
+    }
+    AddObservations::Response response;
+    response.success = true;
+    size_t fused     = 0;
+    for (size_t i = 0; i < ids.size(); ++i)
+    {
+      const auto& tracks = m_global->tracks();
+      const auto TRACK   = ids[i] ? std::ranges::find_if(tracks,
+                                                       [id = *ids[i]](const auto& track) {
+                                                         return track->track_id == id;
+                                                       })
+                                  : tracks.end();
+      if (TRACK == tracks.end())
+      {
+        const auto& error = !pending.errors[i].empty() ? pending.errors[i]
+                            : m_arbiter               ? "rejected by the tracker's label check"
+                                                      : "rejected by the global tracker";
+        response.success = false;
+        response.message += "observation " + std::to_string(i) + ": " + error + "; ";
+        response.object_ids.push_back(0);
+        response.class_names.emplace_back();
+        response.created.push_back(false);
+        continue;
+      }
+      ++fused;
+      response.object_ids.push_back(static_cast<int64_t>(*ids[i]));
+      response.class_names.push_back((*TRACK)->class_name);
+      response.created.push_back(*ids[i] >= *pending.first_new_id);
+    }
+    response.message += "fused " + std::to_string(fused) + " of " +
+                        std::to_string(pending.local_ids.size()) + " observations";
+    m_add_observations_srv->send_response(*pending.header, response);
+    return true;
+  });
+}
+
 void ObjectTrackerComponent::onGlobalCycle()
 {
   const auto PARAMS = m_param_listener->get_params();
@@ -243,8 +382,14 @@ void ObjectTrackerComponent::onGlobalCycle()
     const std::scoped_lock LOCK{camera->mutex};
     tracklets.insert(tracklets.end(), camera->tracklets.begin(), camera->tracklets.end());
   }
-  const auto RESULTS = m_arbiter ? m_arbiter->drainResults() : std::vector<ArbiterResult>{};
-  auto requests      = m_global->cycle(tracklets, RESULTS, PARAMS, m_arbiter != nullptr);
+  for (const auto& pending : m_manual_pending)
+  {
+    // Reposted until answered; an unchanged stamp is not applied twice.
+    tracklets.insert(tracklets.end(), pending.tracklets.begin(), pending.tracklets.end());
+  }
+  const auto FIRST_NEW_ID = m_global->nextId();
+  const auto RESULTS      = m_arbiter ? m_arbiter->drainResults() : std::vector<ArbiterResult>{};
+  auto requests           = m_global->cycle(tracklets, RESULTS, PARAMS, m_arbiter != nullptr);
   if (m_global->rejectedLabels().size() != m_rejected_labels.load()->size()) // only grows
   {
     m_rejected_labels.store(
@@ -255,6 +400,7 @@ void ObjectTrackerComponent::onGlobalCycle()
     m_arbiter->enqueue(std::move(request));
   }
   publishSnapshot();
+  answerObservations(FIRST_NEW_ID); // after the snapshot, so answered objects are already out
 
   const auto STATS = m_global->stats(PARAMS);
   const std::scoped_lock LOCK{m_stats_mutex};

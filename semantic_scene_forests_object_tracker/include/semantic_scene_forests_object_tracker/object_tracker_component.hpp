@@ -29,8 +29,10 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -43,6 +45,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_components/register_node_macro.hpp>
 #include <semantic_scene_forests_object_msgs/msg/object_candidate_array.hpp>
+#include <semantic_scene_forests_object_msgs/srv/add_observations.hpp>
 #include <semantic_scene_forests_utils/diagnostic_utils.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <tf2_ros/buffer.hpp>
@@ -62,7 +65,8 @@ struct Tracklet;
 // Two-level tracker. Each camera runs in its own callback group: exactly synchronized
 // (2D, 3D, image) frames feed a CameraTracker whose confirmed tracks are posted to the
 // camera's mailbox. A global timer (own callback group) reconciles all mailboxes into
-// global tracks, talks to the arbiter worker and publishes the snapshot.
+// global tracks, talks to the arbiter worker and publishes the snapshot. Sightings from other
+// sources (add_observations) join the next global cycle as one-cycle tracklets.
 class ObjectTrackerComponent : public rclcpp::Node
 {
 public:
@@ -109,6 +113,23 @@ private:
                      const vision_msgs::msg::Detection2DArray& det2d_msg,
                      const vision_msgs::msg::Detection3DArray& det3d_msg,
                      const sensor_msgs::msg::Image& img_msg);
+  using AddObservations = semantic_scene_forests_object_msgs::srv::AddObservations;
+
+  // A request waiting until all its observations are decided. Its tracklets join every global
+  // cycle until then; their links follow merges and end when a label check removes the track.
+  struct PendingObservations
+  {
+    std::shared_ptr<rmw_request_id_t> header;
+    std::vector<std::optional<uint64_t>> local_ids; // nullopt: rejected before fusion
+    std::vector<std::string> errors;
+    std::vector<Tracklet> tracklets;
+    std::optional<uint64_t> first_new_id; // nextId() before the cycle that fused them
+  };
+
+  void onAddObservations(const std::shared_ptr<rmw_request_id_t>& header,
+                         const std::shared_ptr<AddObservations::Request>& request);
+  // Answers the requests whose tracks are all published or removed.
+  void answerObservations(uint64_t first_new_id);
   void onGlobalCycle();
   void publishSnapshot();
   void onHealthDiagnostic(diagnostic_updater::DiagnosticStatusWrapper& stat);
@@ -122,10 +143,13 @@ private:
     m_candidates_pub;
   rclcpp::CallbackGroup::SharedPtr m_global_group;
   rclcpp::TimerBase::SharedPtr m_global_timer;
+  rclcpp::Service<AddObservations>::SharedPtr m_add_observations_srv; // in m_global_group
 
   // Global state: only touched from m_global_group (and the constructor).
   std::unique_ptr<GlobalTracker> m_global;
   std::unique_ptr<ArbiterWorker> m_arbiter;
+  std::vector<PendingObservations> m_manual_pending;
+  uint64_t m_manual_next_id{1};
   // Labels rejected by the arbiter, published by the global cycle to the camera callbacks.
   std::atomic<std::shared_ptr<const std::set<std::string>>> m_rejected_labels{
     std::make_shared<const std::set<std::string>>()};

@@ -100,6 +100,37 @@ TEST_F(GlobalTrackerTest, TwoCamerasSeeingOneObjectShareOneGlobalId)
   EXPECT_EQ(global.stats(params).links, 2u);
 }
 
+TEST_F(GlobalTrackerTest, OneCycleTrackletReportsItsLinkAndLeavesAPersistentTrack)
+{
+  cycle({tracklet("front", 1, 10, 0.0)});
+  const auto NEXT = global.nextId();
+  cycle({tracklet("<manual>", 1, 11, 0.05), tracklet("<manual>", 2, 11, 5.0)});
+  EXPECT_EQ(global.linkedTrack("<manual>", 1), 1u); // joined the camera's track
+  EXPECT_EQ(global.linkedTrack("<manual>", 2), NEXT);
+  EXPECT_EQ(global.nextId(), NEXT + 1);
+  cycle({}); // The manual tracklets are not reposted: links end, tracks stay.
+  EXPECT_FALSE(global.linkedTrack("<manual>", 2));
+  EXPECT_EQ(global.tracks().size(), 2u);
+  EXPECT_FALSE(global.isHeld(NEXT));
+}
+
+TEST_F(GlobalTrackerTest, RepostedTrackletFollowsItsHeldTrackUntilTheLabelCheck)
+{
+  const std::vector<Tracklet> MANUAL{tracklet("<manual>", 1, 10, 0.0, "cup"),
+                                     tracklet("<manual>", 2, 10, 5.0, "mug")};
+  EXPECT_EQ(cycle(MANUAL, {}, true).size(), 2u);
+  EXPECT_TRUE(cycle(MANUAL, {}, true).empty()); // Reposting asks nothing new.
+  ASSERT_EQ(global.tracks().size(), 2u);
+  EXPECT_TRUE(global.isHeld(1));
+  EXPECT_EQ(global.linkedTrack("<manual>", 2), 2u);
+  cycle(MANUAL, {labelCheck(1, 0.95), labelCheck(2, 0.05)}, true);
+  EXPECT_EQ(global.linkedTrack("<manual>", 1), 1u);
+  EXPECT_FALSE(global.isHeld(1));
+  EXPECT_FALSE(global.linkedTrack("<manual>", 2)); // Rejected: the link ends ...
+  cycle(MANUAL, {}, true);
+  EXPECT_EQ(global.tracks().size(), 1u); // ... and the reposted tracklet starts no new track.
+}
+
 TEST_F(GlobalTrackerTest, RevisitWithin60sRelinksTheSameId)
 {
   cycle({tracklet("front", 1, 10, 0.0)});

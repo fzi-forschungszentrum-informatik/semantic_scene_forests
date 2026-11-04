@@ -56,6 +56,7 @@
 
 #include "semantic_scene_forests_object_manager/object_manager_node.hpp"
 #include "semantic_scene_forests_object_msgs/msg/object_candidate_array.hpp"
+#include "semantic_scene_forests_object_msgs/srv/add_observations.hpp"
 #include "semantic_scene_forests_object_msgs/srv/get_object_visuals.hpp"
 #include "semantic_scene_forests_object_msgs/srv/get_objects.hpp"
 #include "semantic_scene_forests_object_tracker/object_tracker_component.hpp"
@@ -72,6 +73,7 @@ using ObjectCandidate      = semantic_scene_forests_object_msgs::msg::ObjectCand
 using ObjectCandidateArray = semantic_scene_forests_object_msgs::msg::ObjectCandidateArray;
 using GetObjectVisuals     = semantic_scene_forests_object_msgs::srv::GetObjectVisuals;
 using GetObjects           = semantic_scene_forests_object_msgs::srv::GetObjects;
+using AddObservations      = semantic_scene_forests_object_msgs::srv::AddObservations;
 
 rclcpp::NodeOptions twoCameraOptions()
 {
@@ -290,6 +292,8 @@ public:
       m_get_visuals = m_source_node->create_client<GetObjectVisuals>("get_object_visuals");
     }
 
+    m_add_observations = m_source_node->create_client<AddObservations>("add_observations");
+
     m_executor.add_node(m_source_node);
     m_executor.add_node(m_tracker);
     if (m_manager)
@@ -330,10 +334,10 @@ public:
         const bool FRONT_READY = m_front->detections_2d->get_subscription_count() > 0 &&
                                  m_front->detections_3d->get_subscription_count() > 0 &&
                                  m_front->image->get_subscription_count() > 0;
-        const bool REAR_READY  = !m_rear || (m_rear->detections_2d->get_subscription_count() > 0 &&
-                                             m_rear->detections_3d->get_subscription_count() > 0 &&
-                                             m_rear->image->get_subscription_count() > 0);
-        const bool TF_READY    = m_tf_buffer->canTransform(
+        const bool REAR_READY = !m_rear || (m_rear->detections_2d->get_subscription_count() > 0 &&
+                                            m_rear->detections_3d->get_subscription_count() > 0 &&
+                                            m_rear->image->get_subscription_count() > 0);
+        const bool TF_READY   = m_tf_buffer->canTransform(
           "map", m_front->frame_id, tf2::TimePointZero, tf2::durationFromSec(0.0));
         const bool REAR_TF_READY =
           !m_rear || m_tf_buffer->canTransform(
@@ -415,6 +419,23 @@ public:
     return *future.get();
   }
 
+  std::optional<AddObservations::Response>
+  addObservations(std::vector<ObjectCandidate> observations) const
+  {
+    if (!m_add_observations->wait_for_service(2s))
+    {
+      return std::nullopt;
+    }
+    auto request          = std::make_shared<AddObservations::Request>();
+    request->observations = std::move(observations);
+    auto future           = m_add_observations->async_send_request(request);
+    if (!waitUntil([&future]() { return future.wait_for(0s) == std::future_status::ready; }, 2s))
+    {
+      return std::nullopt;
+    }
+    return *future.get();
+  }
+
   std::optional<GetObjectVisuals::Response> getVisuals(const std::vector<int64_t>& ids) const
   {
     auto request        = std::make_shared<GetObjectVisuals::Request>();
@@ -452,6 +473,7 @@ private:
   rclcpp::Subscription<ObjectCandidateArray>::SharedPtr m_candidates_sub;
   rclcpp::Client<GetObjects>::SharedPtr m_get_objects;
   rclcpp::Client<GetObjectVisuals>::SharedPtr m_get_visuals;
+  rclcpp::Client<AddObservations>::SharedPtr m_add_observations;
   std::shared_ptr<tf2_ros::Buffer> m_tf_buffer;
   std::unique_ptr<tf2_ros::TransformListener> m_tf_listener;
   std::unique_ptr<tf2_ros::StaticTransformBroadcaster> m_tf_broadcaster;
@@ -803,6 +825,68 @@ TEST(TrackedObject, ObservationTimeNeverMovesBackwards)
   object.mergeFrom(newer);
   EXPECT_EQ(object.last_seen, NEWER_TIME);
   EXPECT_EQ(rclcpp::Time(object.toDetection3D().header.stamp), NEWER_TIME);
+}
+
+ObjectCandidate
+observation(const std::string& class_name, const std::string& frame_id, double x, double size)
+{
+  ObjectCandidate observation;
+  observation.class_name                          = class_name;
+  observation.detection.header.frame_id           = frame_id;
+  observation.detection.bbox.center.position.x    = x;
+  observation.detection.bbox.center.orientation.w = 1.0;
+  observation.detection.bbox.size.x               = size;
+  observation.detection.bbox.size.y               = size;
+  observation.detection.bbox.size.z               = size;
+  observation.image_crops.push_back(makeImage(rclcpp::Time(1, 0), "manual", 99));
+  return observation;
+}
+
+TEST(MultiCameraTracker, ManualObservationsJoinTracksOrStartPersistentOnes)
+{
+  TrackerHarness harness;
+  ASSERT_TRUE(harness.ready());
+  publishBatches(harness.front(), 3.0, 3, "1", 4.0, 30); // A cup at map x = 5.
+  ASSERT_TRUE(harness.waitForCandidates(1));
+  const int64_t CAMERA_ID = harness.candidates().front().id;
+
+  auto negative_stamp = observation("cup", "map", 40.0, 0.5);
+  negative_stamp.detection.header.stamp.sec = -1;
+  const auto RESPONSE                       = harness.addObservations({
+    observation("cup", "front_frame", 4.1, 0.9), // the camera's cup, seen by someone else
+    observation("cup", "map", 20.0, 0.5), // something no camera saw
+    observation("", "map", 0.0, 0.5),
+    observation("cup", "nowhere", 0.0, 0.5),
+    observation("cup", "map", 30.0, 0.0), // no size
+    negative_stamp,
+  });
+  ASSERT_TRUE(RESPONSE);
+  EXPECT_FALSE(RESPONSE->success);
+  ASSERT_EQ(RESPONSE->object_ids.size(), 6U);
+  EXPECT_EQ(RESPONSE->object_ids[0], CAMERA_ID);
+  EXPECT_FALSE(RESPONSE->created[0]);
+  const int64_t MANUAL_ID = RESPONSE->object_ids[1];
+  EXPECT_NE(MANUAL_ID, 0);
+  EXPECT_NE(MANUAL_ID, CAMERA_ID);
+  EXPECT_TRUE(RESPONSE->created[1]);
+  ASSERT_EQ(RESPONSE->class_names.size(), 6U);
+  EXPECT_EQ(RESPONSE->class_names[1], "cup");
+  EXPECT_EQ(RESPONSE->class_names[2], "");
+  EXPECT_EQ(RESPONSE->object_ids[2], 0);
+  EXPECT_EQ(RESPONSE->object_ids[3], 0);
+  EXPECT_EQ(RESPONSE->object_ids[4], 0);
+  EXPECT_EQ(RESPONSE->object_ids[5], 0);
+  EXPECT_NE(RESPONSE->message.find("empty class_name"), std::string::npos);
+  EXPECT_NE(RESPONSE->message.find("negative detection timestamp"), std::string::npos);
+
+  // The manual track outlives its one-cycle tracklet and carries the observation's crop.
+  std::this_thread::sleep_for(100ms); // ~10 global cycles at 100 Hz
+  const auto LATEST = harness.latestCandidates();
+  const auto MANUAL = std::ranges::find(LATEST, MANUAL_ID, &ObjectCandidate::id);
+  ASSERT_NE(MANUAL, LATEST.end());
+  EXPECT_DOUBLE_EQ(MANUAL->detection.bbox.center.position.x, 20.0);
+  EXPECT_TRUE(containsCrop(*MANUAL, 99, "manual"));
+  EXPECT_NE(std::ranges::find(LATEST, CAMERA_ID, &ObjectCandidate::id), LATEST.end());
 }
 
 TEST(MultiCameraTracker, ManagerKeepsSharedGlobalIdsAndVisuals)

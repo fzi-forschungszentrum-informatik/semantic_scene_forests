@@ -512,6 +512,13 @@ std::vector<ArbiterRequest> GlobalTracker::cycle(const std::vector<Tracklet>& tr
   return requests;
 }
 
+std::optional<uint64_t> GlobalTracker::linkedTrack(const std::string& camera,
+                                                   uint64_t local_id) const
+{
+  const auto IT = m_links.find(LinkKey{camera, local_id});
+  return IT == m_links.end() ? std::nullopt : std::optional<uint64_t>{IT->second.global_id};
+}
+
 GlobalTracker::Stats GlobalTracker::stats(const object_tracker::Params& params) const
 {
   Stats stats{.tracks           = m_tracks.size(),
