@@ -76,7 +76,7 @@ struct ArbiterResult
   // Label check: min(p(label correct), p(physical object, not a room)); nullopt on error.
   std::optional<double> same_probability;
   std::optional<double> object_probability; // label check only: p(physical object, not a room)
-  std::string label;                      // chosen label, empty if none/invalid
+  std::string label;                        // chosen label, empty if none/invalid
   std::string error;
 };
 

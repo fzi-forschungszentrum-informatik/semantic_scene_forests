@@ -319,9 +319,9 @@ void SceneGraphDisplay::updateObjectNodes(
     return;
   }
 
-  const auto COLOR       = m_object_color_property->getOgreColor();
-  const float SCALE      = m_object_scale_property->getFloat();
-  const bool SHOW_LABELS = m_show_labels_property->getBool();
+  const auto COLOR         = m_object_color_property->getOgreColor();
+  const float SCALE        = m_object_scale_property->getFloat();
+  const bool SHOW_LABELS   = m_show_labels_property->getBool();
   const double STALE_AFTER = m_stale_after_property->getFloat();
   const rclcpp::Time NOW   = ros_node->now();
 
@@ -402,8 +402,8 @@ void SceneGraphDisplay::updateObjectNodes(
       rviz_rendering::Shape::Cube, scene_manager_, m_object_nodes_node);
     shape->setPosition(WORLD_POS);
     shape->setScale(BBOX_SCALE);
-    const auto AGE        = ageSeconds(obj, NOW);
-    auto object_color     = COLOR;
+    const auto AGE    = ageSeconds(obj, NOW);
+    auto object_color = COLOR;
     if (AGE && *AGE > STALE_AFTER)
     {
       object_color.a = STALE_ALPHA;

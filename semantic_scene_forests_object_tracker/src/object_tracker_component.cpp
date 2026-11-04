@@ -344,17 +344,16 @@ void ObjectTrackerComponent::answerObservations(uint64_t first_new_id)
     for (size_t i = 0; i < ids.size(); ++i)
     {
       const auto& tracks = m_global->tracks();
-      const auto TRACK   = ids[i] ? std::ranges::find_if(tracks,
-                                                       [id = *ids[i]](const auto& track) {
-                                                         return track->track_id == id;
-                                                       })
-                                  : tracks.end();
+      const auto TRACK =
+        ids[i] ? std::ranges::find_if(
+                   tracks, [id = *ids[i]](const auto& track) { return track->track_id == id; })
+               : tracks.end();
       if (TRACK == tracks.end())
       {
         const auto& error = !pending.errors[i].empty() ? pending.errors[i]
-                            : m_arbiter               ? "rejected by the tracker's label check"
-                                                      : "rejected by the global tracker";
-        response.success = false;
+                            : m_arbiter                ? "rejected by the tracker's label check"
+                                                       : "rejected by the global tracker";
+        response.success  = false;
         response.message += "observation " + std::to_string(i) + ": " + error + "; ";
         response.object_ids.push_back(0);
         response.class_names.emplace_back();

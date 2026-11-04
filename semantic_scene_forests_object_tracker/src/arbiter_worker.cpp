@@ -241,20 +241,20 @@ ArbiterResult ArbiterWorker::decide(const DecideFn& decide,
   if (request.label_check)
   {
     decision.questions.emplace_back(oai::PredicateQuestion{
-      .name         = "label_correct",
-      .instructions = "An object detector labeled this object '" + request.a_label +
-                      "'. Do the image crops show a real " + request.a_label +
-                      "? Detector labels are often wrong or describe the scene instead of an "
-                      "object.",
+      .name           = "label_correct",
+      .instructions   = "An object detector labeled this object '" + request.a_label +
+                        "'. Do the image crops show a real " + request.a_label +
+                        "? Detector labels are often wrong or describe the scene instead of an "
+                        "object.",
       .true_criteria  = "The crops show a " + request.a_label + ".",
       .false_criteria = "The crops show something else, or no real object."});
     // YOLOE often labels whole scenes with room categories ("kitchen", "office").
     decision.questions.emplace_back(oai::PredicateQuestion{
       .name           = "physical_object",
       .instructions   = "Is '" + request.a_label +
-                      "' a single physical object (furniture, appliance, device, item), as "
-                      "opposed to a room, area or scene category such as kitchen, office, "
-                      "hallway, corridor, floor or wall?",
+                        "' a single physical object (furniture, appliance, device, item), as "
+                        "opposed to a room, area or scene category such as kitchen, office, "
+                        "hallway, corridor, floor or wall?",
       .true_criteria  = "It is a discrete physical object that could be picked up, moved or "
                         "used.",
       .false_criteria = "It is a room, area, scene or building part."});

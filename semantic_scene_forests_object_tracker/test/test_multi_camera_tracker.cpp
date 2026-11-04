@@ -334,10 +334,10 @@ public:
         const bool FRONT_READY = m_front->detections_2d->get_subscription_count() > 0 &&
                                  m_front->detections_3d->get_subscription_count() > 0 &&
                                  m_front->image->get_subscription_count() > 0;
-        const bool REAR_READY = !m_rear || (m_rear->detections_2d->get_subscription_count() > 0 &&
-                                            m_rear->detections_3d->get_subscription_count() > 0 &&
-                                            m_rear->image->get_subscription_count() > 0);
-        const bool TF_READY   = m_tf_buffer->canTransform(
+        const bool REAR_READY  = !m_rear || (m_rear->detections_2d->get_subscription_count() > 0 &&
+                                             m_rear->detections_3d->get_subscription_count() > 0 &&
+                                             m_rear->image->get_subscription_count() > 0);
+        const bool TF_READY    = m_tf_buffer->canTransform(
           "map", m_front->frame_id, tf2::TimePointZero, tf2::durationFromSec(0.0));
         const bool REAR_TF_READY =
           !m_rear || m_tf_buffer->canTransform(
@@ -850,11 +850,11 @@ TEST(MultiCameraTracker, ManualObservationsJoinTracksOrStartPersistentOnes)
   ASSERT_TRUE(harness.waitForCandidates(1));
   const int64_t CAMERA_ID = harness.candidates().front().id;
 
-  auto negative_stamp = observation("cup", "map", 40.0, 0.5);
+  auto negative_stamp                       = observation("cup", "map", 40.0, 0.5);
   negative_stamp.detection.header.stamp.sec = -1;
   const auto RESPONSE                       = harness.addObservations({
     observation("cup", "front_frame", 4.1, 0.9), // the camera's cup, seen by someone else
-    observation("cup", "map", 20.0, 0.5), // something no camera saw
+    observation("cup", "map", 20.0, 0.5),        // something no camera saw
     observation("", "map", 0.0, 0.5),
     observation("cup", "nowhere", 0.0, 0.5),
     observation("cup", "map", 30.0, 0.0), // no size

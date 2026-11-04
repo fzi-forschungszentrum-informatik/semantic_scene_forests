@@ -914,7 +914,7 @@ SceneGraphGenerationNode::snapshotState()
   }
 
   StateSnapshot state;
-  state.graph    = std::move(*snapshot);
+  state.graph = std::move(*snapshot);
   state.objects.reserve(m_cached_objects.size());
   for (const auto& [id, object] : m_cached_objects)
   {
