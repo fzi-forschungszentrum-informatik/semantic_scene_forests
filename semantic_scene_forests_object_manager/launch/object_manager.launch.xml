@@ -51,8 +51,8 @@
          description="Topic name for 3D detections"/>
     <arg name="camera_image_topic" default="camera/image"
          description="Topic name for camera images"/>
-    <arg name="object_candidates_topic" default="object_candidates"
-         description="Topic name for tracked object candidates output"/>
+    <arg name="object_candidate_snapshots_topic" default="object_candidate_snapshots"
+         description="Topic name for authoritative tracked object snapshots"/>
 
     <!-- Shared frame ID used by both tracker and manager. Overrides the value in the
          parameter files so deployment-time wiring stays in the launch file. -->
@@ -77,7 +77,7 @@
             <remap from="detections_2d" to="$(var detections_2d_topic)"/>
             <remap from="detections_3d" to="$(var detections_3d_topic)"/>
             <remap from="camera/image" to="$(var camera_image_topic)"/>
-            <remap from="object_candidates" to="$(var object_candidates_topic)"/>
+            <remap from="object_candidate_snapshots" to="$(var object_candidate_snapshots_topic)"/>
             <param from="$(var tracker_config_file)"/>
             <param name="world_frame" value="$(var scene_graph_frame)"/>
             <param name="use_sim_time" value="$(var use_sim_time)"/>
@@ -88,7 +88,7 @@
         <composable_node pkg="semantic_scene_forests_object_manager"
                          plugin="semantic_scene_forests_object_manager::ObjectManagerNode"
                          name="object_manager">
-            <remap from="object_candidates" to="$(var object_candidates_topic)"/>
+            <remap from="object_candidate_snapshots" to="$(var object_candidate_snapshots_topic)"/>
             <remap from="managed_objects" to="$(var managed_objects_topic)"/>
             <param from="$(var manager_config_file)"/>
             <param name="frame_id" value="$(var scene_graph_frame)"/>

@@ -28,101 +28,62 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
-#include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
 #include <vector>
 
-#include <cv_bridge/cv_bridge.hpp>
 #include <diagnostic_updater/diagnostic_updater.hpp>
 #include <diagnostic_updater/publisher.hpp>
 #include <message_filters/subscriber.hpp>
-#include <message_filters/sync_policies/approximate_time.hpp>
+#include <message_filters/sync_policies/exact_time.hpp>
 #include <message_filters/synchronizer.hpp>
-#include <opencv2/core.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_components/register_node_macro.hpp>
-#include <semantic_scene_forests_object_msgs/msg/object_candidate.hpp>
+#include <semantic_scene_forests_object_msgs/msg/object_candidate_array.hpp>
+#include <semantic_scene_forests_object_msgs/srv/add_observations.hpp>
 #include <semantic_scene_forests_utils/diagnostic_utils.hpp>
 #include <sensor_msgs/msg/image.hpp>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2_ros/buffer.hpp>
 #include <tf2_ros/transform_listener.hpp>
 #include <vision_msgs/msg/detection2_d_array.hpp>
 #include <vision_msgs/msg/detection3_d_array.hpp>
 
-#include "semantic_scene_forests_object_tracker/tracked_object.hpp"
 #include <semantic_scene_forests_object_tracker/object_tracker_parameters.hpp>
 
 namespace semantic_scene_forests_object_tracker {
 
-struct CombinedDetection
-{
-  const vision_msgs::msg::Detection2D* det2d = nullptr;
-  const vision_msgs::msg::Detection3D* det3d = nullptr;
+class ArbiterWorker;
+class CameraTracker;
+class GlobalTracker;
+struct Tracklet;
 
-  [[nodiscard]] std::string className() const
-  {
-    if (det2d && !det2d->results.empty())
-    {
-      return det2d->results[0].hypothesis.class_id;
-    }
-    if (det3d && !det3d->results.empty())
-    {
-      return det3d->results[0].hypothesis.class_id;
-    }
-    return "";
-  }
-
-  [[nodiscard]] double score() const
-  {
-    if (det2d && !det2d->results.empty())
-    {
-      return det2d->results[0].hypothesis.score;
-    }
-    if (det3d && !det3d->results.empty())
-    {
-      return det3d->results[0].hypothesis.score;
-    }
-    return 0.0;
-  }
-
-  [[nodiscard]] const vision_msgs::msg::BoundingBox2D& bbox2D() const { return det2d->bbox; }
-
-  [[nodiscard]] const vision_msgs::msg::BoundingBox3D& bbox3D() const { return det3d->bbox; }
-
-  [[nodiscard]] std::string id() const
-  {
-    if (det2d && !det2d->id.empty())
-    {
-      return det2d->id;
-    }
-    if (det3d && !det3d->id.empty())
-    {
-      return det3d->id;
-    }
-    return "";
-  }
-};
-
+// Two-level tracker. Each camera runs in its own callback group: exactly synchronized
+// (2D, 3D, image) frames feed a CameraTracker whose confirmed tracks are posted to the
+// camera's mailbox. A global timer (own callback group) reconciles all mailboxes into
+// global tracks, talks to the arbiter worker and publishes the snapshot. Sightings from other
+// sources (add_observations) join the next global cycle as one-cycle tracklets.
 class ObjectTrackerComponent : public rclcpp::Node
 {
 public:
   explicit ObjectTrackerComponent(const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
+  ~ObjectTrackerComponent() override;
 
 private:
   using SyncPolicyVision =
-    message_filters::sync_policies::ApproximateTime<vision_msgs::msg::Detection2DArray,
-                                                    vision_msgs::msg::Detection3DArray,
-                                                    sensor_msgs::msg::Image>;
+    message_filters::sync_policies::ExactTime<vision_msgs::msg::Detection2DArray,
+                                              vision_msgs::msg::Detection3DArray,
+                                              sensor_msgs::msg::Image>;
   using SynchronizerVision = message_filters::Synchronizer<SyncPolicyVision>;
 
   struct CameraInput
   {
-    CameraInput(ObjectTrackerComponent& owner, std::string name);
+    CameraInput(ObjectTrackerComponent& owner, std::string name, int rotation);
+    ~CameraInput();
 
     void onSynchronized(const vision_msgs::msg::Detection2DArray::ConstSharedPtr& det2d_msg,
                         const vision_msgs::msg::Detection3DArray::ConstSharedPtr& det3d_msg,
@@ -130,53 +91,86 @@ private:
 
     ObjectTrackerComponent& owner;
     std::string name;
+    rclcpp::CallbackGroup::SharedPtr group;
+    std::unique_ptr<CameraTracker> tracker; // only touched from `group`
     message_filters::Subscriber<vision_msgs::msg::Detection2DArray> det2d_sub;
     message_filters::Subscriber<vision_msgs::msg::Detection3DArray> det3d_sub;
     message_filters::Subscriber<sensor_msgs::msg::Image> img_sub;
-    std::optional<double> last_update_time;
-    size_t rejected_timestamps{0};
-    semantic_scene_forests_utils::ErrorCounter tf_errors;
     std::unique_ptr<diagnostic_updater::HeaderlessTopicDiagnostic> frequency;
     std::unique_ptr<SynchronizerVision> synchronizer;
+
+    // Mailbox and stats, shared with the global cycle and diagnostics.
+    std::mutex mutex;
+    std::vector<Tracklet> tracklets; // latest confirmed tracks
+    size_t local_tracks{0};
+    size_t rejected_timestamps{0};
+    size_t bad_images{0};
+    size_t crop_errors{0};
+    semantic_scene_forests_utils::ErrorCounter tf_errors;
   };
 
-  void syncedCallbackVision(CameraInput& camera,
-                            const vision_msgs::msg::Detection2DArray::ConstSharedPtr& det2d_msg,
-                            const vision_msgs::msg::Detection3DArray::ConstSharedPtr& det3d_msg,
-                            const sensor_msgs::msg::Image::ConstSharedPtr& img_msg);
+  void onCameraFrame(CameraInput& camera,
+                     const vision_msgs::msg::Detection2DArray& det2d_msg,
+                     const vision_msgs::msg::Detection3DArray& det3d_msg,
+                     const sensor_msgs::msg::Image& img_msg);
+  using AddObservations = semantic_scene_forests_object_msgs::srv::AddObservations;
 
-  static std::map<std::string, CombinedDetection>
-  associateById(const vision_msgs::msg::Detection2DArray& det2d_msg,
-                const vision_msgs::msg::Detection3DArray& det3d_msg);
+  // A request waiting until all its observations are decided. Its tracklets join every global
+  // cycle until then; their links follow merges and end when a label check removes the track.
+  struct PendingObservations
+  {
+    std::shared_ptr<rmw_request_id_t> header;
+    std::vector<std::optional<uint64_t>> local_ids; // nullopt: rejected before fusion
+    std::vector<std::string> errors;
+    std::vector<Tracklet> tracklets;
+    std::optional<uint64_t> first_new_id; // nextId() before the cycle that fused them
+  };
 
-  static bool has3dBbox(const vision_msgs::msg::Detection3D& det);
-  void mergeOverlappingTracks();
-  std::optional<sensor_msgs::msg::Image>
-  cropImagePatch(const cv::Mat& image, const vision_msgs::msg::BoundingBox2D& bbox, int padding);
-
+  void onAddObservations(const std::shared_ptr<rmw_request_id_t>& header,
+                         const std::shared_ptr<AddObservations::Request>& request);
+  // Answers the requests whose tracks are all published or removed.
+  void answerObservations(uint64_t first_new_id);
+  void onGlobalCycle();
+  void publishSnapshot();
   void onHealthDiagnostic(diagnostic_updater::DiagnosticStatusWrapper& stat);
 
-  rclcpp::Publisher<semantic_scene_forests_object_msgs::msg::ObjectCandidate>::SharedPtr
-    m_candidates_pub;
-
-  std::vector<std::unique_ptr<TrackedObject>> m_tracked_objects;
-  std::optional<double> m_last_update_time;
-  uint64_t m_next_track_id{1};
-
   std::shared_ptr<object_tracker::ParamListener> m_param_listener;
-  object_tracker::Params m_params;
-
+  std::string m_world_frame;
   tf2_ros::Buffer m_tf_buffer;
   tf2_ros::TransformListener m_tf_listener;
-  std::string m_world_frame;
 
-  // ── Diagnostics ────────────────────────────────────────────────────────
-  // Topic freshness uses the built-in frequency monitor; only failure counters
-  // are tracked by hand.
+  rclcpp::Publisher<semantic_scene_forests_object_msgs::msg::ObjectCandidateArray>::SharedPtr
+    m_candidates_pub;
+  rclcpp::CallbackGroup::SharedPtr m_global_group;
+  rclcpp::TimerBase::SharedPtr m_global_timer;
+  rclcpp::Service<AddObservations>::SharedPtr m_add_observations_srv; // in m_global_group
+
+  // Global state: only touched from m_global_group (and the constructor).
+  std::unique_ptr<GlobalTracker> m_global;
+  std::unique_ptr<ArbiterWorker> m_arbiter;
+  std::vector<PendingObservations> m_manual_pending;
+  uint64_t m_manual_next_id{1};
+  // Labels rejected by the arbiter, published by the global cycle to the camera callbacks.
+  std::atomic<std::shared_ptr<const std::set<std::string>>> m_rejected_labels{
+    std::make_shared<const std::set<std::string>>()};
+
+  // Snapshot of global stats for diagnostics.
+  std::mutex m_stats_mutex;
+  size_t m_global_tracks{0};
+  size_t m_stale_tracks{0};
+  size_t m_links{0};
+  size_t m_decisions{0};
+  size_t m_merges{0};
+  size_t m_replacements{0};
+  size_t m_held_tracks{0};
+  size_t m_label_rejections{0};
+  size_t m_decision_errors{0};
+  size_t m_arbiter_pending{0};
+  std::string m_last_decision_error;
+
   diagnostic_updater::Updater m_diagnostic_updater;
-  double m_min_freq{0.5};
+  double m_min_freq{0.1};
   double m_max_freq{1000.0};
-  semantic_scene_forests_utils::ErrorCounter m_crop_errors;
   // Inputs and their diagnostics must be destroyed before the updater they reference.
   std::vector<std::unique_ptr<CameraInput>> m_cameras;
 };

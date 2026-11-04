@@ -104,6 +104,7 @@ private:
   // ── Parameters ──────────────────────────────────────────────────────────
   std::shared_ptr<ParamListener> m_param_listener;
   Params m_params;
+  nlohmann::json m_extra_body; // parsed once from the read-only extra_body parameter
 
   // ── Prompt templates ────────────────────────────────────────────────────
   TemplateMap m_templates;
@@ -113,10 +114,8 @@ private:
   std::optional<SceneGraphMsg> m_last_graph;
   mutable std::mutex m_objects_mutex;
   std::unordered_map<int64_t, ManagedObject> m_cached_objects;
-  // Whether an authoritative managed-object snapshot has arrived, and the
-  // membership epoch which changes whenever the active object-id set changes.
+  // Whether an authoritative managed-object snapshot has arrived.
   bool m_objects_received{false};
-  std::uint64_t m_objects_epoch{0};
 
   // ── Action workers ──────────────────────────────────────────────────────
   // One in-flight jthread per action type: a new goal of the same type is
@@ -153,12 +152,11 @@ private:
 
   // ── Shared helpers ──────────────────────────────────────────────────────--
   // Immutable scene state captured for one agent run: the sanitized graph, the
-  // object ids present in it, and the membership epoch at capture time.
+  // object ids present in it.
   struct SceneSnapshot
   {
     std::unique_ptr<fzi::semantic_scene_forests::SceneGraph> graph;
     std::unordered_set<int64_t> object_ids;
-    std::uint64_t epoch{0};
   };
 
   // Build an independent SceneGraph snapshot from the latest received message.
@@ -191,10 +189,9 @@ private:
   {
     std::string text;
     std::vector<int64_t> expanded;
-    // Object ids present in the captured snapshot (post-sanitization) and the
-    // membership epoch at capture time; used to reject fabricated or stale answers.
+    // Object ids present in the captured snapshot (post-sanitization); used to
+    // reject fabricated answers.
     std::unordered_set<int64_t> snapshot_object_ids;
-    std::uint64_t membership_epoch{0};
   };
 
   // Shared agent driver for both actions: snapshot the graph, build the session
@@ -215,7 +212,7 @@ private:
   void guardedTerminal(const std::function<void()>& terminal);
 
   // Strictly validate the model's FindObject answer against the captured
-  // snapshot and the current membership epoch. Returns the terminal result on
+  // snapshot and the current active objects. Returns the terminal result on
   // success, or the abort reason when the answer is malformed, fabricated or
   // stale.
   [[nodiscard]] std::expected<FindObjectAction::Result::SharedPtr, std::string>

@@ -54,19 +54,33 @@ object_tracker:
       image_topic:
         type: string
         default_value: "camera/image"
-        description: "Image synchronized with this camera's detections."
+        description: "Image synchronized with this camera's detections (identical stamps)."
         read_only: true
         validation:
           not_empty<>: []
+      image_rotation:
+        type: int
+        default_value: 0
+        description: "Clockwise rotation (deg) applied to this camera's image and 2D boxes so crops are upright. 3D boxes are unaffected."
+        read_only: true
+        validation:
+          one_of<>: [[0, 90, 180, 270]]
   world_frame:
     type: string
     default_value: "map"
     description: "Target coordinate frame for all tracked 3D bounding boxes."
     read_only: true
+  sync_queue_size:
+    type: int
+    default_value: 100
+    description: "Exact-time sync queue per input. Must hold the images that arrive while the detector works on a frame (about 10 s at 10 Hz)."
+    read_only: true
+    validation:
+      gt<>: [0]
   max_trackable_objects:
     type: int
     default_value: 1000
-    description: "Maximum number of objects that can be tracked."
+    description: "Maximum tentative and confirmed tracks per camera."
     read_only: true
     validation:
       gt<>: [0]
@@ -88,6 +102,37 @@ object_tracker:
     description: "Minimum detection confidence score to accept a detection."
     validation:
       bounds<>: [0.0, 1.0]
+  local_track_timeout:
+    type: double
+    default_value: 5.0
+    description: "A camera's confirmed track ends this many seconds after its last observation; identity across revisits lives in the global tracks."
+    validation:
+      gt<>: [0.0]
+  stale_timeout:
+    type: double
+    default_value: 60.0
+    description: "A global track is stale after this many seconds unseen; a new track at its pose then reactivates or replaces it."
+    validation:
+      gt<>: [0.0]
+  max_association_distance:
+    type: double
+    default_value: 0.5
+    description: "Hard center-distance association limit in meters, in addition to Mahalanobis gating."
+    validation:
+      gt<>: [0.0]
+  replacement_overlap_threshold:
+    type: double
+    default_value: 0.5
+    description: "Fraction of a stale global track's box that a differently sized track must cover to replace it."
+    validation:
+      bounds<>: [0.0, 1.0]
+  bbox_size_alpha:
+    type: double
+    default_value: 0.2
+    description: "Measurement weight in world-AABB dimension filtering."
+    validation:
+      gt<>: [0.0]
+      lt_eq<>: [1.0]
   measurement_noise_std:
     type: double
     default_value: 0.4
@@ -112,12 +157,18 @@ object_tracker:
     description: "Seconds after last observation before an unconfirmed track is deleted."
     validation:
       gt<>: [0.0]
-  merge_iou_threshold:
+  merge_overlap_threshold:
     type: double
-    default_value: 0.6
-    description: "Minimum 3D bbox IoU to merge overlapping confirmed tracks of the same class."
+    default_value: 0.5
+    description: "Minimum intersection over the smaller box volume for two similar-sized tracks (or same-frame detections) to be one object."
     validation:
       bounds<>: [0.0, 1.0]
+  overlap_min_extent:
+    type: double
+    default_value: 0.1
+    description: "Box extents are padded to this size (m) before computing overlaps; depth yields near-zero extents along the viewing ray."
+    validation:
+      gt<>: [0.0]
   class_whitelist:
     type: string_array
     default_value: []
@@ -137,3 +188,74 @@ object_tracker:
     description: "Maximum number of cropped image patches to store per tracked object."
     validation:
       gt<>: [0]
+  snapshot_rate_hz:
+    type: double
+    default_value: 5.0
+    description: "Rate of the global reconciliation cycle, which also publishes the snapshot."
+    read_only: true
+    validation:
+      gt<>: [0.0]
+  association_max_size_ratio:
+    type: double
+    default_value: 2.0
+    description: "Maximum ratio of the largest world-AABB dimensions for two boxes to count as a similar object (association, merge, reactivation)."
+    validation:
+      gt_eq<>: [1.0]
+  arbiter:
+    provider:
+      type: string
+      default_value: "openrouter"
+      description: "Decisions provider: openai (https://api.openai.com/v1, e.g. gpt-6-luna), openrouter (https://openrouter.ai/api/alpha, e.g. openai/gpt-6-luna-decisions) ollama (http://localhost:11434/v1, e.g. clef-flash) or vllm (http://localhost:8000/v1, e.g. vllm-sr/d3-nano)."
+      read_only: true
+      validation:
+        one_of<>: [["openai", "openrouter", "ollama", "vllm"]]
+    enabled:
+      type: bool
+      default_value: false
+      description: "Let the Decisions API decide label conflicts and partial overlaps between global tracks."
+      read_only: true
+    server_url:
+      type: string
+      default_value: "https://openrouter.ai/api/alpha"
+      description: "Decisions API base URL; must match the provider."
+      read_only: true
+    api_key:
+      type: string
+      default_value: ""
+      description: "API key; empty falls back to OPENAI_API_KEY / OPENROUTER_API_KEY. Required for openai and openrouter, not for ollama or vllm."
+      read_only: true
+    model:
+      type: string
+      default_value: "openai/gpt-6-luna-decisions"
+      description: "Decisions model."
+      read_only: true
+    extra_body:
+      type: string
+      default_value: ""
+      description: "JSON object merged into every Decisions request body, e.g. OpenRouter provider routing. Empty sends nothing extra."
+      read_only: true
+    request_timeout_seconds:
+      type: int
+      default_value: 60
+      description: "Maximum time allowed for one Decisions HTTP request."
+      read_only: true
+      validation:
+        gt<>: [0]
+    min_overlap:
+      type: double
+      default_value: 0.1
+      description: "Global tracks of similar size overlapping by more than this count as a geometric overlap (merge or arbiter)."
+      validation:
+        bounds<>: [0.0, 1.0]
+    label_probability:
+      type: double
+      default_value: 0.5
+      description: "Minimum probability that a new track's label is right; below it the track is removed as a false positive. If p(physical object) is also below it, the label is ignored for the rest of the session like a non-whitelisted class."
+      validation:
+        bounds<>: [0.0, 1.0]
+    same_object_probability:
+      type: double
+      default_value: 0.8
+      description: "Minimum same-object probability to merge an arbitrated pair."
+      validation:
+        bounds<>: [0.0, 1.0]

@@ -53,6 +53,8 @@ find_package(tf2 REQUIRED)
 find_package(diagnostic_msgs REQUIRED)
 find_package(diagnostic_updater REQUIRED)
 find_package(semantic_scene_forests_utils REQUIRED)
+find_package(oai_api REQUIRED)
+find_package(nlohmann_json REQUIRED)
 
 generate_parameter_library(object_tracker_parameters
   src/object_tracker_parameters.yaml
@@ -61,6 +63,10 @@ generate_parameter_library(object_tracker_parameters
 # Tracker component library
 add_library(object_tracker_component SHARED
   src/object_tracker_component.cpp
+  src/arbiter_worker.cpp
+  src/camera_tracker.cpp
+  src/global_tracker.cpp
+  src/image_rotation.cpp
   src/tracked_object.cpp
   src/tracker_geometry.cpp
 )
@@ -68,7 +74,7 @@ target_include_directories(object_tracker_component PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
-target_compile_features(object_tracker_component PUBLIC cxx_std_20)
+target_compile_features(object_tracker_component PUBLIC cxx_std_23)
 target_link_libraries(object_tracker_component PUBLIC
   ${geometry_msgs_TARGETS}
   ${semantic_scene_forests_msgs_TARGETS}
@@ -90,6 +96,8 @@ target_link_libraries(object_tracker_component PUBLIC
   tf2_ros::static_transform_broadcaster_node
   tf2_ros::tf2_ros
   object_tracker_parameters
+  oai_api::oai_api
+  nlohmann_json::nlohmann_json
 )
 rclcpp_components_register_nodes(object_tracker_component
   "semantic_scene_forests_object_tracker::ObjectTrackerComponent"
@@ -111,6 +119,14 @@ if(BUILD_TESTING)
   find_package(semantic_scene_forests_object_manager REQUIRED)
   ament_add_gtest(test_bbox_transform test/test_bbox_transform.cpp)
   target_link_libraries(test_bbox_transform object_tracker_component)
+  ament_add_gtest(test_tracked_object test/test_tracked_object.cpp)
+  target_link_libraries(test_tracked_object object_tracker_component)
+  target_include_directories(test_tracked_object PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  foreach(unit_test test_image_rotation test_camera_tracker test_global_tracker)
+    ament_add_gtest(${unit_test} test/${unit_test}.cpp)
+    target_link_libraries(${unit_test} object_tracker_component)
+    target_include_directories(${unit_test} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  endforeach()
   target_include_directories(test_bbox_transform PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
