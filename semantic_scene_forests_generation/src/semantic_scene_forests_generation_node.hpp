@@ -28,7 +28,9 @@
 
 #pragma once
 
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <expected>
 #include <functional>
 #include <memory>
@@ -37,6 +39,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
@@ -113,11 +116,22 @@ private:
   std::mutex m_graph_mutex;
   fzi::semantic_scene_forests::SceneGraph m_scene_graph;
 
-  // One update owns the LLM clients and graph commit path at a time.
+  // Held from snapshot to commit: one update step owns the LLM clients and the
+  // graph commit path at a time. Guards m_phase2_processed_concepts.
+  std::mutex m_update_mutex;
+  std::unordered_set<int64_t> m_phase2_processed_concepts;
+
+  // Guards goal admission and the Phase 1 queue. Only one manual goal runs at a time.
   std::mutex m_goal_mutex;
   std::jthread m_goal_worker;
   bool m_goal_active{false};
   bool m_stopping{false};
+  std::deque<int64_t> m_phase1_queue;
+  std::unordered_set<int64_t> m_phase1_seen;
+
+  // Works the Phase 1 queue and runs Phase 2 on its timer; idles during a manual goal.
+  std::condition_variable_any m_background_wake;
+  std::jthread m_background_worker;
 
   // ── Diagnostics ────────────────────────────────────────────────────────
   diagnostic_updater::Updater m_diagnostic_updater;
@@ -159,6 +173,21 @@ private:
                      const std::stop_token& stop_token);
   void executePhase2(const std::shared_ptr<GoalHandle>& goal_handle,
                      const std::stop_token& stop_token);
+
+  void runBackgroundUpdates(const std::stop_token& stop_token);
+
+  enum class UpdateOutcome : std::uint8_t
+  {
+    UPDATED,
+    SKIPPED,
+    STOPPED
+  };
+
+  // One update step each; they take m_update_mutex and report errors to the caller.
+  [[nodiscard]] std::expected<UpdateOutcome, std::string>
+  describeObject(int64_t object_id, const std::function<bool()>& should_stop);
+  [[nodiscard]] std::expected<UpdateOutcome, std::string>
+  runPhase2(bool only_new_concepts, const std::function<bool()>& should_stop);
 
   // One consistent capture of graph and managed objects.
   struct StateSnapshot

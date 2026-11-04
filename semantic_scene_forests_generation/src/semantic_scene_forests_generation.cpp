@@ -34,6 +34,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -156,6 +157,9 @@ SceneGraphGenerationNode::SceneGraphGenerationNode(const rclcpp::NodeOptions& op
 
   m_publish_timer = create_wall_timer(std::chrono::seconds(1), [this] { publishSceneGraph(); });
 
+  m_background_worker =
+    std::jthread([this](const std::stop_token& stop_token) { runBackgroundUpdates(stop_token); });
+
   RCLCPP_INFO(get_logger(),
               "SceneGraphGenerationNode started (phase1: %s, phase2: %s)",
               m_params.phase1_model.c_str(),
@@ -175,6 +179,12 @@ SceneGraphGenerationNode::~SceneGraphGenerationNode()
     }
   }
 
+  // The destructor must not rely on member order: both workers use the members below.
+  m_background_worker.request_stop();
+  if (m_background_worker.joinable())
+  {
+    m_background_worker.join();
+  }
   if (worker.joinable())
   {
     worker.join();
@@ -311,6 +321,21 @@ void SceneGraphGenerationNode::onManagedObjects(const ManagedObjectArray::Shared
   }
   if (membership_changed)
   {
+    {
+      std::scoped_lock lock{m_goal_mutex};
+      const auto inactive = [&active_ids](int64_t id) { return !active_ids.contains(id); };
+      std::erase_if(m_phase1_queue, inactive);
+      std::erase_if(m_phase1_seen, inactive);
+      for (const int64_t ID : active_ids)
+      {
+        if (m_phase1_seen.insert(ID).second)
+        {
+          m_phase1_queue.push_back(ID);
+        }
+      }
+    }
+    m_background_wake.notify_all();
+
     // Removals must become visible immediately, not at the next 1 Hz tick.
     publishSceneGraph();
   }
@@ -320,9 +345,10 @@ void SceneGraphGenerationNode::onAddSceneContext(const AddSceneContext::Request&
                                                  AddSceneContext::Response& response)
 {
   {
-    // Serialize with goal admission so an older inference snapshot cannot overwrite context.
+    // An update in flight would overwrite this context when it commits its older snapshot.
+    const std::unique_lock update_lock{m_update_mutex, std::try_to_lock};
     std::scoped_lock lock{m_goal_mutex, m_objects_mutex, m_graph_mutex};
-    if (m_goal_active || m_stopping)
+    if (!update_lock.owns_lock() || m_stopping)
     {
       response.message = "Scene graph generation is busy or stopping";
       return;
@@ -530,55 +556,94 @@ void SceneGraphGenerationNode::stopGoal(const std::shared_ptr<GoalHandle>& goal_
   guardedTerminal([&] { goal_handle->canceled(result); });
 }
 
+// ── Background updates ───────────────────────────────────────────────────────
+
+void SceneGraphGenerationNode::runBackgroundUpdates(const std::stop_token& stop_token)
+{
+  const auto PHASE2_INTERVAL =
+    std::chrono::seconds{std::max<int64_t>(1, m_params.phase2_interval_seconds)};
+  const auto should_stop = [&stop_token]() { return stop_token.stop_requested(); };
+  auto next_phase2       = std::chrono::steady_clock::now() + PHASE2_INTERVAL;
+
+  while (!stop_token.stop_requested())
+  {
+    std::optional<int64_t> object_id;
+    {
+      std::unique_lock lock{m_goal_mutex};
+      // A manual goal owns the pipeline: idle until it finishes, even if Phase 2 is due.
+      m_background_wake.wait(lock, stop_token, [this]() { return !m_goal_active; });
+      m_background_wake.wait_until(lock, stop_token, next_phase2, [this]() {
+        return m_goal_active || !m_phase1_queue.empty();
+      });
+      if (stop_token.stop_requested() || m_goal_active)
+      {
+        continue;
+      }
+      if (std::chrono::steady_clock::now() < next_phase2)
+      {
+        object_id = m_phase1_queue.front();
+        m_phase1_queue.pop_front();
+      }
+    }
+
+    // A failed object is not requeued, so an LLM outage cannot loop on paid calls; a
+    // manual Phase 1 retries it. A failed Phase 2 keeps its concepts for the next tick.
+    try
+    {
+      const auto outcome =
+        object_id ? describeObject(*object_id, should_stop) : runPhase2(true, should_stop);
+      if (!outcome)
+      {
+        RCLCPP_WARN(get_logger(), "Background update failed: %s", outcome.error().c_str());
+      }
+    }
+    catch (const std::exception& e)
+    {
+      const std::string message = "Background update failed: " + std::string(e.what());
+      m_llm_errors.increment(message);
+      RCLCPP_ERROR(get_logger(), "%s", message.c_str());
+    }
+    catch (...)
+    {
+      // A pluginlib-loaded task can throw a type that is not a std::exception.
+      const std::string message = "Background update failed: unknown exception";
+      m_llm_errors.increment(message);
+      RCLCPP_ERROR(get_logger(), "%s", message.c_str());
+    }
+
+    if (!object_id)
+    {
+      next_phase2 = std::chrono::steady_clock::now() + PHASE2_INTERVAL;
+    }
+  }
+}
+
 // ── Phase 1 ───────────────────────────────────────────────────────────────────
 
 void SceneGraphGenerationNode::executePhase1(const std::shared_ptr<GoalHandle>& goal_handle,
                                              const std::stop_token& stop_token)
 {
-  const auto cancel = [this, &goal_handle, &stop_token]() { stopGoal(goal_handle, stop_token); };
-  const auto abort  = [this, &goal_handle](const std::string& message) {
-    abortGoal(goal_handle, message);
+  const auto should_stop = [&goal_handle, &stop_token]() {
+    return stop_token.stop_requested() || goal_handle->is_canceling();
   };
 
-  // Snapshot the current object cache
   auto initial_state = snapshotState();
   if (!initial_state)
   {
-    abort("Phase 1 failed to snapshot the scene state: " + initial_state.error());
+    abortGoal(goal_handle, "Phase 1 failed to snapshot the scene state: " + initial_state.error());
     return;
   }
-  std::vector<semantic_scene_forests_object_msgs::msg::ManagedObject> objects =
-    std::move(initial_state->objects);
 
   auto feedback           = std::make_shared<UpdateSceneGraphAction::Feedback>();
-  feedback->total_objects = static_cast<uint32_t>(objects.size());
+  feedback->total_objects = static_cast<uint32_t>(initial_state->objects.size());
   uint32_t processed      = 0;
   uint32_t updated        = 0;
 
-  const auto system_template = m_templates.find("instance/instance_system_prompt");
-  const auto setup_template  = m_templates.find("instance/instance_object_setup");
-  if (system_template == m_templates.end() || setup_template == m_templates.end())
+  for (const auto& obj : initial_state->objects)
   {
-    abort("Phase 1 failed: required prompt template is missing");
-    return;
-  }
-  const auto system_context       = minja::Context::make(minja::Value::object());
-  const std::string system_prompt = system_template->second->render(system_context);
-  if (!m_phase1_client)
-  {
-    abort("Phase 1 failed: LLM client is not initialized");
-    return;
-  }
-  auto& phase1_client = m_phase1_client.value();
-
-  const auto visuals_timeout =
-    std::chrono::seconds{std::max<int64_t>(1, m_params.visuals_request_timeout_seconds)};
-
-  for (const auto& obj : objects)
-  {
-    if (stop_token.stop_requested() || goal_handle->is_canceling())
+    if (should_stop())
     {
-      cancel();
+      stopGoal(goal_handle, stop_token);
       return;
     }
 
@@ -586,187 +651,28 @@ void SceneGraphGenerationNode::executePhase1(const std::shared_ptr<GoalHandle>& 
     feedback->status = "Processing object " + std::to_string(obj.id) + " (" + obj.class_name + ")";
     goal_handle->publish_feedback(feedback);
 
-    // Snapshot per object so earlier commits and live removals are included.
-    auto state_snapshot = snapshotState();
-    if (!state_snapshot)
+    // Dequeue per object: a canceled rerun leaves the rest for the background worker.
     {
-      abort("Phase 1 failed to snapshot the scene state: " + state_snapshot.error());
+      std::scoped_lock lock{m_goal_mutex};
+      std::erase(m_phase1_queue, obj.id);
+    }
+
+    const auto outcome = describeObject(obj.id, should_stop);
+    if (!outcome)
+    {
+      abortGoal(goal_handle, outcome.error());
       return;
     }
-    if (std::ranges::none_of(state_snapshot->objects,
-                             [&obj](const auto& active) { return active.id == obj.id; }))
+    if (*outcome == UpdateOutcome::STOPPED)
     {
-      ++processed; // Removed since the phase started; nothing to describe.
-      continue;
-    }
-
-    // ── Fetch image crops ────────────────────────────────────────────────
-    auto request        = std::make_shared<GetObjectVisuals::Request>();
-    request->object_ids = {obj.id};
-
-    std::vector<cv::Mat> crops;
-    try
-    {
-      auto future         = m_visuals_client->async_send_request(request);
-      const auto deadline = std::chrono::steady_clock::now() + visuals_timeout;
-      while (future.wait_for(std::chrono::milliseconds{100}) != std::future_status::ready)
-      {
-        if (stop_token.stop_requested() || goal_handle->is_canceling())
-        {
-          (void)m_visuals_client->remove_pending_request(future);
-          cancel();
-          return;
-        }
-        if (std::chrono::steady_clock::now() >= deadline)
-        {
-          (void)m_visuals_client->remove_pending_request(future);
-          throw std::runtime_error("GetObjectVisuals timed out");
-        }
-      }
-
-      const auto visuals_response = future.get();
-      if (!visuals_response)
-      {
-        throw std::runtime_error("GetObjectVisuals returned an empty response");
-      }
-      if (!visuals_response->visuals.empty())
-      {
-        for (const auto& image_msg : visuals_response->visuals.front().image_crops)
-        {
-          try
-          {
-            auto cv_ptr = cv_bridge::toCvCopy(image_msg, "bgr8");
-            crops.push_back(cv_ptr->image);
-          }
-          catch (const cv_bridge::Exception& e)
-          {
-            RCLCPP_WARN(get_logger(), "cv_bridge failed for object %ld: %s", obj.id, e.what());
-          }
-        }
-      }
-    }
-    catch (const std::exception& e)
-    {
-      const std::string message =
-        "GetObjectVisuals failed for object " + std::to_string(obj.id) + ": " + e.what();
-      RCLCPP_WARN(get_logger(), "%s", message.c_str());
-      m_service_errors.increment(message);
-      ++processed;
-      continue;
-    }
-
-    // ── Build chat history for this object ───────────────────────────────
-    std::vector<oai::Message> history;
-    auto system_message = oai::MessageBuilder::system().text(system_prompt).build();
-    if (!system_message)
-    {
-      abort("Phase 1 failed to build the system message: " + system_message.error());
-      return;
-    }
-    history.push_back(std::move(*system_message));
-
-    // Object setup message: text + all image crops
-    {
-      auto setup_ctx = minja::Value::object();
-      setup_ctx.set("id", minja::Value(obj.id));
-      setup_ctx.set("class_name", minja::Value(obj.class_name));
-      const auto setup_context     = minja::Context::make(std::move(setup_ctx));
-      const std::string setup_text = setup_template->second->render(setup_context);
-
-      auto builder = oai::MessageBuilder::user().text(setup_text);
-      for (const auto& crop : crops)
-      {
-        builder.image(crop);
-      }
-      auto msg = builder.build();
-      if (!msg)
-      {
-        RCLCPP_WARN(
-          get_logger(), "Image encoding failed for object %ld: %s", obj.id, msg.error().c_str());
-        auto fallback = oai::MessageBuilder::user().text(setup_text).build();
-        if (!fallback)
-        {
-          abort("Phase 1 failed to build the object setup message: " + fallback.error());
-          return;
-        }
-        history.push_back(std::move(*fallback));
-      }
-      else
-      {
-        history.push_back(std::move(*msg));
-      }
-    }
-
-    // Send setup and get acknowledgement
-    auto ack = phase1_client.chat({.messages = history});
-    if (!ack)
-    {
-      m_llm_errors.increment(ack.error().message);
-      abort("Phase 1 setup request failed for object " + std::to_string(obj.id) + ": " +
-            ack.error().message);
-      return;
-    }
-    auto acknowledgement = oai::MessageBuilder::assistant().text(ack->text()).build();
-    if (!acknowledgement)
-    {
-      abort("Phase 1 failed to build the setup acknowledgement: " + acknowledgement.error());
-      return;
-    }
-    history.push_back(std::move(*acknowledgement));
-
-    auto& graph = *state_snapshot->graph;
-    if (const auto existing = graph.findNode(obj.id); existing)
-    {
-      if (!std::holds_alternative<fzi::semantic_scene_forests::ObjectNode>(*existing))
-      {
-        abort("Phase 1 found an object id that is already used by a concept node");
-        return;
-      }
-    }
-    else
-    {
-      auto detection = std::make_shared<vision_msgs::msg::Detection3D>(obj.detection);
-      std::array<sensor_msgs::msg::Image::SharedPtr, 5> visuals{};
-      if (auto add_result = graph.addObjectNodeWithId(obj.id, obj.class_name, detection, visuals);
-          !add_result)
-      {
-        abort("Phase 1 failed to add object " + std::to_string(obj.id) + ": " +
-              add_result.error().message);
-        return;
-      }
-    }
-
-    // ── Run each Phase 1 task ────────────────────────────────────────────
-    for (auto& task : m_phase1_tasks)
-    {
-      if (stop_token.stop_requested() || goal_handle->is_canceling())
-      {
-        cancel();
-        return;
-      }
-      auto task_result = task->execute(phase1_client, history, obj.id, crops, graph);
-      if (!task_result)
-      {
-        const std::string message =
-          "Phase 1 task failed for object " + std::to_string(obj.id) + ": " + task_result.error();
-        m_llm_errors.increment(message);
-        abort(message);
-        return;
-      }
-    }
-
-    if (stop_token.stop_requested() || goal_handle->is_canceling())
-    {
-      cancel();
-      return;
-    }
-    if (auto committed = commitGraph(*state_snapshot->graph); !committed)
-    {
-      abort("Phase 1 failed to commit the scene graph: " + committed.error());
+      stopGoal(goal_handle, stop_token);
       return;
     }
     ++processed;
-    ++updated;
+    if (*outcome == UpdateOutcome::UPDATED)
+    {
+      ++updated;
+    }
   }
 
   succeedGoal(goal_handle,
@@ -774,25 +680,241 @@ void SceneGraphGenerationNode::executePhase1(const std::shared_ptr<GoalHandle>& 
                 std::to_string(processed) + " objects");
 }
 
+std::expected<SceneGraphGenerationNode::UpdateOutcome, std::string>
+SceneGraphGenerationNode::describeObject(int64_t object_id,
+                                         const std::function<bool()>& should_stop)
+{
+  std::scoped_lock update_lock{m_update_mutex};
+
+  const auto system_template = m_templates.find("instance/instance_system_prompt");
+  const auto setup_template  = m_templates.find("instance/instance_object_setup");
+  if (system_template == m_templates.end() || setup_template == m_templates.end())
+  {
+    return std::unexpected("Phase 1 failed: required prompt template is missing");
+  }
+  const auto system_context       = minja::Context::make(minja::Value::object());
+  const std::string system_prompt = system_template->second->render(system_context);
+  if (!m_phase1_client)
+  {
+    return std::unexpected("Phase 1 failed: LLM client is not initialized");
+  }
+  auto& phase1_client = m_phase1_client.value();
+
+  const auto visuals_timeout =
+    std::chrono::seconds{std::max<int64_t>(1, m_params.visuals_request_timeout_seconds)};
+
+  // Snapshot per object so earlier commits and live removals are included.
+  auto state_snapshot = snapshotState();
+  if (!state_snapshot)
+  {
+    return std::unexpected("Phase 1 failed to snapshot the scene state: " + state_snapshot.error());
+  }
+  const auto object_it = std::ranges::find_if(
+    state_snapshot->objects, [object_id](const auto& active) { return active.id == object_id; });
+  if (object_it == state_snapshot->objects.end())
+  {
+    return UpdateOutcome::SKIPPED; // Removed before its turn; nothing to describe.
+  }
+  const auto& obj = *object_it;
+
+  // ── Fetch image crops ────────────────────────────────────────────────
+  auto request        = std::make_shared<GetObjectVisuals::Request>();
+  request->object_ids = {obj.id};
+
+  std::vector<cv::Mat> crops;
+  try
+  {
+    auto future         = m_visuals_client->async_send_request(request);
+    const auto deadline = std::chrono::steady_clock::now() + visuals_timeout;
+    while (future.wait_for(std::chrono::milliseconds{100}) != std::future_status::ready)
+    {
+      if (should_stop())
+      {
+        (void)m_visuals_client->remove_pending_request(future);
+        return UpdateOutcome::STOPPED;
+      }
+      if (std::chrono::steady_clock::now() >= deadline)
+      {
+        (void)m_visuals_client->remove_pending_request(future);
+        throw std::runtime_error("GetObjectVisuals timed out");
+      }
+    }
+
+    const auto visuals_response = future.get();
+    if (!visuals_response)
+    {
+      throw std::runtime_error("GetObjectVisuals returned an empty response");
+    }
+    if (!visuals_response->visuals.empty())
+    {
+      for (const auto& image_msg : visuals_response->visuals.front().image_crops)
+      {
+        try
+        {
+          auto cv_ptr = cv_bridge::toCvCopy(image_msg, "bgr8");
+          crops.push_back(cv_ptr->image);
+        }
+        catch (const cv_bridge::Exception& e)
+        {
+          RCLCPP_WARN(get_logger(), "cv_bridge failed for object %ld: %s", obj.id, e.what());
+        }
+      }
+    }
+  }
+  catch (const std::exception& e)
+  {
+    const std::string message =
+      "GetObjectVisuals failed for object " + std::to_string(obj.id) + ": " + e.what();
+    RCLCPP_WARN(get_logger(), "%s", message.c_str());
+    m_service_errors.increment(message);
+    return UpdateOutcome::SKIPPED;
+  }
+
+  // ── Build chat history for this object ───────────────────────────────
+  std::vector<oai::Message> history;
+  auto system_message = oai::MessageBuilder::system().text(system_prompt).build();
+  if (!system_message)
+  {
+    return std::unexpected("Phase 1 failed to build the system message: " + system_message.error());
+  }
+  history.push_back(std::move(*system_message));
+
+  // Object setup message: text + all image crops
+  {
+    auto setup_ctx = minja::Value::object();
+    setup_ctx.set("id", minja::Value(obj.id));
+    setup_ctx.set("class_name", minja::Value(obj.class_name));
+    const auto setup_context     = minja::Context::make(std::move(setup_ctx));
+    const std::string setup_text = setup_template->second->render(setup_context);
+
+    auto builder = oai::MessageBuilder::user().text(setup_text);
+    for (const auto& crop : crops)
+    {
+      builder.image(crop);
+    }
+    auto msg = builder.build();
+    if (!msg)
+    {
+      RCLCPP_WARN(
+        get_logger(), "Image encoding failed for object %ld: %s", obj.id, msg.error().c_str());
+      auto fallback = oai::MessageBuilder::user().text(setup_text).build();
+      if (!fallback)
+      {
+        return std::unexpected("Phase 1 failed to build the object setup message: " +
+                               fallback.error());
+      }
+      history.push_back(std::move(*fallback));
+    }
+    else
+    {
+      history.push_back(std::move(*msg));
+    }
+  }
+
+  // Send setup and get acknowledgement
+  auto ack = phase1_client.chat({.messages = history});
+  if (!ack)
+  {
+    m_llm_errors.increment(ack.error().message);
+    return std::unexpected("Phase 1 setup request failed for object " + std::to_string(obj.id) +
+                           ": " + ack.error().message);
+  }
+  auto acknowledgement = oai::MessageBuilder::assistant().text(ack->text()).build();
+  if (!acknowledgement)
+  {
+    return std::unexpected("Phase 1 failed to build the setup acknowledgement: " +
+                           acknowledgement.error());
+  }
+  history.push_back(std::move(*acknowledgement));
+
+  auto& graph = *state_snapshot->graph;
+  if (const auto existing = graph.findNode(obj.id); existing)
+  {
+    if (!std::holds_alternative<fzi::semantic_scene_forests::ObjectNode>(*existing))
+    {
+      return std::unexpected("Phase 1 found an object id that is already used by a concept node");
+    }
+  }
+  else
+  {
+    auto detection = std::make_shared<vision_msgs::msg::Detection3D>(obj.detection);
+    std::array<sensor_msgs::msg::Image::SharedPtr, 5> visuals{};
+    if (auto add_result = graph.addObjectNodeWithId(obj.id, obj.class_name, detection, visuals);
+        !add_result)
+    {
+      return std::unexpected("Phase 1 failed to add object " + std::to_string(obj.id) + ": " +
+                             add_result.error().message);
+    }
+  }
+
+  // ── Run each Phase 1 task ────────────────────────────────────────────
+  for (auto& task : m_phase1_tasks)
+  {
+    if (should_stop())
+    {
+      return UpdateOutcome::STOPPED;
+    }
+    auto task_result = task->execute(phase1_client, history, obj.id, crops, graph);
+    if (!task_result)
+    {
+      const std::string message =
+        "Phase 1 task failed for object " + std::to_string(obj.id) + ": " + task_result.error();
+      m_llm_errors.increment(message);
+      return std::unexpected(message);
+    }
+  }
+
+  if (should_stop())
+  {
+    return UpdateOutcome::STOPPED;
+  }
+  if (auto committed = commitGraph(graph); !committed)
+  {
+    return std::unexpected("Phase 1 failed to commit the scene graph: " + committed.error());
+  }
+  RCLCPP_INFO(get_logger(), "Described object %ld (%s)", object_id, obj.class_name.c_str());
+  return UpdateOutcome::UPDATED;
+}
+
 // ── Phase 2 ───────────────────────────────────────────────────────────────────
 
 void SceneGraphGenerationNode::executePhase2(const std::shared_ptr<GoalHandle>& goal_handle,
                                              const std::stop_token& stop_token)
 {
-  const auto cancel = [this, &goal_handle, &stop_token]() { stopGoal(goal_handle, stop_token); };
-  const auto abort  = [this, &goal_handle](const std::string& message) {
-    abortGoal(goal_handle, message);
-  };
-
-  if (stop_token.stop_requested() || goal_handle->is_canceling())
+  const auto outcome = runPhase2(false, [&goal_handle, &stop_token]() {
+    return stop_token.stop_requested() || goal_handle->is_canceling();
+  });
+  if (!outcome)
   {
-    cancel();
-    return;
+    abortGoal(goal_handle, outcome.error());
+  }
+  else if (*outcome == UpdateOutcome::STOPPED)
+  {
+    stopGoal(goal_handle, stop_token);
+  }
+  else if (*outcome == UpdateOutcome::SKIPPED)
+  {
+    succeedGoal(goal_handle, "Phase 2 skipped: no concept nodes are available");
+  }
+  else
+  {
+    succeedGoal(goal_handle, "Phase 2 complete");
+  }
+}
+
+std::expected<SceneGraphGenerationNode::UpdateOutcome, std::string>
+SceneGraphGenerationNode::runPhase2(bool only_new_concepts,
+                                    const std::function<bool()>& should_stop)
+{
+  std::scoped_lock update_lock{m_update_mutex};
+
+  if (should_stop())
+  {
+    return UpdateOutcome::STOPPED;
   }
   if (!m_phase2_client)
   {
-    abort("Phase 2 failed: LLM client is not initialized");
-    return;
+    return std::unexpected("Phase 2 failed: LLM client is not initialized");
   }
   auto& phase2_client = m_phase2_client.value();
 
@@ -800,22 +922,41 @@ void SceneGraphGenerationNode::executePhase2(const std::shared_ptr<GoalHandle>& 
   const auto setup_template  = m_templates.find("meta/meta_setup_prompt");
   if (system_template == m_templates.end() || setup_template == m_templates.end())
   {
-    abort("Phase 2 failed: required prompt template is missing");
-    return;
+    return std::unexpected("Phase 2 failed: required prompt template is missing");
   }
 
   auto state_snapshot = snapshotState();
   if (!state_snapshot)
   {
-    abort("Phase 2 failed to snapshot the scene state: " + state_snapshot.error());
-    return;
+    return std::unexpected("Phase 2 failed to snapshot the scene state: " + state_snapshot.error());
   }
-  auto& graph         = *state_snapshot->graph;
-  const auto CONCEPTS = graph.getConceptNodes();
+  auto& graph = *state_snapshot->graph;
+
+  // Tasks read their input through getConceptNodes() only, so a graph holding just the
+  // unprocessed concepts narrows the input while results still land in the full graph.
+  fzi::semantic_scene_forests::SceneGraph new_concepts;
+  if (only_new_concepts)
+  {
+    for (const auto& concept_node : graph.getConceptNodes())
+    {
+      if (m_phase2_processed_concepts.contains(concept_node.id))
+      {
+        continue;
+      }
+      if (auto added =
+            new_concepts.addConceptNodeWithId(concept_node.id, concept_node.concept_name);
+          !added)
+      {
+        return std::unexpected("Phase 2 failed to collect new concepts: " + added.error().message);
+      }
+    }
+  }
+  const auto& input_graph = only_new_concepts ? new_concepts : graph;
+
+  const auto CONCEPTS = input_graph.getConceptNodes();
   if (CONCEPTS.empty())
   {
-    succeedGoal(goal_handle, "Phase 2 skipped: no concept nodes are available");
-    return;
+    return UpdateOutcome::SKIPPED;
   }
 
   const auto system_context       = minja::Context::make(minja::Value::object());
@@ -825,8 +966,7 @@ void SceneGraphGenerationNode::executePhase2(const std::shared_ptr<GoalHandle>& 
   auto system_message = oai::MessageBuilder::system().text(system_prompt).build();
   if (!system_message)
   {
-    abort("Phase 2 failed to build the system message: " + system_message.error());
-    return;
+    return std::unexpected("Phase 2 failed to build the system message: " + system_message.error());
   }
   history.push_back(std::move(*system_message));
 
@@ -844,8 +984,7 @@ void SceneGraphGenerationNode::executePhase2(const std::shared_ptr<GoalHandle>& 
   auto setup_message = oai::MessageBuilder::user().text(setup_text).build();
   if (!setup_message)
   {
-    abort("Phase 2 failed to build the setup message: " + setup_message.error());
-    return;
+    return std::unexpected("Phase 2 failed to build the setup message: " + setup_message.error());
   }
   history.push_back(std::move(*setup_message));
 
@@ -853,53 +992,51 @@ void SceneGraphGenerationNode::executePhase2(const std::shared_ptr<GoalHandle>& 
   if (!ack)
   {
     m_llm_errors.increment(ack.error().message);
-    abort("Phase 2 setup request failed: " + ack.error().message);
-    return;
+    return std::unexpected("Phase 2 setup request failed: " + ack.error().message);
   }
   auto acknowledgement = oai::MessageBuilder::assistant().text(ack->text()).build();
   if (!acknowledgement)
   {
-    abort("Phase 2 failed to build the setup acknowledgement: " + acknowledgement.error());
-    return;
+    return std::unexpected("Phase 2 failed to build the setup acknowledgement: " +
+                           acknowledgement.error());
   }
   history.push_back(std::move(*acknowledgement));
-
-  if (stop_token.stop_requested() || goal_handle->is_canceling())
-  {
-    cancel();
-    return;
-  }
 
   // Run each Phase 2 task
   for (auto& task : m_phase2_tasks)
   {
-    if (stop_token.stop_requested() || goal_handle->is_canceling())
+    if (should_stop())
     {
-      cancel();
-      return;
+      return UpdateOutcome::STOPPED;
     }
-    auto task_result = task->execute(phase2_client, history, graph, graph);
+    auto task_result = task->execute(phase2_client, history, input_graph, graph);
     if (!task_result)
     {
       const std::string message = "Phase 2 task failed: " + task_result.error();
       m_llm_errors.increment(message);
-      abort(message);
-      return;
+      return std::unexpected(message);
     }
   }
 
-  if (stop_token.stop_requested() || goal_handle->is_canceling())
+  if (should_stop())
   {
-    cancel();
-    return;
-  }
-  if (auto committed = commitGraph(*state_snapshot->graph); !committed)
-  {
-    abort("Phase 2 failed to commit the scene graph: " + committed.error());
-    return;
+    return UpdateOutcome::STOPPED;
   }
 
-  succeedGoal(goal_handle, "Phase 2 complete");
+  // Concepts Phase 2 just created count as processed, or the next tick would
+  // categorize its own categories.
+  std::unordered_set<int64_t> processed_concepts;
+  for (const auto& concept_node : graph.getConceptNodes())
+  {
+    processed_concepts.insert(concept_node.id);
+  }
+  if (auto committed = commitGraph(graph); !committed)
+  {
+    return std::unexpected("Phase 2 failed to commit the scene graph: " + committed.error());
+  }
+  m_phase2_processed_concepts = std::move(processed_concepts);
+  RCLCPP_INFO(get_logger(), "Phase 2 processed %zu concepts", CONCEPTS.size());
+  return UpdateOutcome::UPDATED;
 }
 
 std::expected<SceneGraphGenerationNode::StateSnapshot, std::string>
@@ -948,8 +1085,11 @@ SceneGraphGenerationNode::commitGraph(fzi::semantic_scene_forests::SceneGraph& c
 
 void SceneGraphGenerationNode::clearActiveGoal()
 {
-  std::scoped_lock lock{m_goal_mutex};
-  m_goal_active = false;
+  {
+    std::scoped_lock lock{m_goal_mutex};
+    m_goal_active = false;
+  }
+  m_background_wake.notify_all();
 }
 
 void SceneGraphGenerationNode::onConnectivityDiagnostic(

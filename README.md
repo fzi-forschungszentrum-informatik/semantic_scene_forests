@@ -100,8 +100,8 @@ The hooks check formatting and file hygiene; use `colcon build` to verify compil
   remembered object, even across classes. An identical returning object cannot be distinguished
   from a replacement. See [tracker semantics and tuning](semantic_scene_forests_object_tracker/README.md).
 - Generation removes retired object nodes (and unreachable concepts); query sanitizes graph
-  membership against managed state and rejects stale/fabricated positive IDs. New IDs still
-  need the existing `/update_scene_graph` phase-1 workflow; no automatic inference is scheduled.
+  membership against managed state and rejects stale/fabricated positive IDs. New IDs are
+  described automatically by a background queue; `/update_scene_graph` reruns everything.
 - One tracker owns the snapshot topic. Restart tracker and manager together for a new session,
   including recording rewind/loop; do not mix observation time domains. There is no persistence
   or ID epoch. Remembered objects can accumulate for the lifetime of a session.

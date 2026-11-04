@@ -76,6 +76,7 @@ Act   /update_scene_graph  semantic_scene_forests_msgs/UpdateSceneGraph      (se
 | `phase1_tasks` | ColorTask, MaterialTask, ManipulationTask |
 | `phase2_model` | `Qwen/Qwen3-VL-8B-Instruct` |
 | `phase2_tasks` | CategoryTask, AffordanceTask |
+| `phase2_interval_seconds` | `120` |
 
 ## Prompt Templates
 
@@ -83,6 +84,7 @@ Jinja2 templates live in `resources/{instance,meta}/*.j2`. At runtime they are l
 
 ## Update Execution
 
+- **Background updates**: an owned `std::jthread` works a per-object Phase 1 queue and runs Phase 2 over unprocessed concepts every `phase2_interval_seconds`. It pauses while a goal runs; `m_update_mutex` serializes every update step from snapshot to commit.
 - **Goals are serialized**: the node accepts one `/update_scene_graph` goal at a time on an owned `std::jthread` worker; admission is reject-while-busy, and a goal caught in teardown receives no terminal result.
 - **Cooperative stopping**: the worker checks a stop token at existing checkpoints (before external calls, per task, and before commit). Teardown requests stop, lets the current blocking call finish, then joins; waiting is bounded by the per-call timeouts, not by a whole-goal shutdown deadline.
 - **Graph snapshots isolate long-running work**: LLM tasks operate on a private graph snapshot. The live graph mutex is held only to clone or commit a graph, so publishing and diagnostics remain responsive during inference.

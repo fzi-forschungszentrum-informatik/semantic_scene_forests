@@ -81,3 +81,7 @@ semantic_scene_forests_generation:
       - "semantic_scene_forests_generation/CategoryTask"
       - "semantic_scene_forests_generation/AffordanceTask"
     description: "Pluginlib class names of IGraphTask plugins to run in Phase 2."
+  phase2_interval_seconds:
+    type: int
+    default_value: 120
+    description: "Period of the automatic Phase 2 run over concepts that have not been processed yet."

@@ -92,9 +92,9 @@ public:
 
   virtual void initialize(rclcpp::Node* node, const TemplateMap& templates) = 0;
 
-  // NOTE: `current_graph` and `graph` may alias the same SceneGraph instance (the
-  // current call site always passes the same object for both). Implementations
-  // MUST snapshot any container/iterator obtained from `current_graph` (e.g. via
+  // NOTE: `current_graph` holds the input concepts and carries no edges on automatic
+  // runs, which pass only unprocessed concepts. On manual runs it aliases `graph`, so
+  // implementations MUST snapshot any container/iterator obtained from `current_graph` (e.g. via
   // getConceptNodes()) into a local value BEFORE mutating `graph` — do not hold
   // live references or iterators into `current_graph` across a `graph` mutation.
   // See category_task.cpp / affordance_task.cpp for the correct snapshot pattern.
