@@ -29,15 +29,16 @@
 #include <chrono>
 #include <condition_variable>
 #include <exception>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 
 #include <pluginlib/class_list_macros.hpp>
 #include <rclcpp/rclcpp.hpp>
 
-#include "semantic_scene_forests_manager/database.hpp"
 #include "semantic_scene_forests_manager/worker_interface.hpp"
 
 namespace semantic_scene_forests_manager {
@@ -47,11 +48,11 @@ class PruningWorker : public IWorker
 {
 public:
   void initialize(rclcpp::Node& node,
-                  Database& db,
+                  std::shared_ptr<fzi::semantic_scene_forests::SceneGraph> graph,
                   const std::string& name,
                   diagnostic_updater::Updater& diagnostics) override
   {
-    m_db     = &db;
+    m_graph  = std::move(graph);
     m_logger = node.get_logger().get_child(name);
     m_interval =
       std::chrono::duration<double>(node.declare_parameter(name + ".interval_seconds", 10.0));
@@ -91,7 +92,7 @@ private:
       }
       try
       {
-        const int PRUNED = m_db->write([](Tx& tx) { return tx.pruneIsolatedConcepts(); });
+        const auto PRUNED = static_cast<int>(m_graph->pruneIsolatedConcepts().size());
         RCLCPP_DEBUG(m_logger, "Pruned %d isolated concepts", PRUNED);
         const std::scoped_lock STATS_LOCK{m_stats_mutex};
         m_pruned += PRUNED;
@@ -120,7 +121,7 @@ private:
                  "Pruned " + std::to_string(m_pruned) + " isolated concepts");
   }
 
-  Database* m_db{nullptr};
+  std::shared_ptr<fzi::semantic_scene_forests::SceneGraph> m_graph;
   rclcpp::Logger m_logger{rclcpp::get_logger("pruning_worker")};
   std::mutex m_stats_mutex;
   int64_t m_pruned{0};

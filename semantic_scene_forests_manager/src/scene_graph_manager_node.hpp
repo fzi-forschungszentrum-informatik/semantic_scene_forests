@@ -38,21 +38,21 @@
 #include <pluginlib/class_loader.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <semantic_scene_forests_msgs/msg/scene_graph.hpp>
-#include <semantic_scene_forests_msgs/srv/add_scene_context.hpp>
-#include <semantic_scene_forests_object_msgs/srv/block_object.hpp>
+#include <semantic_scene_forests_msgs/srv/add_concept.hpp>
+#include <semantic_scene_forests_msgs/srv/add_edge.hpp>
+#include <semantic_scene_forests_object_msgs/srv/delete_object.hpp>
 #include <semantic_scene_forests_object_msgs/srv/edit_object.hpp>
 #include <semantic_scene_forests_object_msgs/srv/get_object_visuals.hpp>
 #include <semantic_scene_forests_object_msgs/srv/get_objects.hpp>
-#include <semantic_scene_forests_object_msgs/srv/unblock_object.hpp>
 
-#include "semantic_scene_forests_manager/database.hpp"
+#include "semantic_scene_forests/scene_graph.hpp"
 #include "semantic_scene_forests_manager/scene_graph_manager_parameters.hpp"
 #include "semantic_scene_forests_manager/worker_interface.hpp"
 
 namespace semantic_scene_forests_manager {
 
-//! Owns the world model database, serves the client services, publishes `scene_graph` when the
-//! database changed and hosts the configured worker plugins.
+//! Owns the shared SceneGraph, serves the graph services, publishes `scene_graph` at
+//! `publish_max_rate_hz` and hosts the configured worker plugins.
 class SceneGraphManagerNode : public rclcpp::Node
 {
 public:
@@ -63,8 +63,8 @@ public:
   SceneGraphManagerNode(SceneGraphManagerNode&&)                 = delete;
   SceneGraphManagerNode& operator=(SceneGraphManagerNode&&)      = delete;
 
-  //! Test-only access to the world model.
-  Database& database() { return m_db; }
+  //! Test-only access to the shared graph.
+  const std::shared_ptr<fzi::semantic_scene_forests::SceneGraph>& graph() const { return m_graph; }
 
 private:
   void publishLoop(const std::stop_token& stop);
@@ -72,7 +72,7 @@ private:
   void onDiagnostic(diagnostic_updater::DiagnosticStatusWrapper& stat);
 
   // Declared first: destroyed after the workers and the publisher thread that use it.
-  Database m_db;
+  std::shared_ptr<fzi::semantic_scene_forests::SceneGraph> m_graph;
 
   scene_graph_manager::Params m_params;
 
@@ -89,16 +89,7 @@ private:
   rclcpp::Publisher<semantic_scene_forests_msgs::msg::SceneGraph>::SharedPtr m_scene_graph_pub;
   // Read services get their own group so they don't queue behind writes.
   rclcpp::CallbackGroup::SharedPtr m_read_group;
-  rclcpp::Service<semantic_scene_forests_object_msgs::srv::GetObjects>::SharedPtr m_get_objects_srv;
-  rclcpp::Service<semantic_scene_forests_object_msgs::srv::GetObjectVisuals>::SharedPtr
-    m_get_object_visuals_srv;
-  rclcpp::Service<semantic_scene_forests_object_msgs::srv::BlockObject>::SharedPtr
-    m_block_object_srv;
-  rclcpp::Service<semantic_scene_forests_object_msgs::srv::UnblockObject>::SharedPtr
-    m_unblock_object_srv;
-  rclcpp::Service<semantic_scene_forests_object_msgs::srv::EditObject>::SharedPtr m_edit_object_srv;
-  rclcpp::Service<semantic_scene_forests_msgs::srv::AddSceneContext>::SharedPtr
-    m_add_scene_context_srv;
+  std::vector<rclcpp::ServiceBase::SharedPtr> m_services;
 
   // Declared last: joined first on destruction.
   std::jthread m_publish_thread;

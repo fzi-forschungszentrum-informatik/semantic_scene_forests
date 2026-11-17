@@ -28,12 +28,13 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
 
 #include <diagnostic_updater/diagnostic_updater.hpp>
 #include <rclcpp/node.hpp>
 
-#include "semantic_scene_forests_manager/database.hpp"
+#include "semantic_scene_forests/scene_graph.hpp"
 
 namespace semantic_scene_forests_manager {
 
@@ -44,10 +45,10 @@ class IWorker
 {
 public:
   virtual ~IWorker() = default;
-  //! `name` is the worker's parameter prefix and its key for progress marks. `diagnostics` is
+  //! `name` is the worker's parameter prefix and its key in `WorkerState`. `diagnostics` is
   //! the manager's shared updater; workers add their status tasks to it.
   virtual void initialize(rclcpp::Node& node,
-                          Database& db,
+                          std::shared_ptr<fzi::semantic_scene_forests::SceneGraph> graph,
                           const std::string& name,
                           diagnostic_updater::Updater& diagnostics) = 0;
   virtual void start()                                              = 0;

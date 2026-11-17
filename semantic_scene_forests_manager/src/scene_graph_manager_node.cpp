@@ -31,50 +31,55 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
-#include <optional>
 #include <ranges>
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include <cv_bridge/cv_bridge.hpp>
 #include <rclcpp_components/register_node_macro.hpp>
 
 namespace semantic_scene_forests_manager {
 
+using fzi::semantic_scene_forests::ObjectNode;
+using fzi::semantic_scene_forests::SceneGraph;
 using SceneGraphMsg    = semantic_scene_forests_msgs::msg::SceneGraph;
-using AddSceneContext  = semantic_scene_forests_msgs::srv::AddSceneContext;
-using ManagedObject    = semantic_scene_forests_object_msgs::msg::ManagedObject;
+using AddConcept       = semantic_scene_forests_msgs::srv::AddConcept;
+using AddEdge          = semantic_scene_forests_msgs::srv::AddEdge;
 using ObjectVisuals    = semantic_scene_forests_object_msgs::msg::ObjectVisuals;
 using GetObjects       = semantic_scene_forests_object_msgs::srv::GetObjects;
 using GetObjectVisuals = semantic_scene_forests_object_msgs::srv::GetObjectVisuals;
-using BlockObject      = semantic_scene_forests_object_msgs::srv::BlockObject;
-using UnblockObject    = semantic_scene_forests_object_msgs::srv::UnblockObject;
+using DeleteObject     = semantic_scene_forests_object_msgs::srv::DeleteObject;
 using EditObject       = semantic_scene_forests_object_msgs::srv::EditObject;
 
 namespace {
 
-//! Crops of the requested objects; all visible objects if `ids` is empty. Unknown and blocked
-//! ids are skipped.
-std::vector<ObjectVisuals> visibleCrops(const Tx& tx, std::vector<int64_t> ids)
+//! Crops of the requested objects as raw images; all objects if `ids` is empty. Unknown ids are
+//! skipped, undecodable crops are logged and skipped.
+std::vector<ObjectVisuals>
+objectCrops(const SceneGraph& graph, const std::vector<int64_t>& ids, const rclcpp::Logger& logger)
 {
-  if (ids.empty())
-  {
-    for (const auto& record : tx.visibleObjects())
-    {
-      ids.push_back(record.id);
-    }
-  }
   std::vector<ObjectVisuals> visuals;
-  for (const int64_t ID : ids)
+  for (const auto& object : graph.getObjectNodes())
   {
-    if (const auto RECORD = tx.object(ID); RECORD && !RECORD->blocked)
+    if (!ids.empty() && std::ranges::find(ids, object.id) == ids.end())
     {
-      ObjectVisuals entry;
-      entry.object_id   = ID;
-      entry.image_crops = tx.crops(ID);
-      visuals.push_back(std::move(entry));
+      continue;
     }
+    ObjectVisuals entry;
+    entry.object_id = object.id;
+    for (const auto& crop : object.crops)
+    {
+      try
+      {
+        entry.image_crops.push_back(*cv_bridge::toCvCopy(*crop, "bgr8")->toImageMsg());
+      }
+      catch (const cv_bridge::Exception& e)
+      {
+        RCLCPP_WARN(logger, "Object %ld: skipping undecodable crop: %s", object.id, e.what());
+      }
+    }
+    visuals.push_back(std::move(entry));
   }
   return visuals;
 }
@@ -95,113 +100,103 @@ pluginlib::ClassLoader<IWorker>& workerLoader()
 
 SceneGraphManagerNode::SceneGraphManagerNode(const rclcpp::NodeOptions& options)
   : Node("scene_graph_manager", options)
+  , m_graph(std::make_shared<SceneGraph>())
   , m_params(scene_graph_manager::ParamListener(get_node_parameters_interface()).get_params())
   , m_diagnostics(this)
 {
   m_diagnostics.setHardwareID("scene_graph_manager");
-  m_diagnostics.add("database", this, &SceneGraphManagerNode::onDiagnostic);
+  m_diagnostics.add("scene_graph", this, &SceneGraphManagerNode::onDiagnostic);
 
   m_scene_graph_pub =
     create_publisher<SceneGraphMsg>("scene_graph", rclcpp::QoS(1).reliable().transient_local());
 
-  m_read_group      = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
-  m_get_objects_srv = create_service<GetObjects>(
+  // Read services get their own group so they don't queue behind writes.
+  m_read_group = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+
+  m_services.push_back(create_service<GetObjects>(
     "get_objects",
     [this](const GetObjects::Request::SharedPtr& /*request*/,
            const GetObjects::Response::SharedPtr& response) {
-      for (auto& record : m_db.read([](const Tx& tx) { return tx.visibleObjects(); }))
-      {
-        ManagedObject object;
-        object.id              = record.id;
-        object.class_name      = std::move(record.class_name);
-        object.detection       = std::move(record.detection);
-        object.header.stamp    = record.last_updated;
-        object.header.frame_id = m_params.frame_id;
-        object.source          = record.source;
-        object.last_updated    = record.last_updated;
-        object.last_seen       = record.last_seen;
-        response->objects.push_back(std::move(object));
-      }
+      response->objects = std::move(m_graph->toMsg()->object_nodes);
     },
     rclcpp::ServicesQoS(),
-    m_read_group);
+    m_read_group));
 
-  m_get_object_visuals_srv = create_service<GetObjectVisuals>(
+  m_services.push_back(create_service<GetObjectVisuals>(
     "get_object_visuals",
     [this](const GetObjectVisuals::Request::SharedPtr& request,
            const GetObjectVisuals::Response::SharedPtr& response) {
-      response->visuals =
-        m_db.read([&](const Tx& tx) { return visibleCrops(tx, request->object_ids); });
+      response->visuals = objectCrops(*m_graph, request->object_ids, get_logger());
     },
     rclcpp::ServicesQoS(),
-    m_read_group);
+    m_read_group));
 
-  m_block_object_srv = create_service<BlockObject>(
-    "block_object",
-    [this](const BlockObject::Request::SharedPtr& request,
-           const BlockObject::Response::SharedPtr& response) {
-      response->success = m_db.write([&](Tx& tx) { return tx.block(request->object_id); });
-      response->message = response->success ? "Object blocked" : "Object ID not found";
+  m_services.push_back(create_service<DeleteObject>(
+    "delete_object",
+    [this](const DeleteObject::Request::SharedPtr& request,
+           const DeleteObject::Response::SharedPtr& response) {
+      // removeNode takes any node id; this service only deletes objects.
+      const auto NODE = m_graph->findNode(request->object_id);
+      if (!NODE || !std::holds_alternative<ObjectNode>(*NODE))
+      {
+        response->message = "Object ID not found";
+      }
+      else if (const auto RESULT = m_graph->removeNode(request->object_id); !RESULT)
+      {
+        response->message = RESULT.error().message;
+      }
+      else
+      {
+        response->success = true;
+        response->message = "Object deleted";
+      }
       RCLCPP_INFO(
-        get_logger(), "BlockObject id=%ld: %s", request->object_id, response->message.c_str());
-    });
+        get_logger(), "DeleteObject id=%ld: %s", request->object_id, response->message.c_str());
+    }));
 
-  m_unblock_object_srv = create_service<UnblockObject>(
-    "unblock_object",
-    [this](const UnblockObject::Request::SharedPtr& request,
-           const UnblockObject::Response::SharedPtr& response) {
-      response->success = m_db.write([&](Tx& tx) { return tx.unblock(request->object_id); });
-      response->message = response->success ? "Object unblocked" : "Object ID not blocked";
-      RCLCPP_INFO(
-        get_logger(), "UnblockObject id=%ld: %s", request->object_id, response->message.c_str());
-    });
-
-  m_edit_object_srv = create_service<EditObject>(
+  m_services.push_back(create_service<EditObject>(
     "edit_object",
     [this](const EditObject::Request::SharedPtr& request,
            const EditObject::Response::SharedPtr& response) {
-      const auto NOW     = now();
-      const auto FAILURE = m_db.write([&](Tx& tx) { return tx.edit(*request, NOW); });
-      response->success  = FAILURE == EditFailure::SUCCESS;
-      switch (FAILURE)
-      {
-        case EditFailure::SUCCESS:
-          response->message = "Object edited successfully";
-          break;
-        case EditFailure::UNKNOWN_OBJECT:
-          response->message = "Object ID not found or blocked";
-          break;
-        case EditFailure::INVALID_CROP_INDEX:
-          response->message = "Invalid crop index in remove_crop_indices; edit rejected";
-          break;
-      }
+      const auto RESULT = m_graph->setObjectClass(request->object_id, request->class_name);
+      response->success = RESULT.has_value();
+      response->message = RESULT ? "Object edited successfully" : RESULT.error().message;
       RCLCPP_INFO(
         get_logger(), "EditObject id=%ld: %s", request->object_id, response->message.c_str());
-    });
+    }));
 
-  m_add_scene_context_srv = create_service<AddSceneContext>(
-    "add_scene_context",
-    [this](const AddSceneContext::Request::SharedPtr& request,
-           const AddSceneContext::Response::SharedPtr& response) {
-      const auto [ID, CREATED] =
-        m_db.write([&](Tx& tx) { return tx.addContext(request->node_id, request->context); });
-      response->success = ID != 0;
-      if (!response->success)
+  m_services.push_back(create_service<AddConcept>(
+    "add_concept",
+    [this](const AddConcept::Request::SharedPtr& request,
+           const AddConcept::Response::SharedPtr& response) {
+      const auto RESULT =
+        m_graph->addConceptEdge(request->source_id, request->relation, request->label);
+      response->success = RESULT.has_value();
+      if (!RESULT)
       {
-        response->message = "Node does not exist, is a blocked object, or the context is invalid";
+        response->message = RESULT.error().message;
         return;
       }
-      response->context_node_id = ID;
-      response->created         = CREATED;
-      response->message         = CREATED ? "Context added" : "Context already exists";
-    });
+      response->concept_id = RESULT->id;
+      response->created    = RESULT->created;
+      response->message    = RESULT->created ? "Concept added" : "Concept already exists";
+    }));
+
+  m_services.push_back(create_service<AddEdge>(
+    "add_edge",
+    [this](const AddEdge::Request::SharedPtr& request,
+           const AddEdge::Response::SharedPtr& response) {
+      const auto RESULT = m_graph->addEdge(request->source_id, request->target_id, request->label);
+      response->success = RESULT.has_value();
+      response->message = RESULT ? "Edge added" : RESULT.error().message;
+    }));
 
   // Load and initialize every worker before starting any.
   for (const auto& name : m_params.workers)
   {
     const auto TYPE = declare_parameter<std::string>("worker_types." + name);
     m_workers.push_back(workerLoader().createUniqueInstance(TYPE));
-    m_workers.back()->initialize(*this, m_db, name, m_diagnostics);
+    m_workers.back()->initialize(*this, m_graph, name, m_diagnostics);
     RCLCPP_INFO(get_logger(), "Loaded worker '%s' (%s)", name.c_str(), TYPE.c_str());
   }
   for (auto& worker : m_workers)
@@ -226,32 +221,27 @@ void SceneGraphManagerNode::publishLoop(const std::stop_token& stop)
   const auto PERIOD = std::chrono::duration<double>(1.0 / m_params.publish_max_rate_hz);
   std::mutex mutex;
   std::condition_variable_any wake;
-  std::optional<int64_t> published_count;
   while (!stop.stop_requested())
   {
-    // Read the count before building: a change made meanwhile triggers the next publish.
-    if (const int64_t COUNT = m_db.changeCount(); COUNT != published_count)
+    // An escaping exception would terminate the process; a failed publish waits for the next tick.
+    std::string error;
+    try
     {
-      published_count = COUNT;
-      // An escaping exception would terminate the process; a failed publish waits for the next
-      // change.
-      std::string error;
-      try
-      {
-        publishSceneGraph();
-      }
-      catch (const std::exception& e)
-      {
-        error = e.what();
-      }
-      catch (...)
-      {
-        error = "unknown exception";
-      }
-      if (!error.empty())
-      {
-        RCLCPP_ERROR(get_logger(), "Publishing the scene graph failed: %s", error.c_str());
-      }
+      publishSceneGraph();
+    }
+    catch (const std::exception& e)
+    {
+      error = e.what();
+    }
+    catch (...)
+    {
+      error = "unknown exception";
+    }
+    if (!error.empty())
+    {
+      RCLCPP_ERROR(get_logger(), "Publishing the scene graph failed: %s", error.c_str());
+    }
+    {
       const std::scoped_lock LOCK{m_publish_stats_mutex};
       m_publish_count += error.empty() ? 1 : 0;
       m_publish_error = std::move(error);
@@ -263,24 +253,7 @@ void SceneGraphManagerNode::publishLoop(const std::stop_token& stop)
 
 void SceneGraphManagerNode::publishSceneGraph()
 {
-  auto [graph, objects] =
-    m_db.read([](const Tx& tx) { return std::pair{tx.visibleGraph(), tx.visibleObjects()}; });
-  auto msg = graph.toMsg();
-
-  std::unordered_map<int64_t, const ObjectRecord*> by_id;
-  for (const auto& record : objects)
-  {
-    by_id.emplace(record.id, &record);
-  }
-  for (auto& node : msg->object_nodes)
-  {
-    if (const auto IT = by_id.find(node.id); IT != by_id.end())
-    {
-      node.source       = IT->second->source;
-      node.last_updated = IT->second->last_updated;
-      node.last_seen    = IT->second->last_seen;
-    }
-  }
+  auto msg             = m_graph->toMsg();
   msg->header.stamp    = now();
   msg->header.frame_id = m_params.frame_id;
   m_scene_graph_pub->publish(std::move(msg));
@@ -288,12 +261,12 @@ void SceneGraphManagerNode::publishSceneGraph()
 
 void SceneGraphManagerNode::onDiagnostic(diagnostic_updater::DiagnosticStatusWrapper& stat)
 {
-  const auto COUNTS = m_db.read([](const Tx& tx) { return tx.counts(); });
-  stat.add("Objects", COUNTS.objects);
-  stat.add("Blocked objects", COUNTS.blocked_objects);
-  stat.add("Concepts", COUNTS.concepts);
-  stat.add("Edges", COUNTS.edges);
-  stat.add("Changed rows", m_db.changeCount());
+  const auto OBJECTS  = m_graph->getObjectNodes().size();
+  const auto CONCEPTS = m_graph->getConceptNodes().size();
+  const auto EDGES    = m_graph->getEdges().size();
+  stat.add("Objects", OBJECTS);
+  stat.add("Concepts", CONCEPTS);
+  stat.add("Edges", EDGES);
   stat.add("Workers", m_workers.size());
   const std::scoped_lock LOCK{m_publish_stats_mutex};
   stat.add("Published graphs", m_publish_count);
@@ -305,11 +278,10 @@ void SceneGraphManagerNode::onDiagnostic(diagnostic_updater::DiagnosticStatusWra
     return;
   }
   stat.summaryf(diagnostic_msgs::msg::DiagnosticStatus::OK,
-                "%ld objects (%ld blocked), %ld concepts, %ld edges",
-                COUNTS.objects,
-                COUNTS.blocked_objects,
-                COUNTS.concepts,
-                COUNTS.edges);
+                "%zu objects, %zu concepts, %zu edges",
+                OBJECTS,
+                CONCEPTS,
+                EDGES);
 }
 
 } // namespace semantic_scene_forests_manager

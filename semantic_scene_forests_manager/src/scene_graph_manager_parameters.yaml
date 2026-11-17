@@ -30,17 +30,17 @@ scene_graph_manager:
   frame_id:
     type: string
     default_value: "map"
-    description: "Frame ID stamped on scene_graph and get_objects headers."
+    description: "Frame ID stamped on the scene_graph header."
     validation:
       not_empty<>: []
   publish_max_rate_hz:
     type: double
     default_value: 2.0
-    description: "Rate at which the database is checked for changes; scene_graph is republished only when it changed."
+    description: "Rate at which scene_graph is published."
     validation:
       gt<>: [0.0]
   workers:
     type: string_array
     default_value: []
-    description: "Worker names to load; each needs worker_types.<name> set to a plugin class. The name is the worker's parameter prefix and its key for progress marks."
+    description: "Worker names to load; each needs worker_types.<name> set to a plugin class. The name is the worker's parameter prefix and its key in the nodes' worker state."
     read_only: true

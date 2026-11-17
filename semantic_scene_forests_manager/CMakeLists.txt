@@ -41,7 +41,7 @@ find_package(generate_parameter_library REQUIRED)
 find_package(semantic_scene_forests_object_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(vision_msgs REQUIRED)
-find_package(SQLite3 REQUIRED)
+find_package(cv_bridge REQUIRED)
 find_package(diagnostic_updater REQUIRED)
 # The core package does not export its own dependencies; find them first.
 find_package(Boost REQUIRED)
@@ -49,27 +49,22 @@ find_package(fmt REQUIRED)
 find_package(semantic_scene_forests_msgs REQUIRED)
 find_package(semantic_scene_forests REQUIRED)
 
-add_library(world_db SHARED
-  src/database.cpp
-)
-
-target_include_directories(world_db PUBLIC
+# Header-only worker interface plus the shared dependencies. The name is kept for the tracker and
+# generation packages, which still link it.
+add_library(world_db INTERFACE)
+target_include_directories(world_db INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
-
-target_compile_features(world_db PUBLIC cxx_std_20)
-
+target_compile_features(world_db INTERFACE cxx_std_20)
 target_link_libraries(world_db
-  PUBLIC
+  INTERFACE
     ${semantic_scene_forests_object_msgs_TARGETS}
     ${sensor_msgs_TARGETS}
     ${vision_msgs_TARGETS}
     rclcpp::rclcpp
     diagnostic_updater::diagnostic_updater
     semantic_scene_forests::semantic_scene_forests
-  PRIVATE
-    SQLite::SQLite3
 )
 
 generate_parameter_library(scene_graph_manager_parameters
@@ -83,6 +78,7 @@ target_compile_features(scene_graph_manager_component PUBLIC cxx_std_20)
 target_link_libraries(scene_graph_manager_component
   PUBLIC
     world_db
+    cv_bridge::cv_bridge
     pluginlib::pluginlib
     rclcpp_components::component
     scene_graph_manager_parameters
@@ -120,12 +116,6 @@ install(DIRECTORY include/
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
 
-  ament_add_gtest(test_database_objects test/test_database_objects.cpp)
-  target_link_libraries(test_database_objects world_db)
-
-  ament_add_gtest(test_database_graph test/test_database_graph.cpp)
-  target_link_libraries(test_database_graph world_db)
-
   ament_add_gtest(test_scene_graph_manager_node test/test_scene_graph_manager_node.cpp
     TIMEOUT 120)
   target_include_directories(test_scene_graph_manager_node PRIVATE src)
@@ -145,6 +135,7 @@ ament_export_dependencies(
   semantic_scene_forests_object_msgs
   sensor_msgs
   vision_msgs
+  cv_bridge
 )
 
 ament_package()
