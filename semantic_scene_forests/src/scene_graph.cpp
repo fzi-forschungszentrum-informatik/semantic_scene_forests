@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <mutex>
 #include <set>
 #include <tuple>
 #include <unordered_set>
@@ -41,15 +42,46 @@
 
 namespace fzi::semantic_scene_forests {
 
-SceneGraph::SceneGraph()
-  : m_next_object_id(1)
-  , m_next_concept_id(-1)
+namespace {
+
+std::chrono::nanoseconds toDuration(const builtin_interfaces::msg::Time& stamp)
 {
+  return std::chrono::seconds(stamp.sec) + std::chrono::nanoseconds(stamp.nanosec);
 }
+
+std::chrono::nanoseconds cropStamp(const CropPtr& crop)
+{
+  return toDuration(crop->header.stamp);
+}
+
+//! Label rules ported from validateConceptLabel (generation) and conceptLabel (manager).
+std::expected<std::string, SceneGraphError> conceptLabel(const std::string& raw)
+{
+  const auto FIRST = raw.find_first_not_of(" \t");
+  if (FIRST == std::string::npos)
+  {
+    return std::unexpected(SceneGraphError::invalidLabel("must not be empty"));
+  }
+  std::string label = raw.substr(FIRST, raw.find_last_not_of(" \t") - FIRST + 1);
+  if (label.size() > 128U)
+  {
+    return std::unexpected(SceneGraphError::invalidLabel("must not exceed 128 bytes"));
+  }
+  if (std::ranges::any_of(
+        label, [](unsigned char character) { return character < 0x20U || character == 0x7FU; }))
+  {
+    return std::unexpected(SceneGraphError::invalidLabel("must not contain control characters"));
+  }
+  return label;
+}
+
+} // namespace
+
+SceneGraph::SceneGraph() = default;
 
 SceneGraph::~SceneGraph() = default;
 
-// Both go through swap(), which rebuilds the descriptor maps of both graphs.
+// Both go through swap(), which locks both graphs and rebuilds their descriptor maps.
 SceneGraph::SceneGraph(SceneGraph&& other) noexcept
   : SceneGraph()
 {
@@ -62,90 +94,272 @@ SceneGraph& SceneGraph::operator=(SceneGraph&& other) noexcept
   return *this;
 }
 
-std::expected<int64_t, SceneGraphError> SceneGraph::addObjectNodeWithId(
-  int64_t id,
-  const std::string& class_name,
-  const vision_msgs::msg::Detection3D::SharedPtr& detection,
-  const std::array<sensor_msgs::msg::Image::SharedPtr, 5>& visuals) noexcept
+int64_t SceneGraph::allocateId() noexcept
 {
-  if (this->m_id_map.left.count(id) > 0)
+  return m_next_id.fetch_add(1);
+}
+
+void SceneGraph::reserveId(const int64_t id) noexcept
+{
+  // INT64_MAX is the last allocatable id; anything beyond would wrap.
+  if (id == std::numeric_limits<int64_t>::max())
   {
-    return std::unexpected(SceneGraphError::nodeAlreadyExists(id));
+    return;
+  }
+  int64_t next = m_next_id.load();
+  while (next <= id && !m_next_id.compare_exchange_weak(next, id + 1))
+  {
+  }
+}
+
+ObjectNode* SceneGraph::findObject(const int64_t id) noexcept
+{
+  const auto IT = m_id_map.left.find(id);
+  if (IT == m_id_map.left.end())
+  {
+    return nullptr;
+  }
+  return std::get_if<ObjectNode>(&m_graph[IT->second]);
+}
+
+std::expected<void, SceneGraphError> SceneGraph::addObject(ObjectNode node) noexcept
+{
+  const std::unique_lock LOCK(m_mutex);
+  return addObjectUnlocked(std::move(node));
+}
+
+std::expected<void, SceneGraphError> SceneGraph::addObjectUnlocked(ObjectNode node) noexcept
+{
+  if (m_id_map.left.count(node.id) > 0)
+  {
+    return std::unexpected(SceneGraphError::nodeAlreadyExists(node.id));
+  }
+  if (std::ranges::any_of(node.crops, [](const CropPtr& crop) { return !crop; }))
+  {
+    return std::unexpected(SceneGraphError::graphEditingFailed("null crop"));
+  }
+  reserveId(node.id);
+  const int64_t ID = node.id;
+  auto* const VERTEX =
+    boost::add_vertex(SceneGraphNode(std::in_place_type<ObjectNode>, std::move(node)), m_graph);
+  m_id_map.insert({ID, VERTEX});
+  return {};
+}
+
+std::expected<void, SceneGraphError>
+SceneGraph::updateObjectPose(const int64_t id,
+                             const vision_msgs::msg::BoundingBox3D& bbox,
+                             const builtin_interfaces::msg::Time& last_seen) noexcept
+{
+  const std::unique_lock LOCK(m_mutex);
+  auto* object = findObject(id);
+  if (object == nullptr)
+  {
+    return std::unexpected(SceneGraphError::nodeDoesNotExist(id));
+  }
+  if (object->bbox != bbox)
+  {
+    object->bbox         = bbox;
+    object->last_updated = last_seen;
+  }
+  object->last_seen = last_seen;
+  return {};
+}
+
+void SceneGraph::setCropPolicy(const std::size_t max_crops,
+                               const std::chrono::nanoseconds min_interval) noexcept
+{
+  const std::unique_lock LOCK(m_mutex);
+  m_max_crops         = max_crops;
+  m_crop_min_interval = min_interval;
+}
+
+std::expected<bool, SceneGraphError> SceneGraph::offerCrop(const int64_t id,
+                                                           const CropPtr& crop) noexcept
+{
+  const std::unique_lock LOCK(m_mutex);
+  auto* object = findObject(id);
+  if (object == nullptr)
+  {
+    return std::unexpected(SceneGraphError::nodeDoesNotExist(id));
+  }
+  if (!crop)
+  {
+    return std::unexpected(SceneGraphError::graphEditingFailed("null crop"));
   }
 
-  // INT64_MAX is the last allocatable object id; anything beyond would wrap.
-  if (id != std::numeric_limits<int64_t>::max())
+  auto& crops         = object->crops;
+  const auto BY_STAMP = [](const CropPtr& a, const CropPtr& b) {
+    return cropStamp(a) < cropStamp(b);
+  };
+  if (!crops.empty() &&
+      cropStamp(crop) < cropStamp(*std::ranges::max_element(crops, BY_STAMP)) + m_crop_min_interval)
   {
-    this->m_next_object_id = std::max(this->m_next_object_id, id + 1);
+    return false;
   }
-  auto object_node =
-    ObjectNode{.id = id, .class_name = class_name, .detection = detection, .visuals = visuals};
+  if (crops.size() < m_max_crops)
+  {
+    crops.push_back(crop);
+    return true;
+  }
+  if (crops.empty())
+  {
+    return false; // max_crops == 0
+  }
+  crops.erase(std::ranges::min_element(crops, BY_STAMP));
+  crops.push_back(crop);
+  return true;
+}
 
-  const SceneGraphNode GRAPH_NODE(std::in_place_type<ObjectNode>, std::move(object_node));
-
-  SceneGraphAdjList::vertex_descriptor graph_index = boost::add_vertex(GRAPH_NODE, this->m_graph);
-
-  this->m_id_map.insert({id, graph_index});
-
-  return id;
+std::expected<void, SceneGraphError>
+SceneGraph::setObjectClass(const int64_t id, const std::string& class_name) noexcept
+{
+  const std::unique_lock LOCK(m_mutex);
+  auto* object = findObject(id);
+  if (object == nullptr)
+  {
+    return std::unexpected(SceneGraphError::nodeDoesNotExist(id));
+  }
+  object->class_name = class_name;
+  return {};
 }
 
 std::expected<int64_t, SceneGraphError>
-SceneGraph::addObjectNode(const std::string& class_name,
-                          const vision_msgs::msg::Detection3D::SharedPtr& detection,
-                          const std::array<sensor_msgs::msg::Image::SharedPtr, 5>& visuals) noexcept
+SceneGraph::addConceptNodeWithId(const int64_t id, const std::string& label) noexcept
 {
-  // Draw the next free id; addObjectNodeWithId advances the counter without
-  // overflow, and the final id simply fails as already existing when reused.
-  return addObjectNodeWithId(this->m_next_object_id, class_name, detection, visuals);
-}
-
-std::expected<int64_t, SceneGraphError>
-SceneGraph::addConceptNodeWithId(int64_t id, const std::string& label) noexcept
-{
-  if (this->m_id_map.left.count(id) > 0)
-  {
-    return std::unexpected(SceneGraphError::nodeAlreadyExists(id));
-  }
-
-  // INT64_MIN is the last allocatable concept id; anything beyond would wrap.
-  if (id != std::numeric_limits<int64_t>::min())
-  {
-    this->m_next_concept_id = std::min(this->m_next_concept_id, id - 1);
-  }
-  auto concept_node = ConceptNode{.id = id, .concept_name = label};
-
-  const SceneGraphNode GRAPH_NODE(std::in_place_type<ConceptNode>, std::move(concept_node));
-
-  SceneGraphAdjList::vertex_descriptor graph_index = boost::add_vertex(GRAPH_NODE, this->m_graph);
-
-  this->m_id_map.insert({id, graph_index});
-
-  return id;
+  const std::unique_lock LOCK(m_mutex);
+  return addConceptUnlocked(id, label);
 }
 
 std::expected<int64_t, SceneGraphError>
 SceneGraph::addConceptNode(const std::string& label) noexcept
 {
-  // Draw the next free id; addConceptNodeWithId decrements the counter without
-  // overflow, and the final id simply fails as already existing when reused.
-  return addConceptNodeWithId(this->m_next_concept_id, label);
+  const std::unique_lock LOCK(m_mutex);
+  return addConceptUnlocked(allocateId(), label);
+}
+
+std::expected<int64_t, SceneGraphError>
+SceneGraph::addConceptUnlocked(const int64_t id, const std::string& label) noexcept
+{
+  if (m_id_map.left.count(id) > 0)
+  {
+    return std::unexpected(SceneGraphError::nodeAlreadyExists(id));
+  }
+  reserveId(id);
+  auto* const VERTEX = boost::add_vertex(
+    SceneGraphNode(std::in_place_type<ConceptNode>, ConceptNode{.id = id, .concept_name = label}),
+    m_graph);
+  m_id_map.insert({id, VERTEX});
+  return id;
+}
+
+std::expected<ConceptLookup, SceneGraphError>
+SceneGraph::findOrAddConcept(const std::string& label) noexcept
+{
+  const std::unique_lock LOCK(m_mutex);
+  return findOrAddConceptUnlocked(label);
+}
+
+std::expected<ConceptLookup, SceneGraphError>
+SceneGraph::findOrAddConceptUnlocked(const std::string& label) noexcept
+{
+  auto clean = conceptLabel(label);
+  if (!clean)
+  {
+    return std::unexpected(clean.error());
+  }
+  // The lowest id wins when several concepts share a label.
+  for (const auto& [id, vertex_desc] : m_id_map.left)
+  {
+    if (const auto* concept_node = std::get_if<ConceptNode>(&m_graph[vertex_desc]);
+        concept_node != nullptr && concept_node->concept_name == *clean)
+    {
+      return ConceptLookup{.id = id, .created = false};
+    }
+  }
+  auto added = addConceptUnlocked(allocateId(), *clean);
+  if (!added)
+  {
+    return std::unexpected(added.error());
+  }
+  return ConceptLookup{.id = *added, .created = true};
+}
+
+std::expected<ConceptLookup, SceneGraphError> SceneGraph::addConceptEdge(
+  const int64_t source_id, const std::string& relation, const std::string& label) noexcept
+{
+  const std::unique_lock LOCK(m_mutex);
+  auto concept_node = findOrAddConceptUnlocked(label);
+  if (!concept_node)
+  {
+    return std::unexpected(concept_node.error());
+  }
+  if (auto edge = addEdgeUnlocked(source_id, concept_node->id, relation); !edge)
+  {
+    if (concept_node->created)
+    {
+      // A fresh concept has no edges, so removing it cannot fail or touch other data.
+      (void)removeNodeUnlocked(concept_node->id);
+    }
+    return std::unexpected(edge.error());
+  }
+  return *concept_node;
+}
+
+std::expected<void, SceneGraphError> SceneGraph::markProcessed(const int64_t id,
+                                                               const std::string& worker) noexcept
+{
+  const std::unique_lock LOCK(m_mutex);
+  const auto IT = m_id_map.left.find(id);
+  if (IT == m_id_map.left.end())
+  {
+    return std::unexpected(SceneGraphError::nodeDoesNotExist(id));
+  }
+  std::visit([&worker](auto& node) { node.workers[worker].processed = true; }, m_graph[IT->second]);
+  return {};
+}
+
+std::vector<int64_t> SceneGraph::unprocessedBy(const std::string& worker) const noexcept
+{
+  const std::shared_lock LOCK(m_mutex);
+  std::vector<int64_t> result;
+  for (const auto& [id, vertex_desc] : m_id_map.left)
+  {
+    const bool PROCESSED = std::visit(
+      [&worker](const auto& node) {
+        const auto IT = node.workers.find(worker);
+        return IT != node.workers.end() && IT->second.processed;
+      },
+      m_graph[vertex_desc]);
+    if (!PROCESSED)
+    {
+      result.push_back(id);
+    }
+  }
+  return result;
 }
 
 std::expected<SceneGraphNode, SceneGraphError> SceneGraph::removeNode(const int64_t id) noexcept
 {
-  const auto IT = this->m_id_map.left.find(id);
-  if (IT == this->m_id_map.left.end())
+  const std::unique_lock LOCK(m_mutex);
+  return removeNodeUnlocked(id);
+}
+
+std::expected<SceneGraphNode, SceneGraphError>
+SceneGraph::removeNodeUnlocked(const int64_t id) noexcept
+{
+  const auto IT = m_id_map.left.find(id);
+  if (IT == m_id_map.left.end())
   {
     return std::unexpected(SceneGraphError::nodeDoesNotExist(id));
   }
 
   auto* const VERTEX_DESC     = IT->second;
-  SceneGraphNode removed_node = this->m_graph[VERTEX_DESC];
+  SceneGraphNode removed_node = m_graph[VERTEX_DESC];
 
-  this->m_id_map.left.erase(IT);
-  boost::clear_vertex(VERTEX_DESC, this->m_graph);
-  boost::remove_vertex(VERTEX_DESC, this->m_graph);
+  m_id_map.left.erase(IT);
+  boost::clear_vertex(VERTEX_DESC, m_graph);
+  boost::remove_vertex(VERTEX_DESC, m_graph);
 
   return removed_node;
 }
@@ -153,91 +367,95 @@ std::expected<SceneGraphNode, SceneGraphError> SceneGraph::removeNode(const int6
 std::expected<std::vector<SceneGraphNode>, SceneGraphError>
 SceneGraph::removeIsolatedNodes() noexcept
 {
-  std::vector<int64_t> isolated_ids;
+  const std::unique_lock LOCK(m_mutex);
+  return removeIsolatedUnlocked(false);
+}
 
-  for (const auto& [id, vertex_desc] : this->m_id_map.left)
+std::vector<int64_t> SceneGraph::pruneIsolatedConcepts() noexcept
+{
+  const std::unique_lock LOCK(m_mutex);
+  std::vector<int64_t> ids;
+  for (const auto& node : removeIsolatedUnlocked(true))
   {
-    const bool HAS_OUTGOING = boost::out_degree(vertex_desc, this->m_graph) > 0;
+    ids.push_back(std::get<ConceptNode>(node).id);
+  }
+  return ids;
+}
 
-    bool has_incoming = false;
-    using EdgeIter    = boost::graph_traits<SceneGraphAdjList>::edge_iterator;
-    EdgeIter ei;
-    EdgeIter ei_end;
-    boost::tie(ei, ei_end) = boost::edges(this->m_graph);
-    for (; ei != ei_end; ++ei)
-    {
-      if (boost::target(*ei, this->m_graph) == vertex_desc)
-      {
-        has_incoming = true;
-        break;
-      }
-    }
+std::vector<SceneGraphNode> SceneGraph::removeIsolatedUnlocked(const bool concepts_only) noexcept
+{
+  std::unordered_set<SceneGraphAdjList::vertex_descriptor> with_incoming;
+  for (auto [ei, ei_end] = boost::edges(m_graph); ei != ei_end; ++ei)
+  {
+    with_incoming.insert(boost::target(*ei, m_graph));
+  }
 
-    if (!HAS_OUTGOING && !has_incoming)
+  std::vector<int64_t> isolated_ids;
+  for (const auto& [id, vertex_desc] : m_id_map.left)
+  {
+    if (boost::out_degree(vertex_desc, m_graph) == 0 && !with_incoming.contains(vertex_desc) &&
+        (!concepts_only || std::holds_alternative<ConceptNode>(m_graph[vertex_desc])))
     {
       isolated_ids.push_back(id);
     }
   }
 
   std::vector<SceneGraphNode> removed_nodes;
+  removed_nodes.reserve(isolated_ids.size());
   for (const int64_t ID : isolated_ids)
   {
-    auto result = removeNode(ID);
-    if (!result)
-    {
-      return std::unexpected(result.error());
-    }
-    removed_nodes.push_back(std::move(*result));
+    removed_nodes.push_back(*removeNodeUnlocked(ID)); // ids come from m_id_map
   }
-
   return removed_nodes;
 }
 
-std::optional<SceneGraphNode> SceneGraph::findNode(const int64_t id) noexcept
+std::optional<SceneGraphNode> SceneGraph::findNode(const int64_t id) const noexcept
 {
-  const auto IT = this->m_id_map.left.find(id);
-  if (IT == this->m_id_map.left.end())
+  const std::shared_lock LOCK(m_mutex);
+  const auto IT = m_id_map.left.find(id);
+  if (IT == m_id_map.left.end())
   {
     return std::nullopt;
   }
-  return this->m_graph[IT->second];
+  return m_graph[IT->second];
 }
 
 bool SceneGraph::hasNode(const int64_t id) const noexcept
 {
-  return this->m_id_map.left.count(id) > 0;
+  const std::shared_lock LOCK(m_mutex);
+  return m_id_map.left.count(id) > 0;
 }
 
 std::expected<std::vector<SceneGraphEdge>, SceneGraphError>
 SceneGraph::findEdges(const int64_t from, const int64_t to) const noexcept
 {
-  const auto FROM_IT = this->m_id_map.left.find(from);
-  if (FROM_IT == this->m_id_map.left.end())
+  const std::shared_lock LOCK(m_mutex);
+  return findEdgesUnlocked(from, to);
+}
+
+std::expected<std::vector<SceneGraphEdge>, SceneGraphError>
+SceneGraph::findEdgesUnlocked(const int64_t from, const int64_t to) const noexcept
+{
+  const auto FROM_IT = m_id_map.left.find(from);
+  if (FROM_IT == m_id_map.left.end())
   {
     return std::unexpected(SceneGraphError::nodeDoesNotExist(from));
   }
 
-  const auto TO_IT = this->m_id_map.left.find(to);
-  if (TO_IT == this->m_id_map.left.end())
+  const auto TO_IT = m_id_map.left.find(to);
+  if (TO_IT == m_id_map.left.end())
   {
     return std::unexpected(SceneGraphError::nodeDoesNotExist(to));
   }
 
   std::vector<SceneGraphEdge> edges;
-
-  using OutEdgeIter = boost::graph_traits<SceneGraphAdjList>::out_edge_iterator;
-  OutEdgeIter ei;
-  OutEdgeIter ei_end;
-  boost::tie(ei, ei_end) = boost::out_edges(FROM_IT->second, this->m_graph);
-
-  for (; ei != ei_end; ++ei)
+  for (auto [ei, ei_end] = boost::out_edges(FROM_IT->second, m_graph); ei != ei_end; ++ei)
   {
-    if (boost::target(*ei, this->m_graph) == TO_IT->second)
+    if (boost::target(*ei, m_graph) == TO_IT->second)
     {
-      edges.push_back(this->m_graph[*ei]);
+      edges.push_back(m_graph[*ei]);
     }
   }
-
   return edges;
 }
 
@@ -245,49 +463,45 @@ bool SceneGraph::hasEdge(const int64_t from,
                          const int64_t to,
                          const std::string& label) const noexcept
 {
-  const auto EDGES_RESULT = findEdges(from, to);
-  if (!EDGES_RESULT)
-  {
-    return false;
-  }
-
-  const auto& edges = *EDGES_RESULT;
-  return std::ranges::any_of(edges,
-                             [&label](const SceneGraphEdge& edge) { return edge.label == label; });
+  const std::shared_lock LOCK(m_mutex);
+  const auto EDGES_RESULT = findEdgesUnlocked(from, to);
+  return EDGES_RESULT && std::ranges::any_of(*EDGES_RESULT, [&label](const SceneGraphEdge& edge) {
+           return edge.label == label;
+         });
 }
-
 
 std::expected<SceneGraphEdge, SceneGraphError>
 SceneGraph::addEdge(const int64_t from, const int64_t to, const std::string& label) noexcept
 {
-  const auto FROM_IT = this->m_id_map.left.find(from);
-  if (FROM_IT == this->m_id_map.left.end())
+  const std::unique_lock LOCK(m_mutex);
+  return addEdgeUnlocked(from, to, label);
+}
+
+std::expected<SceneGraphEdge, SceneGraphError>
+SceneGraph::addEdgeUnlocked(const int64_t from, const int64_t to, const std::string& label) noexcept
+{
+  const auto FROM_IT = m_id_map.left.find(from);
+  if (FROM_IT == m_id_map.left.end())
   {
     return std::unexpected(SceneGraphError::nodeDoesNotExist(from));
   }
 
-  const auto TO_IT = this->m_id_map.left.find(to);
-  if (TO_IT == this->m_id_map.left.end())
+  const auto TO_IT = m_id_map.left.find(to);
+  if (TO_IT == m_id_map.left.end())
   {
     return std::unexpected(SceneGraphError::nodeDoesNotExist(to));
   }
 
   auto* const TARGET_VERTEX = TO_IT->second;
 
-  if (const auto& target_node = this->m_graph[TARGET_VERTEX];
-      std::holds_alternative<ObjectNode>(target_node))
+  if (std::holds_alternative<ObjectNode>(m_graph[TARGET_VERTEX]))
   {
     return std::unexpected(SceneGraphError::invalidEdge(from, to, label));
   }
 
-  using OutEdgeIter = boost::graph_traits<SceneGraphAdjList>::out_edge_iterator;
-  OutEdgeIter ei;
-  OutEdgeIter ei_end;
-  boost::tie(ei, ei_end) = boost::out_edges(FROM_IT->second, this->m_graph);
-
-  for (; ei != ei_end; ++ei)
+  for (auto [ei, ei_end] = boost::out_edges(FROM_IT->second, m_graph); ei != ei_end; ++ei)
   {
-    if (boost::target(*ei, this->m_graph) == TARGET_VERTEX && this->m_graph[*ei].label == label)
+    if (boost::target(*ei, m_graph) == TARGET_VERTEX && m_graph[*ei].label == label)
     {
       return std::unexpected(SceneGraphError::edgeAlreadyExists(from, to));
     }
@@ -322,9 +536,8 @@ SceneGraph::addEdge(const int64_t from, const int64_t to, const std::string& lab
 
   try
   {
-    boost::breadth_first_search(this->m_graph,
-                                TARGET_VERTEX,
-                                boost::visitor(CycleVisitor{SOURCE_VERTEX}).color_map(color_pmap));
+    boost::breadth_first_search(
+      m_graph, TARGET_VERTEX, boost::visitor(CycleVisitor{SOURCE_VERTEX}).color_map(color_pmap));
   }
   catch (const CycleDetected&)
   {
@@ -332,42 +545,44 @@ SceneGraph::addEdge(const int64_t from, const int64_t to, const std::string& lab
   }
 
   SceneGraphEdge edge{.label = label};
-  auto [added_edge, success] = boost::add_edge(FROM_IT->second, TARGET_VERTEX, edge, this->m_graph);
+  auto [added_edge, success] = boost::add_edge(SOURCE_VERTEX, TARGET_VERTEX, edge, m_graph);
 
   if (!success)
   {
     return std::unexpected(SceneGraphError::edgeDoesNotExist(from, to, label));
   }
 
-  return this->m_graph[added_edge];
+  return m_graph[added_edge];
 }
 
 std::expected<SceneGraphEdge, SceneGraphError>
 SceneGraph::removeEdge(const int64_t from, const int64_t to, const std::string& label) noexcept
 {
-  const auto FROM_IT = this->m_id_map.left.find(from);
-  if (FROM_IT == this->m_id_map.left.end())
+  const std::unique_lock LOCK(m_mutex);
+  return removeEdgeUnlocked(from, to, label);
+}
+
+std::expected<SceneGraphEdge, SceneGraphError> SceneGraph::removeEdgeUnlocked(
+  const int64_t from, const int64_t to, const std::string& label) noexcept
+{
+  const auto FROM_IT = m_id_map.left.find(from);
+  if (FROM_IT == m_id_map.left.end())
   {
     return std::unexpected(SceneGraphError::nodeDoesNotExist(from));
   }
 
-  const auto TO_IT = this->m_id_map.left.find(to);
-  if (TO_IT == this->m_id_map.left.end())
+  const auto TO_IT = m_id_map.left.find(to);
+  if (TO_IT == m_id_map.left.end())
   {
     return std::unexpected(SceneGraphError::nodeDoesNotExist(to));
   }
 
-  using OutEdgeIter = boost::graph_traits<SceneGraphAdjList>::out_edge_iterator;
-  OutEdgeIter ei;
-  OutEdgeIter ei_end;
-  boost::tie(ei, ei_end) = boost::out_edges(FROM_IT->second, this->m_graph);
-
-  for (; ei != ei_end; ++ei)
+  for (auto [ei, ei_end] = boost::out_edges(FROM_IT->second, m_graph); ei != ei_end; ++ei)
   {
-    if (boost::target(*ei, this->m_graph) == TO_IT->second && this->m_graph[*ei].label == label)
+    if (boost::target(*ei, m_graph) == TO_IT->second && m_graph[*ei].label == label)
     {
-      SceneGraphEdge removed_edge = this->m_graph[*ei];
-      boost::remove_edge(*ei, this->m_graph);
+      SceneGraphEdge removed_edge = m_graph[*ei];
+      boost::remove_edge(*ei, m_graph);
       return removed_edge;
     }
   }
@@ -378,38 +593,31 @@ SceneGraph::removeEdge(const int64_t from, const int64_t to, const std::string& 
 std::expected<std::vector<std::pair<int64_t, SceneGraphEdge>>, SceneGraphError>
 SceneGraph::outgoingEdges(const int64_t id) const noexcept
 {
-  const auto IT = this->m_id_map.left.find(id);
-  if (IT == this->m_id_map.left.end())
+  const std::shared_lock LOCK(m_mutex);
+  const auto IT = m_id_map.left.find(id);
+  if (IT == m_id_map.left.end())
   {
     return std::unexpected(SceneGraphError::nodeDoesNotExist(id));
   }
 
   std::vector<std::pair<int64_t, SceneGraphEdge>> edges;
-
-  using OutEdgeIter = boost::graph_traits<SceneGraphAdjList>::out_edge_iterator;
-  OutEdgeIter ei;
-  OutEdgeIter ei_end;
-  boost::tie(ei, ei_end) = boost::out_edges(IT->second, this->m_graph);
-
-  for (; ei != ei_end; ++ei)
+  for (auto [ei, ei_end] = boost::out_edges(IT->second, m_graph); ei != ei_end; ++ei)
   {
-    auto* const TARGET_VERTEX = boost::target(*ei, this->m_graph);
-    const auto TARGET_ID_IT   = this->m_id_map.right.find(TARGET_VERTEX);
-
-    if (TARGET_ID_IT != this->m_id_map.right.end())
+    const auto TARGET_ID_IT = m_id_map.right.find(boost::target(*ei, m_graph));
+    if (TARGET_ID_IT != m_id_map.right.end())
     {
-      edges.emplace_back(TARGET_ID_IT->second, this->m_graph[*ei]);
+      edges.emplace_back(TARGET_ID_IT->second, m_graph[*ei]);
     }
   }
-
   return edges;
 }
 
 std::expected<std::vector<std::pair<int64_t, SceneGraphEdge>>, SceneGraphError>
 SceneGraph::incomingEdges(const int64_t id) const noexcept
 {
-  const auto TARGET_IT = this->m_id_map.left.find(id);
-  if (TARGET_IT == this->m_id_map.left.end())
+  const std::shared_lock LOCK(m_mutex);
+  const auto TARGET_IT = m_id_map.left.find(id);
+  if (TARGET_IT == m_id_map.left.end())
   {
     return std::unexpected(SceneGraphError::nodeDoesNotExist(id));
   }
@@ -417,159 +625,129 @@ SceneGraph::incomingEdges(const int64_t id) const noexcept
   std::vector<std::pair<int64_t, SceneGraphEdge>> edges;
   auto* const TARGET_VERTEX = TARGET_IT->second;
 
-  for (const auto& [source_id, source_vertex] : this->m_id_map.left)
+  for (const auto& [source_id, source_vertex] : m_id_map.left)
   {
-    using OutEdgeIter = boost::graph_traits<SceneGraphAdjList>::out_edge_iterator;
-    OutEdgeIter ei;
-    OutEdgeIter ei_end;
-    boost::tie(ei, ei_end) = boost::out_edges(source_vertex, this->m_graph);
-
-    for (; ei != ei_end; ++ei)
+    for (auto [ei, ei_end] = boost::out_edges(source_vertex, m_graph); ei != ei_end; ++ei)
     {
-      if (boost::target(*ei, this->m_graph) == TARGET_VERTEX)
+      if (boost::target(*ei, m_graph) == TARGET_VERTEX)
       {
-        edges.emplace_back(source_id, this->m_graph[*ei]);
+        edges.emplace_back(source_id, m_graph[*ei]);
       }
     }
   }
-
   return edges;
 }
 
 std::vector<ConceptNode> SceneGraph::findConceptNodesByName(const std::string& name) const noexcept
 {
+  const std::shared_lock LOCK(m_mutex);
   std::vector<ConceptNode> result;
-
-  for (const auto& [id, vertex_desc] : this->m_id_map.left)
+  for (const auto& [id, vertex_desc] : m_id_map.left)
   {
-    const auto& node = this->m_graph[vertex_desc];
-    if (const auto* concept_node = std::get_if<ConceptNode>(&node))
+    if (const auto* concept_node = std::get_if<ConceptNode>(&m_graph[vertex_desc]);
+        concept_node != nullptr && concept_node->concept_name == name)
     {
-      if (concept_node->concept_name == name)
-      {
-        result.push_back(*concept_node);
-      }
+      result.push_back(*concept_node);
     }
   }
-
   return result;
 }
 
 std::vector<std::tuple<int64_t, int64_t, SceneGraphEdge>>
 SceneGraph::findEdgesByLabel(const std::string& label) const noexcept
 {
-  std::vector<std::tuple<int64_t, int64_t, SceneGraphEdge>> result;
-
-  using EdgeIter = boost::graph_traits<SceneGraphAdjList>::edge_iterator;
-  EdgeIter ei;
-  EdgeIter ei_end;
-  boost::tie(ei, ei_end) = boost::edges(this->m_graph);
-
-  for (; ei != ei_end; ++ei)
-  {
-    const auto& edge = this->m_graph[*ei];
-    if (edge.label == label)
-    {
-      auto* const SOURCE_VERTEX = boost::source(*ei, this->m_graph);
-      auto* const TARGET_VERTEX = boost::target(*ei, this->m_graph);
-
-      const auto SOURCE_ID_IT = this->m_id_map.right.find(SOURCE_VERTEX);
-      const auto TARGET_ID_IT = this->m_id_map.right.find(TARGET_VERTEX);
-
-      if (SOURCE_ID_IT != this->m_id_map.right.end() && TARGET_ID_IT != this->m_id_map.right.end())
-      {
-        result.emplace_back(SOURCE_ID_IT->second, TARGET_ID_IT->second, edge);
-      }
-    }
-  }
-
-  return result;
+  const std::shared_lock LOCK(m_mutex);
+  auto edges = getEdgesUnlocked();
+  std::erase_if(edges, [&label](const auto& edge) { return std::get<2>(edge).label != label; });
+  return edges;
 }
 
 std::vector<ObjectNode> SceneGraph::getObjectNodes() const noexcept
 {
+  const std::shared_lock LOCK(m_mutex);
   std::vector<ObjectNode> result;
-
-  for (const auto& [id, vertex_desc] : this->m_id_map.left)
+  for (const auto& [id, vertex_desc] : m_id_map.left)
   {
-    const auto& node = this->m_graph[vertex_desc];
-    if (const auto* object = std::get_if<ObjectNode>(&node))
+    if (const auto* object = std::get_if<ObjectNode>(&m_graph[vertex_desc]))
     {
       result.push_back(*object);
     }
   }
-
   return result;
 }
 
 std::vector<ConceptNode> SceneGraph::getConceptNodes() const noexcept
 {
+  const std::shared_lock LOCK(m_mutex);
   std::vector<ConceptNode> result;
-
-  for (const auto& [id, vertex_desc] : this->m_id_map.left)
+  for (const auto& [id, vertex_desc] : m_id_map.left)
   {
-    const auto& node = this->m_graph[vertex_desc];
-    if (const auto* concept_node = std::get_if<ConceptNode>(&node))
+    if (const auto* concept_node = std::get_if<ConceptNode>(&m_graph[vertex_desc]))
     {
       result.push_back(*concept_node);
     }
   }
-
   return result;
 }
 
 std::vector<SceneGraphNode> SceneGraph::getNodes() const noexcept
 {
+  const std::shared_lock LOCK(m_mutex);
   std::vector<SceneGraphNode> result;
-
-  for (const auto& [id, vertex_desc] : this->m_id_map.left)
+  for (const auto& [id, vertex_desc] : m_id_map.left)
   {
-    result.push_back(this->m_graph[vertex_desc]);
+    result.push_back(m_graph[vertex_desc]);
   }
-
   return result;
 }
 
 std::vector<std::tuple<int64_t, int64_t, SceneGraphEdge>> SceneGraph::getEdges() const noexcept
 {
+  const std::shared_lock LOCK(m_mutex);
+  return getEdgesUnlocked();
+}
+
+std::vector<std::tuple<int64_t, int64_t, SceneGraphEdge>>
+SceneGraph::getEdgesUnlocked() const noexcept
+{
   std::vector<std::tuple<int64_t, int64_t, SceneGraphEdge>> result;
-
-  using EdgeIter = boost::graph_traits<SceneGraphAdjList>::edge_iterator;
-  EdgeIter ei;
-  EdgeIter ei_end;
-  boost::tie(ei, ei_end) = boost::edges(this->m_graph);
-
-  for (; ei != ei_end; ++ei)
+  for (auto [ei, ei_end] = boost::edges(m_graph); ei != ei_end; ++ei)
   {
-    const auto& edge          = this->m_graph[*ei];
-    auto* const SOURCE_VERTEX = boost::source(*ei, this->m_graph);
-    auto* const TARGET_VERTEX = boost::target(*ei, this->m_graph);
+    const auto SOURCE_ID_IT = m_id_map.right.find(boost::source(*ei, m_graph));
+    const auto TARGET_ID_IT = m_id_map.right.find(boost::target(*ei, m_graph));
 
-    const auto SOURCE_ID_IT = this->m_id_map.right.find(SOURCE_VERTEX);
-    const auto TARGET_ID_IT = this->m_id_map.right.find(TARGET_VERTEX);
-
-    if (SOURCE_ID_IT != this->m_id_map.right.end() && TARGET_ID_IT != this->m_id_map.right.end())
+    if (SOURCE_ID_IT != m_id_map.right.end() && TARGET_ID_IT != m_id_map.right.end())
     {
-      result.emplace_back(SOURCE_ID_IT->second, TARGET_ID_IT->second, edge);
+      result.emplace_back(SOURCE_ID_IT->second, TARGET_ID_IT->second, m_graph[*ei]);
     }
   }
-
   return result;
 }
+
+namespace {
+
+ObjectNode objectFromMsg(const semantic_scene_forests_msgs::msg::ObjectNode& msg)
+{
+  return ObjectNode{.id           = msg.id,
+                    .class_name   = msg.class_name,
+                    .bbox         = msg.bbox,
+                    .frame_id     = msg.header.frame_id,
+                    .source       = msg.source,
+                    .last_seen    = msg.last_seen,
+                    .last_updated = msg.last_updated};
+}
+
+} // namespace
 
 std::expected<std::unique_ptr<SceneGraph>, SceneGraphError>
 SceneGraph::fromMsg(const semantic_scene_forests_msgs::msg::SceneGraph& msg) noexcept
 {
+  // The graph is not shared yet, so the unlocked helpers are safe.
   auto graph = std::make_unique<SceneGraph>();
 
   for (const auto& node_msg : msg.object_nodes)
   {
-    auto detection = std::make_shared<vision_msgs::msg::Detection3D>(node_msg.detection);
-    std::array<sensor_msgs::msg::Image::SharedPtr, 5> visuals{};
-
-    auto result = graph->addObjectNodeWithId(node_msg.id, node_msg.class_name, detection, visuals);
-
-    if (!result)
+    if (auto result = graph->addObjectUnlocked(objectFromMsg(node_msg)); !result)
     {
       return std::unexpected(result.error());
     }
@@ -577,7 +755,7 @@ SceneGraph::fromMsg(const semantic_scene_forests_msgs::msg::SceneGraph& msg) noe
 
   for (const auto& node_msg : msg.concept_nodes)
   {
-    if (auto result = graph->addConceptNodeWithId(node_msg.id, node_msg.class_name); !result)
+    if (auto result = graph->addConceptUnlocked(node_msg.id, node_msg.class_name); !result)
     {
       return std::unexpected(result.error());
     }
@@ -585,7 +763,8 @@ SceneGraph::fromMsg(const semantic_scene_forests_msgs::msg::SceneGraph& msg) noe
 
   for (const auto& edge_msg : msg.edges)
   {
-    if (auto result = graph->addEdge(edge_msg.source_id, edge_msg.target_id, edge_msg.label);
+    if (auto result =
+          graph->addEdgeUnlocked(edge_msg.source_id, edge_msg.target_id, edge_msg.label);
         !result)
     {
       return std::unexpected(result.error());
@@ -595,56 +774,43 @@ SceneGraph::fromMsg(const semantic_scene_forests_msgs::msg::SceneGraph& msg) noe
   return graph;
 }
 
-std::unique_ptr<semantic_scene_forests_msgs::msg::SceneGraph> SceneGraph::toMsg() noexcept
+std::unique_ptr<semantic_scene_forests_msgs::msg::SceneGraph> SceneGraph::toMsg() const noexcept
 {
+  const std::shared_lock LOCK(m_mutex);
   auto msg = std::make_unique<semantic_scene_forests_msgs::msg::SceneGraph>();
 
-  for (const auto& [id, vertex_desc] : this->m_id_map.left)
+  for (const auto& [id, vertex_desc] : m_id_map.left)
   {
-    const auto& node = this->m_graph[vertex_desc];
+    const auto& node = m_graph[vertex_desc];
     if (const auto* object = std::get_if<ObjectNode>(&node))
     {
       semantic_scene_forests_msgs::msg::ObjectNode object_node_msg;
-      object_node_msg.id         = object->id;
-      object_node_msg.class_name = object->class_name;
-      if (object->detection)
-      {
-        object_node_msg.detection = *object->detection;
-      }
-
-      msg->object_nodes.push_back(object_node_msg);
+      object_node_msg.header.frame_id = object->frame_id;
+      object_node_msg.header.stamp    = object->last_seen;
+      object_node_msg.id              = object->id;
+      object_node_msg.class_name      = object->class_name;
+      object_node_msg.bbox            = object->bbox;
+      object_node_msg.source          = object->source;
+      object_node_msg.last_seen       = object->last_seen;
+      object_node_msg.last_updated    = object->last_updated;
+      msg->object_nodes.push_back(std::move(object_node_msg));
     }
     else if (const auto* concept_node = std::get_if<ConceptNode>(&node))
     {
       semantic_scene_forests_msgs::msg::ConceptNode concept_node_msg;
       concept_node_msg.id         = concept_node->id;
       concept_node_msg.class_name = concept_node->concept_name;
-      msg->concept_nodes.push_back(concept_node_msg);
+      msg->concept_nodes.push_back(std::move(concept_node_msg));
     }
   }
 
-  using EdgeIter = boost::graph_traits<SceneGraphAdjList>::edge_iterator;
-  EdgeIter ei;
-  EdgeIter ei_end;
-  boost::tie(ei, ei_end) = boost::edges(this->m_graph);
-
-  for (; ei != ei_end; ++ei)
+  for (const auto& [source_id, target_id, edge] : getEdgesUnlocked())
   {
-    const auto& edge          = this->m_graph[*ei];
-    auto* const SOURCE_VERTEX = boost::source(*ei, this->m_graph);
-    auto* const TARGET_VERTEX = boost::target(*ei, this->m_graph);
-
-    const auto SOURCE_ID_IT = this->m_id_map.right.find(SOURCE_VERTEX);
-    const auto TARGET_ID_IT = this->m_id_map.right.find(TARGET_VERTEX);
-
-    if (SOURCE_ID_IT != this->m_id_map.right.end() && TARGET_ID_IT != this->m_id_map.right.end())
-    {
-      semantic_scene_forests_msgs::msg::Edge edge_msg;
-      edge_msg.source_id = SOURCE_ID_IT->second;
-      edge_msg.target_id = TARGET_ID_IT->second;
-      edge_msg.label     = edge.label;
-      msg->edges.push_back(edge_msg);
-    }
+    semantic_scene_forests_msgs::msg::Edge edge_msg;
+    edge_msg.source_id = source_id;
+    edge_msg.target_id = target_id;
+    edge_msg.label     = edge.label;
+    msg->edges.push_back(std::move(edge_msg));
   }
 
   return msg;
@@ -652,63 +818,44 @@ std::unique_ptr<semantic_scene_forests_msgs::msg::SceneGraph> SceneGraph::toMsg(
 
 std::expected<std::unique_ptr<SceneGraph>, SceneGraphError> SceneGraph::clone() const
 {
+  const std::shared_lock LOCK(m_mutex);
   auto result = std::make_unique<SceneGraph>();
 
-  for (const auto& [id, vertex_desc] : this->m_id_map.left)
+  // Nodes are copied whole; crops stay shared (they are immutable).
+  for (const auto& [id, vertex_desc] : m_id_map.left)
   {
-    const auto& node = this->m_graph[vertex_desc];
-    if (const auto* object = std::get_if<ObjectNode>(&node))
-    {
-      vision_msgs::msg::Detection3D::SharedPtr detection;
-      if (object->detection)
-      {
-        detection = std::make_shared<vision_msgs::msg::Detection3D>(*object->detection);
-      }
-
-      std::array<sensor_msgs::msg::Image::SharedPtr, 5> visuals;
-      for (std::size_t i = 0; i < object->visuals.size(); ++i)
-      {
-        if (object->visuals[i])
-        {
-          visuals[i] = std::make_shared<sensor_msgs::msg::Image>(*object->visuals[i]);
-        }
-      }
-
-      if (auto add_result = result->addObjectNodeWithId(id, object->class_name, detection, visuals);
-          !add_result)
-      {
-        return std::unexpected(add_result.error());
-      }
-    }
-    else if (const auto* concept_node = std::get_if<ConceptNode>(&node))
-    {
-      if (auto add_result = result->addConceptNodeWithId(id, concept_node->concept_name);
-          !add_result)
-      {
-        return std::unexpected(add_result.error());
-      }
-    }
+    result->m_id_map.insert({id, boost::add_vertex(m_graph[vertex_desc], result->m_graph)});
   }
 
-  for (const auto& [source_id, target_id, edge] : getEdges())
+  for (const auto& [source_id, target_id, edge] : getEdgesUnlocked())
   {
-    if (auto add_result = result->addEdge(source_id, target_id, edge.label); !add_result)
+    if (auto add_result = result->addEdgeUnlocked(source_id, target_id, edge.label); !add_result)
     {
       return std::unexpected(add_result.error());
     }
   }
 
-  result->m_next_object_id  = m_next_object_id;
-  result->m_next_concept_id = m_next_concept_id;
+  result->m_next_id           = m_next_id.load();
+  result->m_max_crops         = m_max_crops;
+  result->m_crop_min_interval = m_crop_min_interval;
   return result;
 }
 
 void SceneGraph::swap(SceneGraph& other) noexcept
 {
+  if (this == &other)
+  {
+    return;
+  }
+  const std::scoped_lock LOCK(m_mutex, other.m_mutex);
+
   m_id_map.swap(other.m_id_map);
   m_graph.swap(other.m_graph);
-  std::swap(m_next_object_id, other.m_next_object_id);
-  std::swap(m_next_concept_id, other.m_next_concept_id);
+  const int64_t NEXT_ID = m_next_id.load();
+  m_next_id             = other.m_next_id.load();
+  other.m_next_id       = NEXT_ID;
+  std::swap(m_max_crops, other.m_max_crops);
+  std::swap(m_crop_min_interval, other.m_crop_min_interval);
 
   // boost::adjacency_list::swap copies: every vertex descriptor is recreated,
   // so both id maps must be rebuilt from the (swapped) vertex properties.
@@ -727,58 +874,54 @@ void SceneGraph::swap(SceneGraph& other) noexcept
 std::expected<void, SceneGraphError> SceneGraph::updateObjectNodeFromMsg(
   const semantic_scene_forests_msgs::msg::ObjectNode& object_msg) noexcept
 {
-  const auto IT = this->m_id_map.left.find(object_msg.id);
-  if (IT != this->m_id_map.left.end())
+  const auto IT = m_id_map.left.find(object_msg.id);
+  if (IT == m_id_map.left.end())
   {
-    // An existing node of the wrong kind is a collision the caller must see.
-    if (!std::holds_alternative<ObjectNode>(this->m_graph[IT->second]))
-    {
-      return std::unexpected(SceneGraphError::nodeAlreadyExists(object_msg.id));
-    }
-
-    // Existing nodes are kept as-is; replacing them here would discard their
-    // visuals, which ObjectNode.msg does not carry.
-    return {};
+    return addObjectUnlocked(objectFromMsg(object_msg));
   }
 
-  auto detection = std::make_shared<vision_msgs::msg::Detection3D>(object_msg.detection);
-  std::array<sensor_msgs::msg::Image::SharedPtr, 5> visuals{};
-  if (auto result = addObjectNodeWithId(object_msg.id, object_msg.class_name, detection, visuals);
-      !result)
+  // An existing node of the wrong kind is a collision the caller must see.
+  auto* object = std::get_if<ObjectNode>(&m_graph[IT->second]);
+  if (object == nullptr)
   {
-    return std::unexpected(result.error());
+    return std::unexpected(SceneGraphError::nodeAlreadyExists(object_msg.id));
   }
+
+  // Crops and worker state are not in the message; keep them.
+  auto updated    = objectFromMsg(object_msg);
+  updated.crops   = std::move(object->crops);
+  updated.workers = std::move(object->workers);
+  *object         = std::move(updated);
   return {};
 }
 
 std::expected<void, SceneGraphError> SceneGraph::updateConceptNodeFromMsg(
   const semantic_scene_forests_msgs::msg::ConceptNode& concept_msg) noexcept
 {
-  const auto IT = this->m_id_map.left.find(concept_msg.id);
-  if (IT != this->m_id_map.left.end())
+  const auto IT = m_id_map.left.find(concept_msg.id);
+  if (IT == m_id_map.left.end())
   {
-    // An existing node of the wrong kind is a collision the caller must see.
-    if (!std::holds_alternative<ConceptNode>(this->m_graph[IT->second]))
+    if (auto result = addConceptUnlocked(concept_msg.id, concept_msg.class_name); !result)
     {
-      return std::unexpected(SceneGraphError::nodeAlreadyExists(concept_msg.id));
+      return std::unexpected(result.error());
     }
-
-    ConceptNode concept_node{.id = concept_msg.id, .concept_name = concept_msg.class_name};
-    SceneGraphNode node(std::in_place_type<ConceptNode>, std::move(concept_node));
-    this->m_graph[IT->second] = std::move(node);
     return {};
   }
 
-  if (auto result = addConceptNodeWithId(concept_msg.id, concept_msg.class_name); !result)
+  // An existing node of the wrong kind is a collision the caller must see.
+  auto* concept_node = std::get_if<ConceptNode>(&m_graph[IT->second]);
+  if (concept_node == nullptr)
   {
-    return std::unexpected(result.error());
+    return std::unexpected(SceneGraphError::nodeAlreadyExists(concept_msg.id));
   }
+  concept_node->concept_name = concept_msg.class_name;
   return {};
 }
 
 std::expected<void, SceneGraphError> SceneGraph::updateSceneGraphFromMsg(
   const semantic_scene_forests_msgs::msg::SceneGraph& msg) noexcept
 {
+  const std::unique_lock LOCK(m_mutex);
   // The live graph is edited in place: every operation that succeeds before an
   // invalid one keeps its effect, and only the offending operation is rejected
   // (its low-level check runs before any mutation).
@@ -819,27 +962,19 @@ std::expected<void, SceneGraphError> SceneGraph::updateSceneGraphFromMsg(
   }
   for (const int64_t ID : nodes_to_remove)
   {
-    if (auto result = removeNode(ID); !result)
+    if (auto result = removeNodeUnlocked(ID); !result)
     {
       return std::unexpected(result.error());
     }
   }
 
-  // Reconcile edges: drop every current edge absent from the message before
-  // adding the new ones, so a reversed edge cannot trip cycle detection on its
-  // old self.
-  if (auto result = reconcileEdgesFromMsg(msg); !result)
-  {
-    return result;
-  }
-
-  return {};
+  return reconcileEdgesFromMsg(msg);
 }
 
 std::expected<void, SceneGraphError>
 SceneGraph::reconcileEdgesFromMsg(const semantic_scene_forests_msgs::msg::SceneGraph& msg) noexcept
 {
-  const auto CURRENT_EDGES = getEdges();
+  const auto CURRENT_EDGES = getEdgesUnlocked();
 
   std::set<std::tuple<int64_t, int64_t, std::string>> current_edge_set;
   std::set<std::tuple<int64_t, int64_t, std::string>> message_edges;
@@ -856,7 +991,7 @@ SceneGraph::reconcileEdgesFromMsg(const semantic_scene_forests_msgs::msg::SceneG
   {
     if (!message_edges.contains({source_id, target_id, edge.label}))
     {
-      if (auto result = removeEdge(source_id, target_id, edge.label); !result)
+      if (auto result = removeEdgeUnlocked(source_id, target_id, edge.label); !result)
       {
         return std::unexpected(result.error());
       }
@@ -869,7 +1004,8 @@ SceneGraph::reconcileEdgesFromMsg(const semantic_scene_forests_msgs::msg::SceneG
   {
     if (!current_edge_set.contains({edge_msg.source_id, edge_msg.target_id, edge_msg.label}))
     {
-      if (auto result = addEdge(edge_msg.source_id, edge_msg.target_id, edge_msg.label); !result)
+      if (auto result = addEdgeUnlocked(edge_msg.source_id, edge_msg.target_id, edge_msg.label);
+          !result)
       {
         return std::unexpected(result.error());
       }
@@ -881,17 +1017,14 @@ SceneGraph::reconcileEdgesFromMsg(const semantic_scene_forests_msgs::msg::SceneG
 std::expected<void, SceneGraphError>
 SceneGraph::retainObjectNodes(const std::unordered_set<int64_t>& active_ids) noexcept
 {
+  const std::unique_lock LOCK(m_mutex);
   std::unordered_set<int64_t> keep;
   std::vector<SceneGraphAdjList::vertex_descriptor> pending;
 
   for (const int64_t ID : active_ids)
   {
-    const auto IT = this->m_id_map.left.find(ID);
-    if (IT == this->m_id_map.left.end())
-    {
-      continue;
-    }
-    if (const auto& node = this->m_graph[IT->second]; std::holds_alternative<ObjectNode>(node))
+    const auto IT = m_id_map.left.find(ID);
+    if (IT != m_id_map.left.end() && std::holds_alternative<ObjectNode>(m_graph[IT->second]))
     {
       keep.insert(ID);
       pending.push_back(IT->second);
@@ -905,14 +1038,11 @@ SceneGraph::retainObjectNodes(const std::unordered_set<int64_t>& active_ids) noe
     auto* const VERTEX_DESC = pending.back();
     pending.pop_back();
 
-    using OutEdgeIter = boost::graph_traits<SceneGraphAdjList>::out_edge_iterator;
-    OutEdgeIter ei;
-    OutEdgeIter ei_end;
-    for (boost::tie(ei, ei_end) = boost::out_edges(VERTEX_DESC, this->m_graph); ei != ei_end; ++ei)
+    for (auto [ei, ei_end] = boost::out_edges(VERTEX_DESC, m_graph); ei != ei_end; ++ei)
     {
-      auto* const TARGET_VERTEX = boost::target(*ei, this->m_graph);
-      const auto TARGET_ID_IT   = this->m_id_map.right.find(TARGET_VERTEX);
-      if (TARGET_ID_IT != this->m_id_map.right.end() && !keep.contains(TARGET_ID_IT->second))
+      auto* const TARGET_VERTEX = boost::target(*ei, m_graph);
+      const auto TARGET_ID_IT   = m_id_map.right.find(TARGET_VERTEX);
+      if (TARGET_ID_IT != m_id_map.right.end() && !keep.contains(TARGET_ID_IT->second))
       {
         keep.insert(TARGET_ID_IT->second);
         pending.push_back(TARGET_VERTEX);
@@ -921,7 +1051,7 @@ SceneGraph::retainObjectNodes(const std::unordered_set<int64_t>& active_ids) noe
   }
 
   std::vector<int64_t> to_remove;
-  for (const auto& [id, vertex_desc] : this->m_id_map.left)
+  for (const auto& [id, vertex_desc] : m_id_map.left)
   {
     if (!keep.contains(id))
     {
@@ -931,7 +1061,7 @@ SceneGraph::retainObjectNodes(const std::unordered_set<int64_t>& active_ids) noe
 
   for (const int64_t ID : to_remove)
   {
-    if (auto result = removeNode(ID); !result)
+    if (auto result = removeNodeUnlocked(ID); !result)
     {
       return std::unexpected(result.error());
     }
