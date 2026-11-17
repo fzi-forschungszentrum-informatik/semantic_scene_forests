@@ -26,16 +26,19 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 
-#include <array>
+#include <chrono>
 #include <cstring>
 #include <expected>
+#include <map>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
+#include <pybind11/chrono.h>
 #include <pybind11/operators.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -50,10 +53,11 @@ namespace py = pybind11;
 namespace {
 
 using fzi::semantic_scene_forests::ConceptNode;
-using fzi::semantic_scene_forests::ImageMsg;
+using fzi::semantic_scene_forests::CropPtr;
 using fzi::semantic_scene_forests::ObjectNode;
 using fzi::semantic_scene_forests::SceneGraph;
 using fzi::semantic_scene_forests::SceneGraphEdge;
+using fzi::semantic_scene_forests::WorkerState;
 
 PyObject* g_graph_error_type = nullptr;
 
@@ -129,75 +133,94 @@ py::object messageToPython(const TMessage& message, const char* module_name, con
     .attr("deserialize_message")(SERIALIZED, messageClass(module_name, class_name));
 }
 
-template <typename TMessage>
-std::shared_ptr<TMessage>
-optionalMessageFromPython(py::handle message, const char* module_name, const char* class_name)
+using BoundingBox = vision_msgs::msg::BoundingBox3D;
+using Stamp       = builtin_interfaces::msg::Time;
+
+BoundingBox bboxFromPython(py::handle bbox)
 {
-  if (message.is_none())
-  {
-    return nullptr;
-  }
-  return std::make_shared<TMessage>(messageFromPython<TMessage>(message, module_name, class_name));
+  return bbox.is_none() ? BoundingBox{}
+                        : messageFromPython<BoundingBox>(bbox, "vision_msgs.msg", "BoundingBox3D");
 }
 
-template <typename TMessage>
-py::object optionalMessageToPython(const std::shared_ptr<TMessage>& message,
-                                   const char* module_name,
-                                   const char* class_name)
+Stamp stampFromPython(py::handle stamp)
 {
-  if (!message)
-  {
-    return py::none();
-  }
-  return messageToPython(*message, module_name, class_name);
+  return stamp.is_none() ? Stamp{}
+                         : messageFromPython<Stamp>(stamp, "builtin_interfaces.msg", "Time");
 }
 
-std::array<sensor_msgs::msg::Image::SharedPtr, 5> visualsFromPython(py::handle visuals)
+py::object stampToPython(const Stamp& stamp)
 {
-  std::array<sensor_msgs::msg::Image::SharedPtr, 5> result{};
-  if (visuals.is_none())
-  {
-    return result;
-  }
-  if (!py::isinstance<py::sequence>(visuals))
-  {
-    throw py::type_error("visuals must be a sequence of five sensor_msgs.msg.Image values or None");
-  }
+  return messageToPython(stamp, "builtin_interfaces.msg", "Time");
+}
 
-  const auto SEQUENCE = py::reinterpret_borrow<py::sequence>(visuals);
-  if (py::len(SEQUENCE) != static_cast<py::ssize_t>(result.size()))
-  {
-    throw py::value_error("visuals must contain exactly five elements");
-  }
+CropPtr cropFromPython(py::handle stamp, const std::string& jpeg)
+{
+  auto crop          = std::make_shared<sensor_msgs::msg::CompressedImage>();
+  crop->header.stamp = stampFromPython(stamp);
+  crop->format       = "jpeg";
+  crop->data.assign(jpeg.begin(), jpeg.end());
+  return crop;
+}
 
-  for (std::size_t index = 0; index < result.size(); ++index)
+//! Crops cross the boundary as a list of (builtin_interfaces.msg.Time, JPEG bytes).
+std::vector<CropPtr> cropsFromPython(const std::vector<std::pair<py::object, std::string>>& crops)
+{
+  std::vector<CropPtr> result;
+  for (const auto& [stamp, jpeg] : crops)
   {
-    result[index] = optionalMessageFromPython<sensor_msgs::msg::Image>(
-      SEQUENCE[index], "sensor_msgs.msg", "Image");
+    result.push_back(cropFromPython(stamp, jpeg));
   }
   return result;
 }
 
-py::tuple visualsToPython(const std::array<sensor_msgs::msg::Image::SharedPtr, 5>& visuals)
+py::list cropsToPython(const std::vector<CropPtr>& crops)
 {
-  py::tuple result(visuals.size());
-  for (std::size_t index = 0; index < visuals.size(); ++index)
+  py::list result;
+  for (const auto& crop : crops)
   {
-    result[index] = optionalMessageToPython(visuals[index], "sensor_msgs.msg", "Image");
+    const std::string JPEG(crop->data.begin(), crop->data.end());
+    result.append(py::make_tuple(stampToPython(crop->header.stamp), py::bytes(JPEG)));
   }
   return result;
 }
 
-ObjectNode
-makeObjectNode(int64_t id, const std::string& class_name, py::handle detection, py::handle visuals)
+std::map<std::string, bool> workersToPython(const std::map<std::string, WorkerState>& workers)
 {
-  return ObjectNode{
-    .id         = id,
-    .class_name = class_name,
-    .detection  = optionalMessageFromPython<vision_msgs::msg::Detection3D>(
-      detection, "vision_msgs.msg", "Detection3D"),
-    .visuals = visualsFromPython(visuals),
-  };
+  std::map<std::string, bool> result;
+  for (const auto& [name, state] : workers)
+  {
+    result[name] = state.processed;
+  }
+  return result;
+}
+
+std::map<std::string, WorkerState> workersFromPython(const std::map<std::string, bool>& workers)
+{
+  std::map<std::string, WorkerState> result;
+  for (const auto& [name, processed] : workers)
+  {
+    result[name] = WorkerState{.processed = processed};
+  }
+  return result;
+}
+
+ObjectNode makeObjectNode(int64_t id,
+                          const std::string& class_name,
+                          py::handle bbox,
+                          const std::string& frame_id,
+                          uint8_t source,
+                          py::handle last_seen,
+                          py::handle last_updated,
+                          const std::vector<std::pair<py::object, std::string>>& crops)
+{
+  return ObjectNode{.id           = id,
+                    .class_name   = class_name,
+                    .bbox         = bboxFromPython(bbox),
+                    .frame_id     = frame_id,
+                    .source       = source,
+                    .last_seen    = stampFromPython(last_seen),
+                    .last_updated = stampFromPython(last_updated),
+                    .crops        = cropsFromPython(crops)};
 }
 
 } // namespace
@@ -214,6 +237,7 @@ PYBIND11_MODULE(_semantic_scene_forests, module)
     .value("EDGE_ALREADY_EXISTS", SceneGraphErrorKind::EDGE_ALREADY_EXISTS)
     .value("CYCLE", SceneGraphErrorKind::CYCLE)
     .value("GRAPH_EDITING_FAILED", SceneGraphErrorKind::GRAPH_EDITING_FAILED)
+    .value("INVALID_LABEL", SceneGraphErrorKind::INVALID_LABEL)
     .export_values();
 
   g_graph_error_type =
@@ -224,6 +248,12 @@ PYBIND11_MODULE(_semantic_scene_forests, module)
     .def(py::init<int64_t, std::string>(), py::arg("id"), py::arg("concept_name"))
     .def_readwrite("id", &ConceptNode::id)
     .def_readwrite("concept_name", &ConceptNode::concept_name)
+    .def_property(
+      "workers",
+      [](const ConceptNode& node) { return workersToPython(node.workers); },
+      [](ConceptNode& node, const std::map<std::string, bool>& workers) {
+        node.workers = workersFromPython(workers);
+      })
     .def("__repr__",
          [](const ConceptNode& node) {
            return "ConceptNode(id=" + std::to_string(node.id) + ", concept_name='" +
@@ -235,23 +265,44 @@ PYBIND11_MODULE(_semantic_scene_forests, module)
     .def(py::init(&makeObjectNode),
          py::arg("id"),
          py::arg("class_name"),
-         py::arg("detection") = py::none(),
-         py::arg("visuals")   = py::none())
+         py::arg("bbox")         = py::none(),
+         py::arg("frame_id")     = "",
+         py::arg("source")       = ObjectNode::SOURCE_CAMERA,
+         py::arg("last_seen")    = py::none(),
+         py::arg("last_updated") = py::none(),
+         py::arg("crops")        = std::vector<std::pair<py::object, std::string>>{})
+    .def_readonly_static("SOURCE_CAMERA", &ObjectNode::SOURCE_CAMERA)
+    .def_readonly_static("SOURCE_MANUAL", &ObjectNode::SOURCE_MANUAL)
     .def_readwrite("id", &ObjectNode::id)
     .def_readwrite("class_name", &ObjectNode::class_name)
+    .def_readwrite("frame_id", &ObjectNode::frame_id)
+    .def_readwrite("source", &ObjectNode::source)
     .def_property(
-      "detection",
+      "bbox",
       [](const ObjectNode& node) {
-        return optionalMessageToPython(node.detection, "vision_msgs.msg", "Detection3D");
+        return messageToPython(node.bbox, "vision_msgs.msg", "BoundingBox3D");
       },
-      [](ObjectNode& node, py::handle detection) {
-        node.detection = optionalMessageFromPython<vision_msgs::msg::Detection3D>(
-          detection, "vision_msgs.msg", "Detection3D");
+      [](ObjectNode& node, py::handle bbox) { node.bbox = bboxFromPython(bbox); })
+    .def_property(
+      "last_seen",
+      [](const ObjectNode& node) { return stampToPython(node.last_seen); },
+      [](ObjectNode& node, py::handle stamp) { node.last_seen = stampFromPython(stamp); })
+    .def_property(
+      "last_updated",
+      [](const ObjectNode& node) { return stampToPython(node.last_updated); },
+      [](ObjectNode& node, py::handle stamp) { node.last_updated = stampFromPython(stamp); })
+    .def_property(
+      "crops",
+      [](const ObjectNode& node) { return cropsToPython(node.crops); },
+      [](ObjectNode& node, const std::vector<std::pair<py::object, std::string>>& crops) {
+        node.crops = cropsFromPython(crops);
       })
     .def_property(
-      "visuals",
-      [](const ObjectNode& node) { return visualsToPython(node.visuals); },
-      [](ObjectNode& node, py::handle visuals) { node.visuals = visualsFromPython(visuals); })
+      "workers",
+      [](const ObjectNode& node) { return workersToPython(node.workers); },
+      [](ObjectNode& node, const std::map<std::string, bool>& workers) {
+        node.workers = workersFromPython(workers);
+      })
     .def("__repr__",
          [](const ObjectNode& node) {
            return "ObjectNode(id=" + std::to_string(node.id) + ", class_name='" + node.class_name +
@@ -267,38 +318,67 @@ PYBIND11_MODULE(_semantic_scene_forests, module)
 
   py::class_<SceneGraph>(module, "SceneGraph")
     .def(py::init<>())
+    .def("allocate_id", &SceneGraph::allocateId)
     .def(
-      "add_object_node",
-      [](SceneGraph& graph,
-         const std::string& class_name,
-         py::handle detection,
-         py::handle visuals) {
-        return unwrap(graph.addObjectNode(class_name,
-                                          optionalMessageFromPython<vision_msgs::msg::Detection3D>(
-                                            detection, "vision_msgs.msg", "Detection3D"),
-                                          visualsFromPython(visuals)));
-      },
-      py::arg("class_name"),
-      py::arg("detection") = py::none(),
-      py::arg("visuals")   = py::none())
+      "add_object",
+      [](SceneGraph& graph, const ObjectNode& node) { unwrap(graph.addObject(node)); },
+      py::arg("node"))
     .def(
-      "add_object_node_with_id",
-      [](SceneGraph& graph,
-         int64_t id,
-         const std::string& class_name,
-         py::handle detection,
-         py::handle visuals) {
-        return unwrap(
-          graph.addObjectNodeWithId(id,
-                                    class_name,
-                                    optionalMessageFromPython<vision_msgs::msg::Detection3D>(
-                                      detection, "vision_msgs.msg", "Detection3D"),
-                                    visualsFromPython(visuals)));
+      "update_object_pose",
+      [](SceneGraph& graph, int64_t id, py::handle bbox, py::handle last_seen) {
+        unwrap(graph.updateObjectPose(id, bboxFromPython(bbox), stampFromPython(last_seen)));
       },
       py::arg("id"),
-      py::arg("class_name"),
-      py::arg("detection") = py::none(),
-      py::arg("visuals")   = py::none())
+      py::arg("bbox"),
+      py::arg("last_seen"))
+    .def("set_crop_policy",
+         &SceneGraph::setCropPolicy,
+         py::arg("max_crops"),
+         py::arg("min_interval"),
+         "min_interval is a datetime.timedelta")
+    .def(
+      "offer_crop",
+      [](SceneGraph& graph, int64_t id, py::handle stamp, const std::string& jpeg) {
+        return unwrap(graph.offerCrop(id, cropFromPython(stamp, jpeg)));
+      },
+      py::arg("id"),
+      py::arg("stamp"),
+      py::arg("jpeg"))
+    .def(
+      "set_object_class",
+      [](SceneGraph& graph, int64_t id, const std::string& class_name) {
+        unwrap(graph.setObjectClass(id, class_name));
+      },
+      py::arg("id"),
+      py::arg("class_name"))
+    .def(
+      "find_or_add_concept",
+      [](SceneGraph& graph, const std::string& label) {
+        const auto LOOKUP = unwrap(graph.findOrAddConcept(label));
+        return std::make_pair(LOOKUP.id, LOOKUP.created);
+      },
+      py::arg("label"))
+    .def(
+      "add_concept_edge",
+      [](SceneGraph& graph,
+         int64_t source_id,
+         const std::string& relation,
+         const std::string& label) {
+        const auto LOOKUP = unwrap(graph.addConceptEdge(source_id, relation, label));
+        return std::make_pair(LOOKUP.id, LOOKUP.created);
+      },
+      py::arg("source_id"),
+      py::arg("relation"),
+      py::arg("label"))
+    .def(
+      "mark_processed",
+      [](SceneGraph& graph, int64_t id, const std::string& worker) {
+        unwrap(graph.markProcessed(id, worker));
+      },
+      py::arg("id"),
+      py::arg("worker"))
+    .def("unprocessed_by", &SceneGraph::unprocessedBy, py::arg("worker"))
+    .def("prune_isolated_concepts", &SceneGraph::pruneIsolatedConcepts)
     .def(
       "add_concept_node",
       [](SceneGraph& graph, const std::string& concept_name) {
@@ -351,7 +431,7 @@ PYBIND11_MODULE(_semantic_scene_forests, module)
                       message, "semantic_scene_forests_msgs.msg", "SceneGraph")));
                 })
     .def("to_msg",
-         [](SceneGraph& graph) {
+         [](const SceneGraph& graph) {
            return messageToPython(*graph.toMsg(), "semantic_scene_forests_msgs.msg", "SceneGraph");
          })
     .def("update_from_msg",

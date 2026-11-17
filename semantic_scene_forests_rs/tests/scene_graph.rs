@@ -28,8 +28,41 @@
 
 use rclrs::MessageIDL;
 use ros_env::sensor_msgs::msg::Image;
-use semantic_scene_forests_rs::{GraphErrorKind, SceneGraph, SceneGraphMsg};
+use semantic_scene_forests_rs::{
+    BoundingBox3D, Crop, GraphErrorKind, ObjectNode, SceneGraph, SceneGraphMsg, Time,
+};
 use std::borrow::Cow;
+
+fn cup_node(id: i64) -> ObjectNode {
+    let mut bbox = BoundingBox3D::default();
+    bbox.center.position.x = 1.0;
+    bbox.center.orientation.w = 1.0;
+    bbox.size.z = 0.5;
+    let stamp = Time {
+        sec: 12,
+        nanosec: 345,
+    };
+    ObjectNode {
+        id,
+        class_name: "cup".into(),
+        bbox,
+        frame_id: "map".into(),
+        source: 1,
+        last_seen: stamp.clone(),
+        last_updated: stamp.clone(),
+        crops: vec![Crop {
+            stamp,
+            jpeg: vec![0xff, 0xd8, 1, 2, 0xff, 0xd9],
+        }],
+        workers: [("describer".to_string(), true)].into(),
+    }
+}
+
+fn add_cup(graph: &mut SceneGraph) -> i64 {
+    let id = graph.allocate_id();
+    graph.add_object(&cup_node(id)).unwrap();
+    id
+}
 
 #[test]
 fn generated_messages_share_rclrs_runtime() {
@@ -56,10 +89,10 @@ fn generated_messages_share_rclrs_runtime() {
 #[test]
 fn build_and_query_graph() {
     let mut graph = SceneGraph::new();
-    let cup = graph.add_object_node("cup", None, [None; 5]).unwrap();
+    let cup = add_cup(&mut graph);
     let on = graph.add_concept_node("on").unwrap();
     let table = graph.add_concept_node("table").unwrap();
-    assert!(cup > 0 && on < 0 && table < 0 && on != table);
+    assert!(cup > 0 && on > 0 && table > 0 && on != table && cup != on);
     assert!(graph.has_node(cup));
     graph.add_edge(cup, on, "relation").unwrap();
     graph.add_edge(on, table, "target").unwrap();
@@ -91,12 +124,14 @@ fn message_roundtrip() {
     assert_eq!(loaded_empty.to_msg(), SceneGraphMsg::default());
 
     let mut graph = SceneGraph::new();
-    let cup = graph.add_object_node("cup", None, [None; 5]).unwrap();
+    let cup = add_cup(&mut graph);
     let on = graph.add_concept_node("on").unwrap();
     graph.add_edge(cup, on, "relation").unwrap();
     let message = graph.to_msg();
     assert_eq!(message.object_nodes[0].id, cup);
     assert_eq!(message.object_nodes[0].class_name, "cup");
+    assert_eq!(message.object_nodes[0].header.frame_id, "map");
+    assert_eq!(message.object_nodes[0].bbox.size.z, 0.5);
     assert_eq!(message.concept_nodes[0].id, on);
     assert_eq!(message.concept_nodes[0].class_name, "on");
     assert_eq!(message.edges[0].source_id, cup);
@@ -117,121 +152,46 @@ fn update_keeps_earlier_success_on_error() {
     let mut graph = SceneGraph::new();
     let mut message = SceneGraphMsg::default();
     message.concept_nodes.push(ConceptNode {
-        id: -42,
+        id: 42,
         class_name: "new concept".into(),
         ..Default::default()
     });
     message.edges.push(EdgeMsg {
-        source_id: -42,
-        target_id: -999,
+        source_id: 42,
+        target_id: 999,
         label: "missing".into(),
     });
     let error = graph.update_from_msg(&message).unwrap_err();
     assert_eq!(error.kind, GraphErrorKind::NodeDoesNotExist);
-    assert!(graph.has_node(-42));
-    assert!(graph.outgoing_edges(-42).unwrap().is_empty());
+    assert!(graph.has_node(42));
+    assert!(graph.outgoing_edges(42).unwrap().is_empty());
 
     message.edges.clear();
     graph.update_from_msg(&message).unwrap();
     graph.update_from_msg(&SceneGraphMsg::default()).unwrap();
-    assert!(!graph.has_node(-42));
+    assert!(!graph.has_node(42));
 }
 
 #[test]
-fn payload_roundtrip_owns_complete_ros_messages() {
-    use semantic_scene_forests_rs::{Detection3D, Image};
-    let mut detection = Detection3D {
-        id: "cup-1".into(),
-        ..Default::default()
-    };
-    detection.header.frame_id = "camera".into();
-    detection.header.stamp.sec = 12;
-    detection.header.stamp.nanosec = 345;
-    detection.bbox.center.position.x = 1.0;
-    detection.bbox.center.position.y = 2.0;
-    detection.bbox.center.position.z = 3.0;
-    detection.bbox.center.orientation.x = 0.1;
-    detection.bbox.center.orientation.y = 0.2;
-    detection.bbox.center.orientation.z = 0.3;
-    detection.bbox.center.orientation.w = 0.9;
-    detection.bbox.size.x = 0.4;
-    detection.bbox.size.y = 0.5;
-    detection.bbox.size.z = 0.6;
-    detection.results.push(Default::default());
-    detection.results[0].hypothesis.class_id = "cup".into();
-    detection.results[0].hypothesis.score = 0.95;
-    detection.results[0].pose.pose = detection.bbox.center.clone();
-    detection.results[0].pose.covariance = std::array::from_fn(|i| i as f64 / 10.0);
-    let mut image = Image {
-        header: detection.header.clone(),
-        height: 1,
-        width: 2,
-        encoding: "rgb8".into(),
-        is_bigendian: 1,
-        step: 6,
-        data: vec![1, 2, 3, 4, 5, 6],
-    };
-    let expected_detection = detection.clone();
-    let expected_image = image.clone();
+fn object_fields_roundtrip_and_are_owned_copies() {
     let mut graph = SceneGraph::new();
-    let cup = graph
-        .add_object_node(
-            "cup",
-            Some(&detection),
-            [Some(&image), None, None, None, Some(&image)],
-        )
-        .unwrap();
-    detection.id = "changed after insertion".into();
-    image.data[0] = 99;
+    let mut expected = cup_node(graph.allocate_id());
+    graph.add_object(&expected).unwrap();
+    expected.class_name = "changed after insertion".into();
 
     let mut objects = graph.object_nodes();
-    assert_eq!(objects[0].id, cup);
-    assert_eq!(objects[0].class_name, "cup");
-    assert_eq!(objects[0].detection.as_ref(), Some(&expected_detection));
-    assert_eq!(
-        objects[0].visuals,
-        [
-            Some(expected_image.clone()),
-            None,
-            None,
-            None,
-            Some(expected_image)
-        ]
-    );
-    objects[0].detection.as_mut().unwrap().id = "changed returned copy".into();
-    assert_eq!(
-        graph.object_nodes()[0].detection.as_ref(),
-        Some(&expected_detection)
-    );
+    assert_eq!(objects[0], cup_node(objects[0].id));
+    objects[0].crops[0].jpeg[0] = 99;
+    assert_eq!(graph.object_nodes()[0], cup_node(objects[0].id));
 
-    let plain = graph.add_object_node("plain", None, [None; 5]).unwrap();
-    let plain = graph
-        .object_nodes()
-        .into_iter()
-        .find(|node| node.id == plain)
-        .unwrap();
-    assert!(plain.detection.is_none());
-    assert_eq!(plain.visuals, [None, None, None, None, None]);
+    let error = graph.add_object(&cup_node(objects[0].id)).unwrap_err();
+    assert_eq!(error.kind, GraphErrorKind::NodeAlreadyExists);
 }
 
 #[test]
-fn python_equivalent_snapshot_preserves_payloads_without_wire_serialization() {
-    use semantic_scene_forests_rs::{Detection3D, Image};
-    let detection = Detection3D {
-        id: "cup-1".into(),
-        ..Default::default()
-    };
-    let mut image = Image::default();
-    image.header.frame_id = "camera".into();
-    image.data = vec![42];
+fn snapshot_keeps_crops_but_wire_format_does_not() {
     let mut graph = SceneGraph::new();
-    let cup = graph
-        .add_object_node(
-            "cup",
-            Some(&detection),
-            [Some(&image), None, None, None, None],
-        )
-        .unwrap();
+    let cup = add_cup(&mut graph);
     let on = graph.add_concept_node("on").unwrap();
     graph.add_edge(cup, on, "relation").unwrap();
     assert_eq!(
@@ -241,27 +201,17 @@ fn python_equivalent_snapshot_preserves_payloads_without_wire_serialization() {
 
     let snapshot = graph.try_clone().unwrap();
     assert_eq!(snapshot.object_nodes(), graph.object_nodes());
-    assert_eq!(
-        snapshot.outgoing_edges(cup).unwrap(),
-        graph.outgoing_edges(cup).unwrap()
-    );
-    let message = graph.to_msg();
-    let loaded = SceneGraph::from_msg(&message).unwrap();
+    let loaded = SceneGraph::from_msg(&graph.to_msg()).unwrap();
     assert_eq!(
         loaded.outgoing_edges(cup).unwrap(),
         graph.outgoing_edges(cup).unwrap()
     );
-    let loaded_objects = loaded.object_nodes();
-    assert_eq!(loaded_objects[0].class_name, "cup");
-    assert!(loaded_objects[0].detection.as_ref().unwrap().id.is_empty());
-    assert!(loaded_objects[0].visuals.iter().all(Option::is_none));
+    let loaded_cup = &loaded.object_nodes()[0];
+    assert_eq!(loaded_cup.frame_id, "map");
+    assert_eq!(loaded_cup.bbox, cup_node(cup).bbox);
+    assert!(loaded_cup.crops.is_empty() && loaded_cup.workers.is_empty());
 
-    let extra = graph.add_concept_node("original only").unwrap();
-    assert!(!snapshot.has_node(extra));
     graph.update_from_msg(&SceneGraphMsg::default()).unwrap();
     assert!(!graph.has_node(cup));
-    let retained = snapshot.object_nodes();
-    assert_eq!(retained[0].detection.as_ref(), Some(&detection));
-    assert_eq!(retained[0].visuals[0].as_ref(), Some(&image));
-    assert_eq!(snapshot.outgoing_edges(cup).unwrap()[0].0, on);
+    assert_eq!(snapshot.object_nodes()[0], cup_node(cup));
 }

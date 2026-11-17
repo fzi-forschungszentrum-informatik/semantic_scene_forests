@@ -64,6 +64,9 @@ Status failure(const SceneGraphError& error)
     case SceneGraphErrorKind::GRAPH_EDITING_FAILED:
       kind = GraphErrorKind::GraphEditingFailed;
       break;
+    case SceneGraphErrorKind::INVALID_LABEL:
+      kind = GraphErrorKind::InvalidLabel;
+      break;
   }
   return {.success = false, .kind = kind, .message = error.message};
 }
@@ -108,73 +111,32 @@ PoseRecord fromPose(const geometry_msgs::msg::Pose& pose)
             pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w}};
 }
 
-vision_msgs::msg::Detection3D toDetection(const DetectionRecord& record)
+vision_msgs::msg::BoundingBox3D toBBox(const BBoxRecord& record)
 {
-  vision_msgs::msg::Detection3D detection;
-  detection.header      = toHeader(record.header);
-  detection.id          = std::string(record.id);
-  detection.bbox.center = toPose(record.center);
-  detection.bbox.size.x = record.size[0];
-  detection.bbox.size.y = record.size[1];
-  detection.bbox.size.z = record.size[2];
-  for (const auto& result : record.results)
-  {
-    vision_msgs::msg::ObjectHypothesisWithPose hypothesis;
-    hypothesis.hypothesis.class_id = std::string(result.class_id);
-    hypothesis.hypothesis.score    = result.score;
-    hypothesis.pose.pose           = toPose(result.pose);
-    hypothesis.pose.covariance     = result.covariance;
-    detection.results.push_back(std::move(hypothesis));
-  }
-  return detection;
+  vision_msgs::msg::BoundingBox3D bbox;
+  bbox.center = toPose(record.center);
+  bbox.size.x = record.size[0];
+  bbox.size.y = record.size[1];
+  bbox.size.z = record.size[2];
+  return bbox;
 }
 
-DetectionRecord fromDetection(const vision_msgs::msg::Detection3D& detection)
+BBoxRecord fromBBox(const vision_msgs::msg::BoundingBox3D& bbox)
 {
-  DetectionRecord record{
-    .header  = fromHeader(detection.header),
-    .results = {},
-    .center  = fromPose(detection.bbox.center),
-    .size    = {detection.bbox.size.x, detection.bbox.size.y, detection.bbox.size.z},
-    .id      = detection.id};
-  for (const auto& result : detection.results)
-  {
-    record.results.push_back({.class_id   = result.hypothesis.class_id,
-                              .score      = result.hypothesis.score,
-                              .pose       = fromPose(result.pose.pose),
-                              .covariance = result.pose.covariance});
-  }
-  return record;
+  return {.center = fromPose(bbox.center), .size = {bbox.size.x, bbox.size.y, bbox.size.z}};
 }
 
-sensor_msgs::msg::Image toImage(const ImageRecord& record)
+builtin_interfaces::msg::Time toStamp(const StampRecord& record)
 {
-  sensor_msgs::msg::Image image;
-  image.header       = toHeader(record.header);
-  image.height       = record.height;
-  image.width        = record.width;
-  image.encoding     = std::string(record.encoding);
-  image.is_bigendian = record.is_bigendian;
-  image.step         = record.step;
-  image.data.assign(record.data.begin(), record.data.end());
-  return image;
+  builtin_interfaces::msg::Time stamp;
+  stamp.sec     = record.sec;
+  stamp.nanosec = record.nanosec;
+  return stamp;
 }
 
-ImageRecord fromImage(const sensor_msgs::msg::Image& image)
+StampRecord fromStamp(const builtin_interfaces::msg::Time& stamp)
 {
-  ImageRecord record{.header       = fromHeader(image.header),
-                     .height       = image.height,
-                     .width        = image.width,
-                     .encoding     = image.encoding,
-                     .is_bigendian = image.is_bigendian,
-                     .step         = image.step,
-                     .data         = {}};
-  record.data.reserve(image.data.size());
-  for (const auto BYTE : image.data)
-  {
-    record.data.push_back(BYTE);
-  }
-  return record;
+  return {.sec = stamp.sec, .nanosec = stamp.nanosec};
 }
 
 semantic_scene_forests_msgs::msg::SceneGraph toMsg(const GraphRecord& record)
@@ -184,9 +146,13 @@ semantic_scene_forests_msgs::msg::SceneGraph toMsg(const GraphRecord& record)
   for (const auto& node : record.objects)
   {
     semantic_scene_forests_msgs::msg::ObjectNode object;
-    object.header     = toHeader(node.header);
-    object.id         = node.id;
-    object.class_name = std::string(node.class_name);
+    object.header       = toHeader(node.header);
+    object.id           = node.id;
+    object.class_name   = std::string(node.class_name);
+    object.bbox         = toBBox(node.bbox);
+    object.source       = node.source;
+    object.last_updated = toStamp(node.last_updated);
+    object.last_seen    = toStamp(node.last_seen);
     message.object_nodes.push_back(std::move(object));
   }
   for (const auto& node : record.concepts)
@@ -220,22 +186,34 @@ std::unique_ptr<NativeGraph> newGraph()
   return std::make_unique<NativeGraph>();
 }
 
-IdResult NativeGraph::addObjectNode(rust::Str name, const PayloadRecord& payload)
+int64_t NativeGraph::allocateId()
 {
-  vision_msgs::msg::Detection3D::SharedPtr detection;
-  if (payload.has_detection)
+  return m_graph->allocateId();
+}
+
+Status NativeGraph::addObject(const ObjectNodeRecord& node)
+{
+  fzi::semantic_scene_forests::ObjectNode object{.id           = node.id,
+                                                 .class_name   = std::string(node.class_name),
+                                                 .bbox         = toBBox(node.bbox),
+                                                 .frame_id     = std::string(node.frame_id),
+                                                 .source       = node.source,
+                                                 .last_seen    = toStamp(node.last_seen),
+                                                 .last_updated = toStamp(node.last_updated)};
+  for (const auto& crop : node.crops)
   {
-    detection = std::make_shared<vision_msgs::msg::Detection3D>(toDetection(payload.detection));
+    auto image          = std::make_shared<sensor_msgs::msg::CompressedImage>();
+    image->header.stamp = toStamp(crop.stamp);
+    image->format       = "jpeg";
+    image->data.assign(crop.jpeg.begin(), crop.jpeg.end());
+    object.crops.push_back(std::move(image));
   }
-  std::array<sensor_msgs::msg::Image::SharedPtr, 5> visuals{};
-  for (std::size_t i = 0; i < visuals.size(); ++i)
+  for (const auto& worker : node.workers)
   {
-    if (payload.visuals[i].present)
-    {
-      visuals[i] = std::make_shared<sensor_msgs::msg::Image>(toImage(payload.visuals[i].image));
-    }
+    object.workers[std::string(worker.name)] = {.processed = worker.processed};
   }
-  return nodeResult(m_graph->addObjectNode(std::string(name), detection, visuals));
+  const auto RESULT = m_graph->addObject(std::move(object));
+  return RESULT ? success() : failure(RESULT.error());
 }
 
 rust::Vec<ObjectNodeRecord> NativeGraph::objectNodes() const
@@ -243,21 +221,28 @@ rust::Vec<ObjectNodeRecord> NativeGraph::objectNodes() const
   rust::Vec<ObjectNodeRecord> objects;
   for (const auto& node : m_graph->getObjectNodes())
   {
-    ObjectNodeRecord record{.id         = node.id,
-                            .class_name = node.class_name,
-                            .payload    = {.has_detection = static_cast<bool>(node.detection),
-                                           .detection     = {},
-                                           .visuals       = {}}};
-    if (node.detection)
+    ObjectNodeRecord record{.id           = node.id,
+                            .class_name   = node.class_name,
+                            .bbox         = fromBBox(node.bbox),
+                            .frame_id     = node.frame_id,
+                            .source       = node.source,
+                            .last_seen    = fromStamp(node.last_seen),
+                            .last_updated = fromStamp(node.last_updated),
+                            .crops        = {},
+                            .workers      = {}};
+    for (const auto& crop : node.crops)
     {
-      record.payload.detection = fromDetection(*node.detection);
-    }
-    for (std::size_t i = 0; i < node.visuals.size(); ++i)
-    {
-      if (node.visuals[i])
+      CropRecord crop_record{.stamp = fromStamp(crop->header.stamp), .jpeg = {}};
+      crop_record.jpeg.reserve(crop->data.size());
+      for (const auto BYTE : crop->data)
       {
-        record.payload.visuals[i] = {.present = true, .image = fromImage(*node.visuals[i])};
+        crop_record.jpeg.push_back(BYTE);
       }
+      record.crops.push_back(std::move(crop_record));
+    }
+    for (const auto& [name, state] : node.workers)
+    {
+      record.workers.push_back({.name = name, .processed = state.processed});
     }
     objects.push_back(std::move(record));
   }
@@ -324,8 +309,13 @@ GraphRecord NativeGraph::toMessage()
     .header = fromHeader(MESSAGE->header), .objects = {}, .concepts = {}, .edges = {}};
   for (const auto& node : MESSAGE->object_nodes)
   {
-    record.objects.push_back(
-      {.header = fromHeader(node.header), .id = node.id, .class_name = node.class_name});
+    record.objects.push_back({.header       = fromHeader(node.header),
+                              .id           = node.id,
+                              .class_name   = node.class_name,
+                              .bbox         = fromBBox(node.bbox),
+                              .source       = node.source,
+                              .last_updated = fromStamp(node.last_updated),
+                              .last_seen    = fromStamp(node.last_seen)});
   }
   for (const auto& node : MESSAGE->concept_nodes)
   {

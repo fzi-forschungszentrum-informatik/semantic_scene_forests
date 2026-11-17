@@ -26,23 +26,34 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 
-//! The payload, query, error, snapshot, and ROS conversion example from the Python bindings.
-use semantic_scene_forests_rs::{Detection3D, GraphErrorKind, Image, SceneGraph};
+//! The object, query, error, snapshot, and ROS conversion example from the Python bindings.
+use semantic_scene_forests_rs::{
+    BoundingBox3D, Crop, GraphErrorKind, ObjectNode, SceneGraph, Time,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let detection = Detection3D {
-        id: "cup-1".into(),
+    let mut graph = SceneGraph::new();
+    let stamp = Time {
+        sec: 12,
+        nanosec: 0,
+    };
+    let mut bbox = BoundingBox3D::default();
+    bbox.size.x = 0.1;
+    let cup_node = ObjectNode {
+        id: graph.allocate_id(),
+        class_name: "cup".into(),
+        bbox,
+        frame_id: "map".into(),
+        last_seen: stamp.clone(),
+        last_updated: stamp.clone(),
+        crops: vec![Crop {
+            stamp,
+            jpeg: vec![0xff, 0xd8, 0xff, 0xd9],
+        }],
         ..Default::default()
     };
-    let mut image = Image::default();
-    image.header.frame_id = "camera".into();
-
-    let mut graph = SceneGraph::new();
-    let cup = graph.add_object_node(
-        "cup",
-        Some(&detection),
-        [Some(&image), None, None, None, None],
-    )?;
+    let cup = cup_node.id;
+    graph.add_object(&cup_node)?;
     let on = graph.add_concept_node("on")?;
     graph.add_edge(cup, on, "relation")?;
 
@@ -61,11 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let snapshot = graph.try_clone()?;
     let message = graph.to_msg();
     let loaded = SceneGraph::from_msg(&message)?;
-    assert_eq!(
-        snapshot.object_nodes()[0].detection.as_ref(),
-        Some(&detection)
-    );
-    assert_eq!(snapshot.object_nodes()[0].visuals[0].as_ref(), Some(&image));
+    assert_eq!(snapshot.object_nodes()[0], cup_node);
     assert_eq!(loaded.outgoing_edges(cup)?, graph.outgoing_edges(cup)?);
     Ok(())
 }

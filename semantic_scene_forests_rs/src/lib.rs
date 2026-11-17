@@ -29,7 +29,8 @@
 //! Rust bindings for the existing C++ semantic scene graph library.
 
 pub use ros_env::semantic_scene_forests_msgs::msg::SceneGraph as SceneGraphMsg;
-pub use ros_env::{sensor_msgs::msg::Image, vision_msgs::msg::Detection3D};
+pub use ros_env::{builtin_interfaces::msg::Time, vision_msgs::msg::BoundingBox3D};
+use std::collections::BTreeMap;
 
 mod ffi;
 mod payloads;
@@ -69,13 +70,26 @@ pub struct Edge {
     pub label: String,
 }
 
-/// An owned copy of an object and its optional ROS payloads.
-#[derive(Debug, Clone, PartialEq)]
+/// A JPEG crop and the time it was taken.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Crop {
+    pub stamp: Time,
+    pub jpeg: Vec<u8>,
+}
+
+/// An owned copy of an object node. `bbox` is expressed in `frame_id`; `workers` maps a
+/// worker name to its processed flag.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ObjectNode {
     pub id: i64,
     pub class_name: String,
-    pub detection: Option<Detection3D>,
-    pub visuals: [Option<Image>; 5],
+    pub bbox: BoundingBox3D,
+    pub frame_id: String,
+    pub source: u8,
+    pub last_seen: Time,
+    pub last_updated: Time,
+    pub crops: Vec<Crop>,
+    pub workers: BTreeMap<String, bool>,
 }
 
 /// Owns a C++ graph. Mutation requires an exclusive Rust borrow.
@@ -96,17 +110,14 @@ impl SceneGraph {
         }
     }
 
-    /// Add an object, copying its detection and exactly five optional image slots.
-    pub fn add_object_node(
-        &mut self,
-        class_name: &str,
-        detection: Option<&Detection3D>,
-        visuals: [Option<&Image>; 5],
-    ) -> Result<i64, GraphError> {
-        let payload = bridge::PayloadRecord::new(detection, visuals);
-        let result = self.inner.pin_mut().add_object_node(class_name, &payload);
-        result.status.into_result()?;
-        Ok(result.id)
+    /// Reserve an id from the graph's shared (object and concept) counter.
+    pub fn allocate_id(&mut self) -> i64 {
+        self.inner.pin_mut().allocate_id()
+    }
+
+    /// Insert an object under `node.id` (see [`allocate_id`](Self::allocate_id)), copying all fields.
+    pub fn add_object(&mut self, node: &ObjectNode) -> Result<(), GraphError> {
+        self.inner.pin_mut().add_object(&node.into()).into_result()
     }
 
     /// Return independent copies; editing these values does not mutate the graph.
@@ -156,7 +167,7 @@ impl SceneGraph {
             .collect())
     }
 
-    /// Reconstruct a graph from the existing ID-only object wire format.
+    /// Reconstruct a graph from a message; crops and worker state are not on the wire.
     pub fn from_msg(message: &SceneGraphMsg) -> Result<Self, GraphError> {
         let mut graph = Self::new();
         graph
@@ -167,7 +178,7 @@ impl SceneGraph {
         Ok(graph)
     }
 
-    /// Export the graph; object payloads and message headers are not retained.
+    /// Export the graph; crops and worker state are not part of the message.
     pub fn to_msg(&mut self) -> SceneGraphMsg {
         self.inner.pin_mut().to_message().into()
     }

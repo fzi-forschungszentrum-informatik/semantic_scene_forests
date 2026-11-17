@@ -25,10 +25,11 @@
 # CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
+from datetime import timedelta
 
 import pytest
-from sensor_msgs.msg import Image
-from vision_msgs.msg import Detection3D
+from builtin_interfaces.msg import Time
+from vision_msgs.msg import BoundingBox3D
 
 from semantic_scene_forests import (
     ConceptNode,
@@ -39,52 +40,74 @@ from semantic_scene_forests import (
     SceneGraph,
 )
 
-
-def make_payload() -> tuple[Detection3D, list[Image | None]]:
-    detection = Detection3D()
-    detection.id = "cup-detection"
-    image = Image()
-    image.header.frame_id = "camera"
-    return detection, [image, None, None, None, None]
+JPEG = b"\xff\xd8jpeg\xff\xd9"
 
 
-def test_node_value_types_preserve_ros_payloads() -> None:
-    detection, visuals = make_payload()
+def make_bbox(x: float = 1.0) -> BoundingBox3D:
+    bbox = BoundingBox3D()
+    bbox.center.position.x = x
+    bbox.size.z = 0.5
+    return bbox
 
-    node = ObjectNode(7, "cup", detection, visuals)
+
+def new_object(graph: SceneGraph, name: str = "cup", sec: int = 10) -> int:
+    object_id = graph.allocate_id()
+    stamp = Time(sec=sec)
+    graph.add_object(
+        ObjectNode(
+            object_id,
+            name,
+            make_bbox(),
+            "map",
+            last_seen=stamp,
+            last_updated=stamp,
+            crops=[(stamp, JPEG)],
+        )
+    )
+    return object_id
+
+
+def test_node_value_types_expose_new_fields() -> None:
+    node = ObjectNode(
+        7,
+        "cup",
+        make_bbox(),
+        "map",
+        ObjectNode.SOURCE_MANUAL,
+        Time(sec=3),
+        Time(sec=4),
+        [(Time(sec=5), JPEG)],
+    )
 
     assert node.id == 7
     assert node.class_name == "cup"
-    assert node.detection is not detection
-    assert node.detection is not None
-    assert node.detection.id == "cup-detection"
-    assert len(node.visuals) == 5
-    assert node.visuals[0] is not None
-    assert node.visuals[0].header.frame_id == "camera"
-    assert node.visuals[1] is None
-    assert ConceptNode(-1, "on").concept_name == "on"
+    assert node.bbox.center.position.x == 1.0
+    assert node.frame_id == "map"
+    assert node.source == ObjectNode.SOURCE_MANUAL
+    assert node.last_seen.sec == 3
+    assert node.last_updated.sec == 4
+    assert node.crops[0][0].sec == 5
+    assert node.crops[0][1] == JPEG
+    assert node.workers == {}
+    node.workers = {"describer": True}
+    assert node.workers == {"describer": True}
+    assert ConceptNode(1, "on").concept_name == "on"
     assert Edge("relation").label == "relation"
-
-
-def test_object_visual_validation() -> None:
-    with pytest.raises(ValueError, match="exactly five"):
-        ObjectNode(1, "cup", visuals=[])
-
-    with pytest.raises(TypeError, match="sensor_msgs.msg.Image"):
-        ObjectNode(1, "cup", visuals=[None, None, None, None, object()])
 
 
 def test_graph_construction_queries_and_mutation() -> None:
     graph = SceneGraph()
-    detection, visuals = make_payload()
-    object_id = graph.add_object_node("cup", detection, visuals)
+    object_id = new_object(graph)
     concept_id = graph.add_concept_node("on")
 
-    assert object_id == 1
-    assert concept_id == -1
+    assert object_id > 0
+    assert concept_id > object_id  # one shared positive id counter
     assert graph.has_node(object_id)
     assert graph.find_node(999) is None
-    assert isinstance(graph.find_node(object_id), ObjectNode)
+    found = graph.find_node(object_id)
+    assert isinstance(found, ObjectNode)
+    assert found.frame_id == "map"
+    assert found.crops[0][1] == JPEG
     assert graph.add_edge(object_id, concept_id, "relation").label == "relation"
     assert graph.has_edge(object_id, concept_id, "relation")
     assert graph.find_edges(object_id, concept_id) == [Edge("relation")]
@@ -99,15 +122,12 @@ def test_graph_construction_queries_and_mutation() -> None:
     assert len(graph.nodes) == 2
     assert graph.edges == [(object_id, concept_id, Edge("relation"))]
     assert graph.remove_edge(object_id, concept_id, "relation") == Edge("relation")
-    assert graph.remove_isolated_nodes() == [
-        ConceptNode(concept_id, "on"),
-        ObjectNode(object_id, "cup", detection, visuals),
-    ]
+    assert len(graph.remove_isolated_nodes()) == 2
 
 
 def test_graph_errors_keep_kind_and_message() -> None:
     graph = SceneGraph()
-    first_id = graph.add_concept_node_with_id(-1, "first")
+    first_id = graph.add_concept_node_with_id(1, "first")
 
     with pytest.raises(GraphError) as duplicate:
         graph.add_concept_node_with_id(first_id, "duplicate")
@@ -118,8 +138,8 @@ def test_graph_errors_keep_kind_and_message() -> None:
         graph.remove_node(42)
     assert missing.value.kind == GraphErrorKind.NODE_DOES_NOT_EXIST
 
-    object_id = graph.add_object_node("cup")
-    second_object_id = graph.add_object_node("plate")
+    object_id = new_object(graph)
+    second_object_id = new_object(graph, "plate")
     with pytest.raises(GraphError) as invalid:
         graph.add_edge(object_id, second_object_id, "on")
     assert invalid.value.kind == GraphErrorKind.INVALID_EDGE
@@ -135,36 +155,83 @@ def test_graph_errors_keep_kind_and_message() -> None:
         graph.add_edge(second_id, first_id, "previous")
     assert cycle.value.kind == GraphErrorKind.CYCLE
 
+    with pytest.raises(GraphError) as label:
+        graph.find_or_add_concept("  ")
+    assert label.value.kind == GraphErrorKind.INVALID_LABEL
+
+
+def test_atomic_object_methods() -> None:
+    graph = SceneGraph()
+    object_id = new_object(graph, sec=10)
+
+    graph.update_object_pose(object_id, make_bbox(2.0), Time(sec=20))
+    node = graph.find_node(object_id)
+    assert isinstance(node, ObjectNode)
+    assert node.bbox.center.position.x == 2.0
+    assert node.last_seen.sec == 20
+    assert node.last_updated.sec == 20
+    with pytest.raises(GraphError) as missing:
+        graph.update_object_pose(999, make_bbox(), Time())
+    assert missing.value.kind == GraphErrorKind.NODE_DOES_NOT_EXIST
+
+    graph.set_crop_policy(2, timedelta(seconds=5))
+    assert not graph.offer_crop(object_id, Time(sec=12), JPEG)  # too close to sec=10
+    assert graph.offer_crop(object_id, Time(sec=16), b"b")
+    assert graph.offer_crop(object_id, Time(sec=22), b"c")  # replaces oldest
+    crops = graph.find_node(object_id).crops
+    assert [data for _, data in crops] == [b"b", b"c"]
+
+    graph.set_object_class(object_id, "mug")
+    assert graph.find_node(object_id).class_name == "mug"
+
+
+def test_concepts_and_worker_state() -> None:
+    graph = SceneGraph()
+    object_id = new_object(graph)
+
+    concept_id, created = graph.find_or_add_concept(" red ")
+    assert created
+    assert graph.find_or_add_concept("red") == (concept_id, False)
+    edge_concept, edge_created = graph.add_concept_edge(object_id, "has_color", "blue")
+    assert edge_created
+    assert graph.has_edge(object_id, edge_concept, "has_color")
+
+    assert object_id in graph.unprocessed_by("describer")
+    graph.mark_processed(object_id, "describer")
+    assert object_id not in graph.unprocessed_by("describer")
+    assert graph.find_node(object_id).workers == {"describer": True}
+
+    # "red" has no edge: pruned; "blue" is connected and the object is kept
+    assert graph.prune_isolated_concepts() == [concept_id]
+    assert graph.has_node(object_id)
+
 
 def test_clone_swap_and_explicit_id_allocation() -> None:
     graph = SceneGraph()
-    detection, visuals = make_payload()
-    object_id = graph.add_object_node_with_id(30, "cup", detection, visuals)
-    concept_id = graph.add_concept_node_with_id(-50, "red")
-    graph.add_edge(object_id, concept_id, "has_color")
+    stamp = Time(sec=1)
+    graph.add_object(ObjectNode(30, "cup", make_bbox(), "map", crops=[(stamp, JPEG)]))
+    concept_id = graph.add_concept_node_with_id(50, "red")
+    graph.add_edge(30, concept_id, "has_color")
 
     clone = graph.clone()
-    cloned_object = clone.find_node(object_id)
+    cloned_object = clone.find_node(30)
     assert isinstance(cloned_object, ObjectNode)
-    assert cloned_object.detection is not None
-    assert cloned_object.detection.id == "cup-detection"
+    assert cloned_object.crops[0][1] == JPEG
     clone.add_concept_node("blue")
     assert len(graph.concept_nodes) == 1
     assert len(clone.concept_nodes) == 2
-    assert graph.add_object_node("plate") == 31
-    assert graph.add_concept_node("auto") == -51
+    assert graph.allocate_id() == 51  # explicit ids advance the counter
 
     other = SceneGraph()
-    other_id = other.add_concept_node_with_id(-3, "other")
+    other_id = other.add_concept_node_with_id(3, "other")
     graph.swap(other)
     assert graph.has_node(other_id)
-    assert other.has_node(object_id)
+    assert other.has_node(30)
 
 
-def test_ros_message_conversion_preserves_current_wire_format() -> None:
+def test_ros_message_conversion_roundtrip() -> None:
     graph = SceneGraph()
-    detection, visuals = make_payload()
-    object_id = graph.add_object_node("cup", detection, visuals)
+    object_id = new_object(graph)
     concept_id = graph.add_concept_node("on")
     graph.add_edge(object_id, concept_id, "relation")
 
@@ -172,27 +239,27 @@ def test_ros_message_conversion_preserves_current_wire_format() -> None:
     assert len(message.object_nodes) == 1
     assert len(message.concept_nodes) == 1
     assert len(message.edges) == 1
+    assert message.object_nodes[0].header.frame_id == "map"
+    assert message.object_nodes[0].bbox.center.position.x == 1.0
 
     loaded = SceneGraph.from_msg(message)
     loaded_object = loaded.find_node(object_id)
     assert isinstance(loaded_object, ObjectNode)
-    assert loaded_object.class_name == ""
-    assert loaded_object.detection is not None
-    assert loaded_object.detection.id == ""
+    assert loaded_object.frame_id == "map"
+    assert loaded_object.last_seen.sec == 10
+    assert loaded_object.crops == []  # crops are not on the wire
     assert loaded.has_edge(object_id, concept_id, "relation")
 
     graph.update_from_msg(message)
-    assert graph.has_node(object_id)
-    assert graph.has_node(concept_id)
+    assert graph.find_node(object_id).crops[0][1] == JPEG  # update keeps crops
 
 
 def test_retain_object_nodes_binding_smoke() -> None:
     graph = SceneGraph()
-    detection, visuals = make_payload()
-    object1 = graph.add_object_node_with_id(1, "cup", detection, visuals)
-    object2 = graph.add_object_node_with_id(2, "plate", detection, visuals)
-    shared = graph.add_concept_node_with_id(-1, "shared")
-    ancestor = graph.add_concept_node_with_id(-2, "ancestor")
+    object1 = new_object(graph)
+    object2 = new_object(graph, "plate")
+    shared = graph.add_concept_node("shared")
+    ancestor = graph.add_concept_node("ancestor")
     graph.add_edge(object1, shared, "rel")
     graph.add_edge(object2, shared, "rel")
     graph.add_edge(shared, ancestor, "rel")

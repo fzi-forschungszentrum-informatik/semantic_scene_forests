@@ -41,7 +41,6 @@ struct Status;
 struct IdResult;
 struct EdgeList;
 struct GraphRecord;
-struct PayloadRecord;
 struct ObjectNodeRecord;
 
 class NativeGraph
@@ -49,7 +48,8 @@ class NativeGraph
 public:
   NativeGraph();
   ~NativeGraph();
-  IdResult addObjectNode(rust::Str name, const PayloadRecord& payload);
+  int64_t allocateId();
+  Status addObject(const ObjectNodeRecord& node);
   rust::Vec<ObjectNodeRecord> objectNodes() const;
   Status copyFrom(const NativeGraph& other);
   IdResult addConceptNode(rust::Str name);

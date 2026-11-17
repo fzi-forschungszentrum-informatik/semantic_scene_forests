@@ -26,8 +26,9 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 
-use crate::{ffi::bridge, Detection3D, Image, ObjectNode};
-use ros_env::{geometry_msgs::msg, vision_msgs::msg as vision};
+use crate::ffi::bridge;
+use crate::{Crop, ObjectNode};
+use ros_env::{geometry_msgs::msg, vision_msgs::msg::BoundingBox3D};
 
 impl From<&msg::Pose> for bridge::PoseRecord {
     fn from(pose: &msg::Pose) -> Self {
@@ -61,99 +62,54 @@ impl From<bridge::PoseRecord> for msg::Pose {
     }
 }
 
-impl From<&Detection3D> for bridge::DetectionRecord {
-    fn from(detection: &Detection3D) -> Self {
+impl From<&BoundingBox3D> for bridge::BBoxRecord {
+    fn from(bbox: &BoundingBox3D) -> Self {
         Self {
-            header: (&detection.header).into(),
-            results: detection
-                .results
-                .iter()
-                .map(|result| bridge::HypothesisRecord {
-                    class_id: result.hypothesis.class_id.clone(),
-                    score: result.hypothesis.score,
-                    pose: (&result.pose.pose).into(),
-                    covariance: result.pose.covariance,
-                })
-                .collect(),
-            center: (&detection.bbox.center).into(),
-            size: [
-                detection.bbox.size.x,
-                detection.bbox.size.y,
-                detection.bbox.size.z,
-            ],
-            id: detection.id.clone(),
+            center: (&bbox.center).into(),
+            size: [bbox.size.x, bbox.size.y, bbox.size.z],
         }
     }
 }
 
-impl From<bridge::DetectionRecord> for Detection3D {
-    fn from(detection: bridge::DetectionRecord) -> Self {
+impl From<bridge::BBoxRecord> for BoundingBox3D {
+    fn from(bbox: bridge::BBoxRecord) -> Self {
         Self {
-            header: detection.header.into(),
-            results: detection
-                .results
-                .into_iter()
-                .map(|result| vision::ObjectHypothesisWithPose {
-                    hypothesis: vision::ObjectHypothesis {
-                        class_id: result.class_id,
-                        score: result.score,
-                    },
-                    pose: msg::PoseWithCovariance {
-                        pose: result.pose.into(),
-                        covariance: result.covariance,
-                    },
-                })
-                .collect(),
-            bbox: vision::BoundingBox3D {
-                center: detection.center.into(),
-                size: msg::Vector3 {
-                    x: detection.size[0],
-                    y: detection.size[1],
-                    z: detection.size[2],
-                },
+            center: bbox.center.into(),
+            size: msg::Vector3 {
+                x: bbox.size[0],
+                y: bbox.size[1],
+                z: bbox.size[2],
             },
-            id: detection.id,
         }
     }
 }
 
-impl From<&Image> for bridge::ImageRecord {
-    fn from(image: &Image) -> Self {
+impl From<&ObjectNode> for bridge::ObjectNodeRecord {
+    fn from(node: &ObjectNode) -> Self {
         Self {
-            header: (&image.header).into(),
-            height: image.height,
-            width: image.width,
-            encoding: image.encoding.clone(),
-            is_bigendian: image.is_bigendian,
-            step: image.step,
-            data: image.data.clone(),
-        }
-    }
-}
-
-impl From<bridge::ImageRecord> for Image {
-    fn from(image: bridge::ImageRecord) -> Self {
-        Self {
-            header: image.header.into(),
-            height: image.height,
-            width: image.width,
-            encoding: image.encoding,
-            is_bigendian: image.is_bigendian,
-            step: image.step,
-            data: image.data,
-        }
-    }
-}
-
-impl bridge::PayloadRecord {
-    pub(crate) fn new(detection: Option<&Detection3D>, visuals: [Option<&Image>; 5]) -> Self {
-        Self {
-            has_detection: detection.is_some(),
-            detection: detection.map(Into::into).unwrap_or_default(),
-            visuals: visuals.map(|image| bridge::ImageSlot {
-                present: image.is_some(),
-                image: image.map(Into::into).unwrap_or_default(),
-            }),
+            id: node.id,
+            class_name: node.class_name.clone(),
+            bbox: (&node.bbox).into(),
+            frame_id: node.frame_id.clone(),
+            source: node.source,
+            last_seen: (&node.last_seen).into(),
+            last_updated: (&node.last_updated).into(),
+            crops: node
+                .crops
+                .iter()
+                .map(|crop| bridge::CropRecord {
+                    stamp: (&crop.stamp).into(),
+                    jpeg: crop.jpeg.clone(),
+                })
+                .collect(),
+            workers: node
+                .workers
+                .iter()
+                .map(|(name, processed)| bridge::WorkerRecord {
+                    name: name.clone(),
+                    processed: *processed,
+                })
+                .collect(),
         }
     }
 }
@@ -163,14 +119,24 @@ impl From<bridge::ObjectNodeRecord> for ObjectNode {
         Self {
             id: node.id,
             class_name: node.class_name,
-            detection: node
-                .payload
-                .has_detection
-                .then(|| node.payload.detection.into()),
-            visuals: node
-                .payload
-                .visuals
-                .map(|slot| slot.present.then(|| slot.image.into())),
+            bbox: node.bbox.into(),
+            frame_id: node.frame_id,
+            source: node.source,
+            last_seen: node.last_seen.into(),
+            last_updated: node.last_updated.into(),
+            crops: node
+                .crops
+                .into_iter()
+                .map(|crop| Crop {
+                    stamp: crop.stamp.into(),
+                    jpeg: crop.jpeg,
+                })
+                .collect(),
+            workers: node
+                .workers
+                .into_iter()
+                .map(|worker| (worker.name, worker.processed))
+                .collect(),
         }
     }
 }

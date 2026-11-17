@@ -28,7 +28,7 @@
 
 //! Publish, receive, and mutate a C++-backed graph in an rclrs node.
 use rclrs::{Context, CreateBasicExecutor, RclrsErrorFilter, SpinOptions};
-use semantic_scene_forests_rs::{SceneGraph, SceneGraphMsg};
+use semantic_scene_forests_rs::{ObjectNode, SceneGraph, SceneGraphMsg};
 use std::{
     error::Error,
     sync::{Arc, Mutex},
@@ -51,7 +51,12 @@ fn inspect_message(message: &SceneGraphMsg, cup: i64, on: i64) -> Result<(), Box
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut graph = SceneGraph::new();
-    let cup = graph.add_object_node("cup", None, [None; 5])?;
+    let cup = graph.allocate_id();
+    graph.add_object(&ObjectNode {
+        id: cup,
+        class_name: "cup".into(),
+        ..Default::default()
+    })?;
     let on = graph.add_concept_node("on")?;
     graph.add_edge(cup, on, "relation")?;
     let mut message = graph.to_msg();
