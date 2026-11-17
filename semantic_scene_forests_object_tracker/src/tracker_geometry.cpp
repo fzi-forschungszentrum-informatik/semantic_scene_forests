@@ -131,6 +131,10 @@ transformBoundingBoxToFrame(const vision_msgs::msg::BoundingBox3D& bbox,
 std::shared_ptr<const sensor_msgs::msg::CompressedImage>
 encodeCrop(const cv::Mat& bgr, const std_msgs::msg::Header& header, int jpeg_quality)
 {
+  if (bgr.empty())
+  {
+    return nullptr; // cv::imencode asserts on empty input
+  }
   auto crop    = std::make_shared<sensor_msgs::msg::CompressedImage>();
   crop->header = header;
   crop->format = "bgr8; jpeg compressed bgr8";
@@ -149,6 +153,10 @@ encodeCrop(const sensor_msgs::msg::Image& image, int jpeg_quality)
     return encodeCrop(cv_bridge::toCvCopy(image, "bgr8")->image, image.header, jpeg_quality);
   }
   catch (const cv_bridge::Exception&)
+  {
+    return nullptr;
+  }
+  catch (const cv::Exception&)
   {
     return nullptr;
   }

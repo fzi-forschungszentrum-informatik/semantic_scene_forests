@@ -1098,21 +1098,27 @@ TEST(MultiCameraTracker, AddObjectTrackIsUpdatedMergedAndRetiredLikeAnyOther)
     2s));
 }
 
-// D3/D4: an add_object track merges with an overlapping camera track; the older identity survives.
-TEST(MultiCameraTracker, AddObjectTrackMergesWithOverlappingCameraTrack)
+// D3/D4: an add_object track overlapping a camera track merges into it (older id survives; the
+// merged track takes the newer observation time, here the manual one).
+TEST(MultiCameraTracker, AddObjectTrackMergesIntoOverlappingCameraTrack)
 {
   TrackerHarness harness;
   ASSERT_TRUE(harness.ready());
-  const auto ADDED = harness.addObject("cup", "map", 5.0, 1.0, 10);
+  publishBatches(harness.rear(), 10.0, 3, "9", 6.0, 50, 1.0); // map x = 5
+  ASSERT_TRUE(
+    TrackerHarness::waitUntil([&]() { return harness.graph().getObjectNodes().size() == 1U; }, 2s));
+  const int64_t CAMERA_ID = harness.graph().getObjectNodes().front().id;
+  const auto ADDED        = harness.addObject("cup", "map", 5.0, 1.0, 20);
   ASSERT_TRUE(ADDED && ADDED->success);
-  // Seen at the same place by the rear camera only after a different local id, so it links by
-  // overlap to the manual track instead of starting a second one.
-  publishBatches(harness.rear(), 10.5, 3, "9", 6.0, 50, 1.0);
-  std::this_thread::sleep_for(300ms);
-  const auto NODES = harness.graph().getObjectNodes();
-  ASSERT_EQ(NODES.size(), 1U);
-  EXPECT_EQ(NODES.front().id, ADDED->object_id);
-  EXPECT_GE(NODES.front().last_seen.sec, 10);
+  EXPECT_NE(ADDED->object_id, CAMERA_ID);
+  ASSERT_TRUE(TrackerHarness::waitUntil(
+    [&]() {
+      const auto NODES = harness.graph().getObjectNodes();
+      return NODES.size() == 1U && NODES.front().id == CAMERA_ID &&
+             NODES.front().last_seen.sec == 20;
+    },
+    2s));
+  EXPECT_FALSE(harness.graph().hasNode(ADDED->object_id));
 }
 
 } // namespace

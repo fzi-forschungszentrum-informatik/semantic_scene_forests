@@ -34,6 +34,7 @@
 #include <semantic_scene_forests/scene_graph.hpp>
 
 #include "global_tracker.hpp"
+#include "tracker_geometry.hpp"
 
 namespace semantic_scene_forests_object_tracker {
 namespace {
@@ -136,6 +137,13 @@ TEST_F(GlobalTrackerTest, AddConfirmedTrackIsNeverHeldAndMergesLikeAnyOther)
   cycle({tracklet("front", 1, 11, 0.05, "cup")}, {}, true);
   EXPECT_EQ(global.linkedTrack("front", 1), MANUAL);
   EXPECT_EQ(global.tracks().size(), 1u);
+}
+
+TEST(EncodeCrop, EmptyImageYieldsNoCropAndDoesNotThrow)
+{
+  sensor_msgs::msg::Image empty;
+  empty.encoding = "bgr8";
+  EXPECT_NO_THROW(EXPECT_EQ(detail::encodeCrop(empty, 90), nullptr));
 }
 
 TEST_F(GlobalTrackerTest, RepostedTrackletFollowsItsHeldTrackUntilTheLabelCheck)
