@@ -71,12 +71,12 @@ void updateFrom(TrackedObject& track,
     return;
   }
   // Tracklets repost their crop history every frame: add only crops not stored yet.
-  const auto EXISTING = track.getCrops();
+  const std::vector<CropPtr> EXISTING(track.getCrops().begin(), track.getCrops().end());
   for (const auto& crop : *tracklet.crops)
   {
     if (std::ranges::none_of(EXISTING, [&crop](const auto& stored) {
-          return stored.header.stamp == crop.header.stamp &&
-                 stored.header.frame_id == crop.header.frame_id;
+          return stored->header.stamp == crop->header.stamp &&
+                 stored->header.frame_id == crop->header.frame_id;
         }))
     {
       track.addCrop(crop);
@@ -86,9 +86,10 @@ void updateFrom(TrackedObject& track,
 
 } // namespace
 
-GlobalTracker::GlobalTracker(rclcpp::Logger logger, semantic_scene_forests_manager::Database& db)
+GlobalTracker::GlobalTracker(rclcpp::Logger logger,
+                             std::shared_ptr<fzi::semantic_scene_forests::SceneGraph> graph)
   : m_logger(std::move(logger))
-  , m_db(db)
+  , m_graph(std::move(graph))
 {
 }
 
@@ -123,8 +124,7 @@ std::optional<ArbiterRequest> GlobalTracker::createFrom(const Tracklet& tracklet
                                                         const object_tracker::Params& params,
                                                         bool arbiter_enabled)
 {
-  const auto ID = static_cast<uint64_t>(
-    m_db.write([](semantic_scene_forests_manager::Tx& tx) { return tx.allocateObjectId(); }));
+  const auto ID = static_cast<uint64_t>(m_graph->allocateId());
   m_created.push_back(ID);
   auto track = std::make_unique<TrackedObject>(toAdapter(tracklet, params.world_frame),
                                                tracklet.last_seen,
@@ -154,6 +154,38 @@ std::optional<ArbiterRequest> GlobalTracker::createFrom(const Tracklet& tracklet
   }
   m_tracks.push_back(std::move(track));
   return check;
+}
+
+uint64_t GlobalTracker::addConfirmed(const std::string& class_name,
+                                     const Eigen::Vector3d& position,
+                                     const Eigen::Vector3d& size,
+                                     const rclcpp::Time& stamp,
+                                     const std::vector<CropPtr>& crops,
+                                     const object_tracker::Params& params)
+{
+  const Tracklet TRACKLET{.camera     = "",
+                          .local_id   = 0,
+                          .last_seen  = stamp,
+                          .position   = position,
+                          .size       = size,
+                          .class_name = class_name,
+                          .score      = 1.0,
+                          .crops      = nullptr};
+  const auto ID = static_cast<uint64_t>(m_graph->allocateId());
+  auto& track   = m_tracks.emplace_back(
+    std::make_unique<TrackedObject>(toAdapter(TRACKLET, params.world_frame),
+                                    stamp,
+                                    ID,
+                                    params.measurement_noise_std,
+                                    params.process_noise_std,
+                                    1,
+                                    static_cast<size_t>(params.max_crops_per_object),
+                                    1.0));
+  for (const auto& crop : crops)
+  {
+    track->addCrop(crop);
+  }
+  return ID;
 }
 
 uint64_t GlobalTracker::merge(uint64_t a_id, uint64_t b_id)
@@ -408,11 +440,13 @@ std::vector<ArbiterRequest> GlobalTracker::reconcilePairs(const object_tracker::
         .b_id              = second.track_id,
         .a_label           = first.class_name,
         .b_label           = second.class_name,
-        .a_crops = std::make_shared<const std::vector<sensor_msgs::msg::Image>>(first.getCrops()),
-        .b_crops = std::make_shared<const std::vector<sensor_msgs::msg::Image>>(second.getCrops()),
-        .a_size  = first.bbox3d_size,
-        .b_size  = second.bbox3d_size,
-        .center_distance = (first.getPosition() - second.getPosition()).norm()});
+        .a_crops           = std::make_shared<const std::vector<CropPtr>>(first.getCrops().begin(),
+                                                                          first.getCrops().end()),
+        .b_crops           = std::make_shared<const std::vector<CropPtr>>(second.getCrops().begin(),
+                                                                          second.getCrops().end()),
+        .a_size            = first.bbox3d_size,
+        .b_size            = second.bbox3d_size,
+        .center_distance   = (first.getPosition() - second.getPosition()).norm()});
     }
   }
   return requests;

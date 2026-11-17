@@ -95,12 +95,12 @@ TrackerWorker::TrackerWorker()
 }
 
 void TrackerWorker::initialize(rclcpp::Node& node,
-                               semantic_scene_forests_manager::Database& db,
+                               std::shared_ptr<fzi::semantic_scene_forests::SceneGraph> graph,
                                const std::string& name,
                                diagnostic_updater::Updater& diagnostics)
 {
   m_node           = &node;
-  m_db             = &db;
+  m_graph          = std::move(graph);
   m_logger         = node.get_logger().get_child(name);
   m_tf_buffer      = std::make_unique<tf2_ros::Buffer>(node.get_clock());
   m_tf_listener    = std::make_unique<tf2_ros::TransformListener>(*m_tf_buffer);
@@ -116,7 +116,12 @@ void TrackerWorker::initialize(rclcpp::Node& node,
 
   diagnostics.add(name + " health", this, &TrackerWorker::onHealthDiagnostic);
 
-  m_global = std::make_unique<GlobalTracker>(m_logger.get_child("global"), db);
+  // The tracker is the only component that writes crops.
+  m_graph->setCropPolicy(
+    static_cast<size_t>(PARAMS.max_crops_per_object),
+    std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::duration<double>(PARAMS.crop_replace_min_interval_seconds)));
+  m_global = std::make_unique<GlobalTracker>(m_logger.get_child("global"), m_graph);
   if (PARAMS.arbiter.enabled)
   {
     // Throws for an unknown provider, an invalid extra_body or a missing key.
@@ -182,6 +187,12 @@ void TrackerWorker::initialize(rclcpp::Node& node,
            const std::shared_ptr<AddObservations::Request> request) {
       onAddObservations(header, request);
     },
+    rclcpp::ServicesQoS(),
+    m_global_group);
+  m_add_object_srv = node.create_service<AddObject>(
+    "add_object",
+    [this](const std::shared_ptr<AddObject::Request> request,
+           std::shared_ptr<AddObject::Response> response) { onAddObject(request, response); },
     rclcpp::ServicesQoS(),
     m_global_group);
 
@@ -272,6 +283,7 @@ void TrackerWorker::onCameraFrame(CameraInput& camera,
 void TrackerWorker::onAddObservations(const std::shared_ptr<rmw_request_id_t>& header,
                                       const std::shared_ptr<AddObservations::Request>& request)
 {
+  const auto PARAMS = m_param_listener->get_params();
   PendingObservations pending;
   pending.header = header;
   for (const auto& observation : request->observations)
@@ -326,21 +338,101 @@ void TrackerWorker::onAddObservations(const std::shared_ptr<rmw_request_id_t>& h
       pending.errors.push_back(std::move(error));
       continue;
     }
+    auto crops = std::make_shared<std::vector<CropPtr>>();
+    for (const auto& image : observation.image_crops)
+    {
+      if (auto jpeg = detail::encodeCrop(image, PARAMS.crop_jpeg_quality))
+      {
+        crops->push_back(std::move(jpeg));
+      }
+      else
+      {
+        RCLCPP_WARN(m_logger, "add_observations: skipping a crop that cannot be encoded");
+      }
+    }
     const auto& center = box->center.position;
-    pending.tracklets.push_back(Tracklet{
-      .camera     = MANUAL_SOURCE,
-      .local_id   = m_manual_next_id,
-      .last_seen  = stamp,
-      .position   = {center.x, center.y, center.z},
-      .size       = {box->size.x, box->size.y, box->size.z},
-      .class_name = observation.class_name,
-      .score      = 1.0,
-      .crops =
-        std::make_shared<const std::vector<sensor_msgs::msg::Image>>(observation.image_crops)});
+    pending.tracklets.push_back(Tracklet{.camera     = MANUAL_SOURCE,
+                                         .local_id   = m_manual_next_id,
+                                         .last_seen  = stamp,
+                                         .position   = {center.x, center.y, center.z},
+                                         .size       = {box->size.x, box->size.y, box->size.z},
+                                         .class_name = observation.class_name,
+                                         .score      = 1.0,
+                                         .crops      = std::move(crops)});
     pending.local_ids.emplace_back(m_manual_next_id++);
     pending.errors.emplace_back();
   }
   m_manual_pending.push_back(std::move(pending));
+}
+
+void TrackerWorker::onAddObject(const std::shared_ptr<AddObject::Request>& request,
+                                const std::shared_ptr<AddObject::Response>& response)
+{
+  const auto PARAMS = m_param_listener->get_params();
+  const auto FAIL   = [&](const std::string& message) {
+    RCLCPP_WARN(
+      m_logger, "add_object: rejecting '%s': %s", request->class_name.c_str(), message.c_str());
+    response->success = false;
+    response->message = message;
+  };
+  if (request->class_name.empty())
+  {
+    FAIL("empty class_name");
+    return;
+  }
+  if (request->header.frame_id.empty())
+  {
+    FAIL("empty header frame");
+    return;
+  }
+  if (request->header.stamp.sec < 0)
+  {
+    FAIL("negative header timestamp");
+    return;
+  }
+  const bool NO_STAMP = request->header.stamp.sec == 0 && request->header.stamp.nanosec == 0;
+  const rclcpp::Time STAMP =
+    NO_STAMP ? m_node->now() : rclcpp::Time(request->header.stamp, RCL_ROS_TIME);
+  std::optional<vision_msgs::msg::BoundingBox3D> box;
+  try
+  {
+    const auto TRANSFORM = m_tf_buffer->lookupTransform(
+      m_world_frame, request->header.frame_id, STAMP, rclcpp::Duration::from_seconds(0.1));
+    box = detail::transformBoundingBoxToFrame(request->bbox, TRANSFORM);
+  }
+  catch (const tf2::TransformException& ex)
+  {
+    FAIL(std::string("no transform to ") + m_world_frame + ": " + ex.what());
+    return;
+  }
+  if (!box)
+  {
+    FAIL("non-finite geometry, nonpositive size or invalid orientation");
+    return;
+  }
+  std::vector<CropPtr> crops;
+  for (const auto& image : request->image_crops)
+  {
+    if (auto jpeg = detail::encodeCrop(image, PARAMS.crop_jpeg_quality))
+    {
+      crops.push_back(std::move(jpeg));
+    }
+    else
+    {
+      RCLCPP_WARN(m_logger, "add_object: skipping a crop that cannot be encoded");
+    }
+  }
+  const auto& center = box->center.position;
+  const auto ID      = m_global->addConfirmed(request->class_name,
+                                              {center.x, center.y, center.z},
+                                              {box->size.x, box->size.y, box->size.z},
+                                              STAMP,
+                                              crops,
+                                              PARAMS);
+  m_manual_tracks.insert(ID);
+  response->success   = true;
+  response->object_id = static_cast<int64_t>(ID);
+  response->message   = "added track " + std::to_string(ID);
 }
 
 void TrackerWorker::answerObservations()
@@ -407,8 +499,7 @@ void TrackerWorker::onGlobalCycle()
     tracklets.insert(tracklets.end(), pending.tracklets.begin(), pending.tracklets.end());
   }
   const auto RESULTS = m_arbiter ? m_arbiter->drainResults() : std::vector<ArbiterResult>{};
-  // Allocates IDs in the database itself: must stay outside any db write/read.
-  auto requests = m_global->cycle(tracklets, RESULTS, PARAMS, m_arbiter != nullptr);
+  auto requests      = m_global->cycle(tracklets, RESULTS, PARAMS, m_arbiter != nullptr);
   if (m_global->rejectedLabels().size() != m_rejected_labels.load()->size()) // only grows
   {
     m_rejected_labels.store(
@@ -418,8 +509,8 @@ void TrackerWorker::onGlobalCycle()
   {
     m_arbiter->enqueue(std::move(request));
   }
-  writeToDatabase();
-  answerObservations(); // after the write, so answered objects are already in the database
+  writeToGraph();
+  answerObservations(); // after the write, so answered objects are already in the graph
 
   const auto STATS = m_global->stats(PARAMS);
   const std::scoped_lock LOCK{m_stats_mutex};
@@ -436,11 +527,10 @@ void TrackerWorker::onGlobalCycle()
   m_arbiter_pending     = m_arbiter ? m_arbiter->pending() : 0;
 }
 
-void TrackerWorker::writeToDatabase()
+void TrackerWorker::writeToGraph()
 {
-  m_unwritten.insert(m_global->createdLastCycle().begin(), m_global->createdLastCycle().end());
+  using fzi::semantic_scene_forests::ObjectNode;
   std::set<uint64_t> alive;
-  std::vector<semantic_scene_forests_manager::TrackUpdate> updates;
   for (const auto& track : m_global->tracks())
   {
     alive.insert(track->track_id);
@@ -448,30 +538,73 @@ void TrackerWorker::writeToDatabase()
     {
       continue; // Waiting for its label check.
     }
-    auto& written       = m_written[track->track_id];
-    const bool NEW      = m_unwritten.erase(track->track_id) > 0;
-    const bool NEW_CROP = NEW || written.crop_revision != track->cropRevision();
-    if (!NEW_CROP && written.last_seen == track->last_seen &&
-        written.class_name == track->class_name)
+    const auto ID  = static_cast<int64_t>(track->track_id);
+    const auto DET = track->toDetection3D();
+    const auto IT  = m_written.find(track->track_id);
+    if (IT == m_written.end())
     {
+      // Track confirmed (after the label check, if held).
+      const auto RESULT = m_graph->addObject(
+        ObjectNode{.id         = ID,
+                   .class_name = track->class_name,
+                   .bbox       = DET.bbox,
+                   .frame_id   = DET.header.frame_id,
+                   .source = m_manual_tracks.contains(track->track_id) ? ObjectNode::SOURCE_MANUAL
+                                                                       : ObjectNode::SOURCE_CAMERA,
+                   .last_seen    = DET.header.stamp,
+                   .last_updated = DET.header.stamp,
+                   .crops        = {track->getCrops().begin(), track->getCrops().end()}});
+      if (!RESULT)
+      {
+        RCLCPP_WARN(
+          m_logger, "Cannot add track %ld to the graph: %s", ID, RESULT.error().message.c_str());
+      }
+      m_written[track->track_id] = Written{.last_seen     = track->last_seen,
+                                           .crop_revision = track->cropRevision(),
+                                           .suppressed    = !RESULT};
       continue;
     }
-    written = Written{.last_seen     = track->last_seen,
-                      .class_name    = track->class_name,
-                      .crop_revision = track->cropRevision()};
-    semantic_scene_forests_manager::TrackUpdate update;
-    update.id         = static_cast<int64_t>(track->track_id);
-    update.class_name = track->class_name;
-    update.detection  = track->toDetection3D();
-    update.last_seen  = update.detection.header.stamp;
-    if (NEW_CROP)
+    auto& written = IT->second;
+    if (written.suppressed ||
+        (written.last_seen == track->last_seen && written.crop_revision == track->cropRevision()))
     {
-      update.crops = track->getCrops();
+      continue; // Class votes after creation never touch the graph.
     }
-    updates.push_back(std::move(update));
+    // An unknown id means delete_object removed the node: stop writing it until the track retires.
+    const auto CHECK = [&](const auto& result) {
+      if (result)
+      {
+        return;
+      }
+      if (result.error().kind == SceneGraphErrorKind::NODE_DOES_NOT_EXIST)
+      {
+        RCLCPP_INFO(m_logger, "Node %ld was deleted: no longer writing track %ld", ID, ID);
+        written.suppressed = true;
+      }
+      else
+      {
+        RCLCPP_WARN(
+          m_logger, "Graph write for track %ld failed: %s", ID, result.error().message.c_str());
+      }
+    };
+    if (written.last_seen != track->last_seen)
+    {
+      CHECK(m_graph->updateObjectPose(ID, DET.bbox, DET.header.stamp));
+    }
+    // The newest crops are the ones added since the last write; the graph decides which it keeps.
+    const auto& crops = track->getCrops();
+    const auto NEW_CROPS =
+      std::min<size_t>(track->cropRevision() - written.crop_revision, crops.size());
+    for (auto crop = crops.end() - static_cast<std::ptrdiff_t>(NEW_CROPS);
+         !written.suppressed && crop != crops.end();
+         ++crop)
+    {
+      CHECK(m_graph->offerCrop(ID, *crop));
+    }
+    written.last_seen     = track->last_seen;
+    written.crop_revision = track->cropRevision();
   }
-  // Merged, retired or rejected tracks: drop their rows, or the bare ID if never written.
-  std::vector<int64_t> removed;
+  // Merged, retired or rejected tracks: drop their nodes (held ones were never written).
   for (auto it = m_written.begin(); it != m_written.end();)
   {
     if (alive.contains(it->first))
@@ -479,34 +612,13 @@ void TrackerWorker::writeToDatabase()
       ++it;
       continue;
     }
-    removed.push_back(static_cast<int64_t>(it->first));
+    if (!it->second.suppressed)
+    {
+      (void)m_graph->removeNode(static_cast<int64_t>(it->first)); // already gone is fine
+    }
+    m_manual_tracks.erase(it->first);
     it = m_written.erase(it);
   }
-  for (auto it = m_unwritten.begin(); it != m_unwritten.end();)
-  {
-    if (alive.contains(*it))
-    {
-      ++it;
-      continue;
-    }
-    removed.push_back(static_cast<int64_t>(*it));
-    it = m_unwritten.erase(it);
-  }
-  if (updates.empty() && removed.empty())
-  {
-    return;
-  }
-  const builtin_interfaces::msg::Time NOW = m_node->now();
-  m_db->write([&](semantic_scene_forests_manager::Tx& tx) {
-    for (const auto& update : updates)
-    {
-      tx.upsertTrack(update, NOW);
-    }
-    for (const auto ID : removed)
-    {
-      tx.deleteObject(ID);
-    }
-  });
 }
 
 void TrackerWorker::onHealthDiagnostic(diagnostic_updater::DiagnosticStatusWrapper& stat)

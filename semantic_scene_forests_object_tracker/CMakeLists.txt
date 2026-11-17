@@ -36,6 +36,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(pluginlib REQUIRED)
+find_package(semantic_scene_forests REQUIRED)
 find_package(semantic_scene_forests_manager REQUIRED)
 find_package(semantic_scene_forests_msgs REQUIRED)
 find_package(semantic_scene_forests_object_msgs REQUIRED)
@@ -88,7 +89,8 @@ target_link_libraries(tracker_worker PUBLIC
   message_filters::message_filters
   rclcpp::rclcpp
   pluginlib::pluginlib
-  semantic_scene_forests_manager::world_db
+  semantic_scene_forests::semantic_scene_forests
+  semantic_scene_forests_manager::world_db # worker_interface.hpp (header-only interface target)
   diagnostic_updater::diagnostic_updater
   semantic_scene_forests_utils::semantic_scene_forests_utils
   sensor_msgs::sensor_msgs_library

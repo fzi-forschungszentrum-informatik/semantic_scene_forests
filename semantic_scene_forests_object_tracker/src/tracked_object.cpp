@@ -31,6 +31,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <utility>
 
 #include <vision_msgs/msg/object_hypothesis_with_pose.hpp>
 
@@ -287,19 +288,14 @@ vision_msgs::msg::Detection3D TrackedObject::toDetection3D() const
   return det;
 }
 
-void TrackedObject::addCrop(const sensor_msgs::msg::Image& crop)
+void TrackedObject::addCrop(CropPtr crop)
 {
   if (m_crops.size() >= m_max_crops)
   {
     m_crops.pop_front();
   }
-  m_crops.push_back(crop);
+  m_crops.push_back(std::move(crop));
   ++m_crop_revision;
-}
-
-std::vector<sensor_msgs::msg::Image> TrackedObject::getCrops() const
-{
-  return {m_crops.begin(), m_crops.end()};
 }
 
 } // namespace semantic_scene_forests_object_tracker

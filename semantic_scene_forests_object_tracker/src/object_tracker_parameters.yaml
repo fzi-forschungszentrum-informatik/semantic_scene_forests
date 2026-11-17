@@ -188,6 +188,18 @@ object_tracker:
     description: "Maximum number of cropped image patches to store per tracked object."
     validation:
       gt<>: [0]
+  crop_jpeg_quality:
+    type: int
+    default_value: 90
+    description: "JPEG quality (1-100) of the stored image crops."
+    validation:
+      bounds<>: [1, 100]
+  crop_replace_min_interval_seconds:
+    type: double
+    default_value: 10.0
+    description: "A new crop is added to (or replaces the oldest crop of) a scene graph object only if it is at least this much newer than the object's newest crop."
+    validation:
+      gt_eq<>: [0.0]
   snapshot_rate_hz:
     type: double
     default_value: 5.0

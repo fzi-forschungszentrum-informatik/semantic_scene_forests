@@ -31,7 +31,7 @@
 #include <string>
 #include <vector>
 
-#include <semantic_scene_forests_manager/database.hpp>
+#include <semantic_scene_forests/scene_graph.hpp>
 
 #include "global_tracker.hpp"
 
@@ -92,9 +92,10 @@ protected:
   }
 
   object_tracker::Params params;
-  // Real world database: track IDs are its IDs (1, 2, ... in a fresh database).
-  semantic_scene_forests_manager::Database db;
-  GlobalTracker global{rclcpp::get_logger("test"), db};
+  // Real scene graph: track IDs are its allocated IDs (1, 2, ... in a fresh graph).
+  std::shared_ptr<fzi::semantic_scene_forests::SceneGraph> graph{
+    std::make_shared<fzi::semantic_scene_forests::SceneGraph>()};
+  GlobalTracker global{rclcpp::get_logger("test"), graph};
 };
 
 TEST_F(GlobalTrackerTest, TwoCamerasSeeingOneObjectShareOneGlobalId)
@@ -117,6 +118,24 @@ TEST_F(GlobalTrackerTest, OneCycleTrackletReportsItsLinkAndLeavesAPersistentTrac
   EXPECT_FALSE(global.linkedTrack("<manual>", 2));
   EXPECT_EQ(global.tracks().size(), 2u);
   EXPECT_FALSE(global.isHeld(NEXT));
+}
+
+TEST_F(GlobalTrackerTest, AddConfirmedTrackIsNeverHeldAndMergesLikeAnyOther)
+{
+  const auto MANUAL = global.addConfirmed("cup",
+                                          {0.0, 0.0, 1.0},
+                                          Eigen::Vector3d::Constant(0.4),
+                                          rclcpp::Time(10, 0, RCL_ROS_TIME),
+                                          {},
+                                          params);
+  EXPECT_EQ(MANUAL, 1u);
+  ASSERT_EQ(global.tracks().size(), 1u);
+  EXPECT_TRUE(global.tracks()[0]->confirmed);
+  EXPECT_FALSE(global.isHeld(MANUAL)); // no label check, even with the arbiter on
+  // A camera sighting of the same cup joins it.
+  cycle({tracklet("front", 1, 11, 0.05, "cup")}, {}, true);
+  EXPECT_EQ(global.linkedTrack("front", 1), MANUAL);
+  EXPECT_EQ(global.tracks().size(), 1u);
 }
 
 TEST_F(GlobalTrackerTest, RepostedTrackletFollowsItsHeldTrackUntilTheLabelCheck)
@@ -165,7 +184,7 @@ TEST_F(GlobalTrackerTest, LabelConflictIsAskedOnceAndFallsBackToOverlapWithoutAr
   EXPECT_TRUE(pairRequests(cycle(TRACKLETS, {}, true)).empty());
   EXPECT_EQ(global.tracks().size(), 2u);
 
-  GlobalTracker without_arbiter{rclcpp::get_logger("test"), db};
+  GlobalTracker without_arbiter{rclcpp::get_logger("test"), graph};
   without_arbiter.cycle(TRACKLETS, {}, params, false);
   EXPECT_EQ(without_arbiter.tracks().size(), 1u);
 }
@@ -260,7 +279,7 @@ TEST_F(GlobalTrackerTest, FailedLabelCheckPublishesAndNoCheckWithoutArbiter)
   ASSERT_EQ(global.tracks().size(), 1u);
   EXPECT_FALSE(global.isHeld(*global.tracks()[0]));
 
-  GlobalTracker without_arbiter{rclcpp::get_logger("test"), db};
+  GlobalTracker without_arbiter{rclcpp::get_logger("test"), graph};
   EXPECT_TRUE(without_arbiter.cycle({tracklet("front", 1, 10, 0.0)}, {}, params, false).empty());
   EXPECT_FALSE(without_arbiter.isHeld(*without_arbiter.tracks()[0]));
 }

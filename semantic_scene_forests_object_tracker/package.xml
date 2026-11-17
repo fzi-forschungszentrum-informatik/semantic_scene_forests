@@ -41,6 +41,7 @@
 
   <depend>rclcpp</depend>
   <depend>pluginlib</depend>
+  <depend>semantic_scene_forests</depend>
   <depend>semantic_scene_forests_manager</depend>
   <depend>semantic_scene_forests_msgs</depend>
   <depend>semantic_scene_forests_object_msgs</depend>

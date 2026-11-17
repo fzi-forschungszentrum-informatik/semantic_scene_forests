@@ -36,6 +36,13 @@
 namespace semantic_scene_forests_object_tracker {
 namespace {
 
+CropPtr jpeg(int sec)
+{
+  auto crop              = std::make_shared<sensor_msgs::msg::CompressedImage>();
+  crop->header.stamp.sec = sec;
+  return crop;
+}
+
 rclcpp::Time observationTime(int32_t seconds, uint32_t nanoseconds = 0)
 {
   return rclcpp::Time(seconds, nanoseconds, RCL_ROS_TIME);
@@ -106,13 +113,9 @@ TEST(TrackedObject, MergePreservesNewestCoherentStateAndSurvivorHistory)
   latest.bbox2d.size_x               = 42.0;
   newer.predict(2.0);
   newer.update(latest, observationTime(13, 500000000));
-  sensor_msgs::msg::Image crop;
-  crop.width = 1;
-  survivor.addCrop(crop);
-  crop.width = 2;
-  newer.addCrop(crop);
-  crop.width = 3;
-  newer.addCrop(crop);
+  survivor.addCrop(jpeg(1));
+  newer.addCrop(jpeg(2));
+  newer.addCrop(jpeg(3));
 
   survivor.mergeFrom(newer);
   EXPECT_EQ(survivor.track_id, 1u);
@@ -126,8 +129,10 @@ TEST(TrackedObject, MergePreservesNewestCoherentStateAndSurvivorHistory)
   EXPECT_EQ(survivor.toDetection3D().header.stamp.sec, 13);
   EXPECT_TRUE(survivor.confirmed);
   ASSERT_EQ(survivor.getCrops().size(), 2u);
-  EXPECT_EQ(survivor.getCrops()[0].width, 2u);
-  EXPECT_EQ(survivor.getCrops()[1].width, 3u);
+  EXPECT_EQ(survivor.getCrops()[0]->header.stamp.sec, 2);
+  EXPECT_EQ(survivor.getCrops()[1]->header.stamp.sec, 3);
+  // Crops are shared, not copied.
+  EXPECT_EQ(survivor.getCrops()[1], newer.getCrops()[1]);
 
   // An older merge must not overwrite the state just adopted.
   TrackedObject older(detection(-2.0), observationTime(9), 3, 0.1, 0.1, 2, 2);
@@ -203,8 +208,8 @@ TEST(TrackedObjectTest, CropRevisionIncrementsOnAddCrop)
 {
   TrackedObject track(detection(), observationTime(10), 1, 0.1, 0.1, 1, 1);
   const auto BEFORE = track.cropRevision();
-  track.addCrop(sensor_msgs::msg::Image{});
-  track.addCrop(sensor_msgs::msg::Image{}); // Evicts the first crop: still a change.
+  track.addCrop(jpeg(1));
+  track.addCrop(jpeg(2)); // Evicts the first crop: still a change.
   EXPECT_EQ(track.cropRevision(), BEFORE + 2);
 }
 

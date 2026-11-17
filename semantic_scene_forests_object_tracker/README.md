@@ -1,12 +1,12 @@
 # semantic_scene_forests_object_tracker
 
-Tracking package that converts detections into persistent objects in the `scene_graph_manager` database.
+Tracking package that converts detections into persistent objects in the shared scene graph of the `scene_graph_manager`.
 
 ## Task
 
 - Synchronize 2D detections, 3D detections, and camera images.
 - Maintain object tracks over time.
-- Write every global track (geometry and bounded image crops) to the manager's database each global cycle.
+- Write every global track as an object node (box, `last_seen`, bounded JPEG crops) to the scene graph each global cycle. The tracker keeps all track state; class votes after creation never touch the graph, and a node removed by `delete_object` is not recreated while its track lives.
 
 ## Exported Worker Plugin
 
@@ -24,6 +24,7 @@ Tracking package that converts detections into persistent objects in the `scene_
 | Subscribe | `detections_3d` | `vision_msgs/msg/Detection3DArray` |
 | Subscribe | `camera/image` | `sensor_msgs/msg/Image` |
 | Service | `add_observations` | `semantic_scene_forests_object_msgs/srv/AddObservations` |
+| Service | `add_object` | `semantic_scene_forests_object_msgs/srv/AddObject` |
 
 The tracker has one input triple per configured camera: `detections_2d`, `detections_3d` and
 `camera/image`. The three messages of a frame must carry the **identical** stamp (exact-time
@@ -45,7 +46,7 @@ its pose and crops), or it starts a new global track, held for the arbiter's lab
 the arbiter is on. The response waits until every observation of the request is decided:
 until then its tracklets are reposted each cycle (an unchanged stamp is not applied twice),
 so their links follow merges and end when a label check removes the track. It is sent after
-the database write of the deciding cycle, with one global ID (0 = rejected), the published class
+the graph write of the deciding cycle, with one global ID (0 = rejected), the published class
 name and a `created` flag per observation. Global tracks are never timed out, so a manual
 track stays after its tracklet ends. `class_whitelist` and
 `confidence_threshold` do not apply; labels rejected for the session do. The service shares
@@ -73,11 +74,16 @@ appearance evidence that this tracker does not provide.
 All cameras must use a common clock, compatible class labels, and valid TF from
 each detection frame to `world_frame`. The manager's `frame_id` must name the same frame (the
 combined launch sets both from `scene_graph_frame`). Crops retain their source image headers and
-are bounded by the shared `max_crops_per_object` limit. Global track IDs are database IDs; the
-database lives in memory, so restarting the manager starts a new ID space.
+are bounded by the shared `max_crops_per_object` limit. Crops are stored as JPEG (`crop_jpeg_quality`); the graph takes a newer crop only if it is at
+least `crop_replace_min_interval_seconds` newer than the node's newest one. Global track IDs are
+scene graph node IDs; the graph lives in memory, so restarting the manager starts a new ID space.
 
-The global cycle runs at `snapshot_rate_hz` (default 5 Hz, must be > 0) and writes every global
-track with its crops to the database in one transaction.
+`add_object` starts a manual track that is confirmed at once (no confirmation count, no label
+check) and returns its ID; the node appears through the normal write and the track is then
+updated, merged and retired like any other.
+
+The global cycle runs at `snapshot_rate_hz` (default 5 Hz, must be > 0) and writes every changed global
+track to the scene graph (one atomic graph call per change).
 
 TODO: if the container still drops input, the six raw camera image streams arriving over
 zenoh are the next suspect; co-locate the tracker with the detector nodes or use compressed
@@ -90,7 +96,7 @@ images.
  ExactTime(2D, 3D, image)                                     collect all mailboxes
  CameraTracker: rotate, filter, TF,                           GlobalTracker: link / merge /
  dedup, predict, associate, crops  ─► mailbox (tracklets) ─►  reactivate / replace / arbiter
-                                                              write to database
+                                                              write to graph
                                      ArbiterWorker thread ◄─► request / result queues
 ```
 
@@ -117,7 +123,7 @@ images.
   - a global track is **stale** after `stale_timeout` (60 s) unseen. A similar track at its pose
     reactivates it (via the rules above); a differently sized track covering at least
     `replacement_overlap_threshold` of it **replaces** it.
-- **Label check** (arbiter only): a new global track is held back from the database until the
+- **Label check** (arbiter only): a new global track is held back from the graph until the
   arbiter answers two yes/no questions in one call: "do the crops show a <label>?" and "is
   <label> a physical object rather than a room or area category (kitchen, office, hallway)?".
   If both reach `arbiter.label_probability`, the label is confirmed (it sticks until a new label

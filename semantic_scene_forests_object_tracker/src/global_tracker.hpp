@@ -39,7 +39,7 @@
 
 #include <rclcpp/logger.hpp>
 #include <rclcpp/time.hpp>
-#include <semantic_scene_forests_manager/database.hpp>
+#include <semantic_scene_forests/scene_graph.hpp>
 
 #include "arbiter_worker.hpp"
 #include "camera_tracker.hpp"
@@ -82,17 +82,25 @@ public:
     std::string last_error;
   };
 
-  // New track IDs are allocated in `db`: a global track's ID is its database ID.
-  GlobalTracker(rclcpp::Logger logger, semantic_scene_forests_manager::Database& db);
+  // New track IDs are allocated by `graph`: a global track's ID is its scene graph node ID.
+  GlobalTracker(rclcpp::Logger logger,
+                std::shared_ptr<fzi::semantic_scene_forests::SceneGraph> graph);
 
   // One reconciliation cycle. `results` are finished arbiter answers; returns the new
-  // arbiter requests (always empty when arbiter_enabled is false). Writes to the database
-  // (ID allocation), so never call it from inside a Database::write/read lambda.
+  // arbiter requests (always empty when arbiter_enabled is false).
   std::vector<ArbiterRequest> cycle(const std::vector<Tracklet>& tracklets,
                                     const std::vector<ArbiterResult>& results,
                                     const object_tracker::Params& params,
                                     bool arbiter_enabled);
 
+  // Adds a track confirmed at once: no confirmation count, no label check (add_object). Returns
+  // its ID. `crops` are JPEG; the track is normal from then on (updated, merged, retired).
+  uint64_t addConfirmed(const std::string& class_name,
+                        const Eigen::Vector3d& position,
+                        const Eigen::Vector3d& size,
+                        const rclcpp::Time& stamp,
+                        const std::vector<CropPtr>& crops,
+                        const object_tracker::Params& params);
   const std::vector<std::unique_ptr<TrackedObject>>& tracks() const { return m_tracks; }
   bool isStale(const TrackedObject& track, const object_tracker::Params& params) const;
   // True while a new track waits for its label check; held tracks are not published.
@@ -129,7 +137,7 @@ private:
   void eraseRemoved();
 
   rclcpp::Logger m_logger;
-  semantic_scene_forests_manager::Database& m_db;
+  std::shared_ptr<fzi::semantic_scene_forests::SceneGraph> m_graph;
   std::vector<std::unique_ptr<TrackedObject>> m_tracks;
   std::map<LinkKey, Link> m_links;
   std::map<uint64_t, std::set<std::string>> m_accepted_labels;

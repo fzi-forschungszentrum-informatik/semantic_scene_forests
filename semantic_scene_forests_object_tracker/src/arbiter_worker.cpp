@@ -189,7 +189,7 @@ ArbiterResult ArbiterWorker::decide(const DecideFn& decide,
     }
     for (const auto& crop : *crops)
     {
-      builder.image(cv_bridge::toCvCopy(crop, "bgr8")->image);
+      builder.image(cv_bridge::toCvCopy(*crop, "bgr8")->image);
     }
   };
   const auto SIZE = [](const Eigen::Vector3d& v) { return nlohmann::json{v.x(), v.y(), v.z()}; };

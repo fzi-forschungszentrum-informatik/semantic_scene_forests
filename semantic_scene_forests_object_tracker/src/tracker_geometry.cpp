@@ -29,6 +29,10 @@
 #include "tracker_geometry.hpp"
 
 #include <cmath>
+#include <vector>
+
+#include <cv_bridge/cv_bridge.hpp>
+#include <opencv2/imgcodecs.hpp>
 
 #include <tf2/LinearMath/Matrix3x3.hpp>
 #include <tf2/LinearMath/Quaternion.hpp>
@@ -122,6 +126,32 @@ transformBoundingBoxToFrame(const vision_msgs::msg::BoundingBox3D& bbox,
   world_bbox.size.y               = world_extents.y();
   world_bbox.size.z               = world_extents.z();
   return world_bbox;
+}
+
+std::shared_ptr<const sensor_msgs::msg::CompressedImage>
+encodeCrop(const cv::Mat& bgr, const std_msgs::msg::Header& header, int jpeg_quality)
+{
+  auto crop    = std::make_shared<sensor_msgs::msg::CompressedImage>();
+  crop->header = header;
+  crop->format = "bgr8; jpeg compressed bgr8";
+  if (!cv::imencode(".jpg", bgr, crop->data, {cv::IMWRITE_JPEG_QUALITY, jpeg_quality}))
+  {
+    return nullptr;
+  }
+  return crop;
+}
+
+std::shared_ptr<const sensor_msgs::msg::CompressedImage>
+encodeCrop(const sensor_msgs::msg::Image& image, int jpeg_quality)
+{
+  try
+  {
+    return encodeCrop(cv_bridge::toCvCopy(image, "bgr8")->image, image.header, jpeg_quality);
+  }
+  catch (const cv_bridge::Exception&)
+  {
+    return nullptr;
+  }
 }
 
 } // namespace semantic_scene_forests_object_tracker::detail

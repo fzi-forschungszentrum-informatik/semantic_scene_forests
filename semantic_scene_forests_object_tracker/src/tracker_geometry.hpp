@@ -28,9 +28,14 @@
 
 #pragma once
 
+#include <memory>
 #include <optional>
 
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <opencv2/core.hpp>
+#include <sensor_msgs/msg/compressed_image.hpp>
+#include <sensor_msgs/msg/image.hpp>
+#include <std_msgs/msg/header.hpp>
 #include <vision_msgs/msg/bounding_box3_d.hpp>
 
 namespace semantic_scene_forests_object_tracker {
@@ -45,6 +50,15 @@ namespace detail {
 std::optional<vision_msgs::msg::BoundingBox3D>
 transformBoundingBoxToFrame(const vision_msgs::msg::BoundingBox3D& bbox,
                             const geometry_msgs::msg::TransformStamped& transform);
+
+// JPEG-encodes a BGR crop (cv_bridge format string, so cv_bridge decodes it again). Null if
+// OpenCV cannot encode it.
+std::shared_ptr<const sensor_msgs::msg::CompressedImage>
+encodeCrop(const cv::Mat& bgr, const std_msgs::msg::Header& header, int jpeg_quality);
+
+// Same for a raw image message (add_object, add_observations); null if it cannot be converted.
+std::shared_ptr<const sensor_msgs::msg::CompressedImage>
+encodeCrop(const sensor_msgs::msg::Image& image, int jpeg_quality);
 
 } // namespace detail
 } // namespace semantic_scene_forests_object_tracker

@@ -44,8 +44,9 @@
 #include <message_filters/sync_policies/exact_time.hpp>
 #include <message_filters/synchronizer.hpp>
 #include <rclcpp/rclcpp.hpp>
-#include <semantic_scene_forests_manager/database.hpp>
+#include <semantic_scene_forests/scene_graph.hpp>
 #include <semantic_scene_forests_manager/worker_interface.hpp>
+#include <semantic_scene_forests_object_msgs/srv/add_object.hpp>
 #include <semantic_scene_forests_object_msgs/srv/add_observations.hpp>
 #include <semantic_scene_forests_utils/diagnostic_utils.hpp>
 #include <sensor_msgs/msg/image.hpp>
@@ -66,9 +67,10 @@ struct Tracklet;
 // Two-level tracker. Each camera runs in its own callback group: exactly synchronized
 // (2D, 3D, image) frames feed a CameraTracker whose confirmed tracks are posted to the
 // camera's mailbox. A global timer (own callback group) reconciles all mailboxes into
-// global tracks, talks to the arbiter worker and writes the changed tracks to the world
-// database (track ID == database ID). Sightings from other sources (add_observations) join the
-// next global cycle as one-cycle tracklets. All ROS interfaces live on the host node.
+// global tracks, talks to the arbiter worker and writes the changed tracks to the scene
+// graph (track ID == node ID); the graph only holds the object nodes. Sightings from other sources
+// (add_observations) join the next global cycle as one-cycle tracklets. All ROS interfaces live on
+// the host node.
 class TrackerWorker : public semantic_scene_forests_manager::IWorker
 {
 public:
@@ -78,7 +80,7 @@ public:
   ~TrackerWorker() override;
 
   void initialize(rclcpp::Node& node,
-                  semantic_scene_forests_manager::Database& db,
+                  std::shared_ptr<fzi::semantic_scene_forests::SceneGraph> graph,
                   const std::string& name,
                   diagnostic_updater::Updater& diagnostics) override;
   void start() override;
@@ -125,6 +127,7 @@ private:
                      const vision_msgs::msg::Detection3DArray& det3d_msg,
                      const sensor_msgs::msg::Image& img_msg);
   using AddObservations = semantic_scene_forests_object_msgs::srv::AddObservations;
+  using AddObject       = semantic_scene_forests_object_msgs::srv::AddObject;
 
   // A request waiting until all its observations are decided. Its tracklets join every global
   // cycle until then; their links follow merges and end when a label check removes the track.
@@ -137,24 +140,27 @@ private:
     std::set<uint64_t> created; // tracks created by any cycle since the request arrived
   };
 
-  // What the database last got for a track; unchanged tracks are not rewritten.
+  // What the graph last got for a track; unchanged tracks are not rewritten.
   struct Written
   {
     rclcpp::Time last_seen;
-    std::string class_name;
     uint64_t crop_revision{0};
+    // The node was deleted (delete_object) while the track lives: write nothing more for it.
+    bool suppressed{false};
   };
 
   void onAddObservations(const std::shared_ptr<rmw_request_id_t>& header,
                          const std::shared_ptr<AddObservations::Request>& request);
+  void onAddObject(const std::shared_ptr<AddObject::Request>& request,
+                   const std::shared_ptr<AddObject::Response>& response);
   // Answers the requests whose tracks are all written or removed.
   void answerObservations();
   void onGlobalCycle();
-  void writeToDatabase();
+  void writeToGraph();
   void onHealthDiagnostic(diagnostic_updater::DiagnosticStatusWrapper& stat);
 
   rclcpp::Node* m_node{nullptr};
-  semantic_scene_forests_manager::Database* m_db{nullptr};
+  std::shared_ptr<fzi::semantic_scene_forests::SceneGraph> m_graph;
   rclcpp::Logger m_logger;
   std::shared_ptr<object_tracker::ParamListener> m_param_listener;
   std::string m_world_frame;
@@ -167,13 +173,14 @@ private:
   rclcpp::CallbackGroup::SharedPtr m_global_group;
   rclcpp::TimerBase::SharedPtr m_global_timer;
   rclcpp::Service<AddObservations>::SharedPtr m_add_observations_srv; // in m_global_group
+  rclcpp::Service<AddObject>::SharedPtr m_add_object_srv;             // in m_global_group
 
   // Global state: only touched from m_global_group (and the constructor).
   std::unique_ptr<GlobalTracker> m_global;
   std::unique_ptr<ArbiterWorker> m_arbiter;
   std::vector<PendingObservations> m_manual_pending;
-  std::map<uint64_t, Written> m_written; // tracks the database holds
-  std::set<uint64_t> m_unwritten;        // allocated IDs never written (e.g. held tracks)
+  std::map<uint64_t, Written> m_written; // tracks the graph holds
+  std::set<uint64_t> m_manual_tracks;    // created by add_object: source = manual
   uint64_t m_manual_next_id{1};
   // Labels rejected by the arbiter, published by the global cycle to the camera callbacks.
   std::atomic<std::shared_ptr<const std::set<std::string>>> m_rejected_labels{

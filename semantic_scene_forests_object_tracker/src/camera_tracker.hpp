@@ -59,7 +59,7 @@ struct Tracklet
   Eigen::Vector3d size;
   std::string class_name;
   double score{0.0};
-  std::shared_ptr<const std::vector<sensor_msgs::msg::Image>> crops;
+  std::shared_ptr<const std::vector<CropPtr>> crops;
 };
 
 // Tracks the detections of one camera in the world frame. Not thread-safe: one camera's

@@ -31,6 +31,7 @@
 #include <initializer_list>
 #include <string>
 
+#include <cv_bridge/cv_bridge.hpp>
 #include <sensor_msgs/image_encodings.hpp>
 
 #include "camera_tracker.hpp"
@@ -162,8 +163,9 @@ TEST_F(CameraTrackerTest, CropsAreRotatedUpright)
   ASSERT_EQ(TRACKLETS.size(), 1u);
   ASSERT_FALSE(TRACKLETS[0].crops->empty());
   // An 8 x 4 box in the unrotated image is 4 x 8 after a quarter turn.
-  EXPECT_EQ(TRACKLETS[0].crops->back().width, 4u);
-  EXPECT_EQ(TRACKLETS[0].crops->back().height, 8u);
+  const auto DECODED = cv_bridge::toCvCopy(*TRACKLETS[0].crops->back(), "bgr8")->image;
+  EXPECT_EQ(DECODED.cols, 4);
+  EXPECT_EQ(DECODED.rows, 8);
 }
 
 TEST(CameraTracker, RejectsInvalidRotation)

@@ -92,7 +92,7 @@ Eigen::Vector3d extent(const DetectionAdapter& det)
   return {s.x, s.y, s.z};
 }
 
-std::optional<sensor_msgs::msg::Image>
+std::optional<cv::Mat>
 cropImagePatch(const cv::Mat& image, const vision_msgs::msg::BoundingBox2D& bbox, int padding)
 {
   const double CX = bbox.center.position.x;
@@ -107,8 +107,7 @@ cropImagePatch(const cv::Mat& image, const vision_msgs::msg::BoundingBox2D& bbox
   {
     return std::nullopt;
   }
-  const cv::Mat ROI = image(cv::Rect(X1, Y1, X2 - X1, Y2 - Y1)).clone();
-  return *cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", ROI).toImageMsg();
+  return image(cv::Rect(X1, Y1, X2 - X1, Y2 - Y1)).clone();
 }
 
 } // namespace
@@ -308,8 +307,13 @@ CameraTracker::process(const vision_msgs::msg::Detection2DArray& det2d_msg,
       ++m_crop_errors;
       continue;
     }
-    crop->header = image_msg.header;
-    m_tracks[det_to_track[d]]->addCrop(*crop);
+    auto jpeg = detail::encodeCrop(*crop, image_msg.header, params.crop_jpeg_quality);
+    if (!jpeg)
+    {
+      ++m_crop_errors;
+      continue;
+    }
+    m_tracks[det_to_track[d]]->addCrop(std::move(jpeg));
   }
   return FrameResult::ACCEPTED;
 }
@@ -323,15 +327,15 @@ std::vector<Tracklet> CameraTracker::tracklets() const
     {
       continue;
     }
-    result.push_back(Tracklet{
-      .camera     = m_camera,
-      .local_id   = obj->track_id,
-      .last_seen  = obj->last_seen,
-      .position   = obj->getPosition(),
-      .size       = obj->bbox3d_size,
-      .class_name = obj->class_name,
-      .score      = obj->score,
-      .crops      = std::make_shared<const std::vector<sensor_msgs::msg::Image>>(obj->getCrops())});
+    result.push_back(Tracklet{.camera     = m_camera,
+                              .local_id   = obj->track_id,
+                              .last_seen  = obj->last_seen,
+                              .position   = obj->getPosition(),
+                              .size       = obj->bbox3d_size,
+                              .class_name = obj->class_name,
+                              .score      = obj->score,
+                              .crops      = std::make_shared<const std::vector<CropPtr>>(
+                                obj->getCrops().begin(), obj->getCrops().end())});
   }
   return result;
 }
