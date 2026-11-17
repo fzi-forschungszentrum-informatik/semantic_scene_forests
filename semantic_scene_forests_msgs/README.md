@@ -16,6 +16,11 @@ ROS 2 interface package for scene graph data and worker actions.
 - `msg/ObjectNode.msg`
 - `msg/ConceptNode.msg`
 
+### Services
+
+- `srv/AddConcept.srv`: find or create a concept and connect it to `source_id` with `relation`
+- `srv/AddEdge.srv`: add a labeled edge between two existing nodes
+
 ### Actions
 
 - `action/RunWorker.action`: manual run of a manager worker (`attribute_objects`,

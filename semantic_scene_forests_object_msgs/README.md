@@ -10,17 +10,16 @@ ROS 2 interface package for tracked objects and object-management services.
 ## Messages
 
 - `msg/ObjectCandidate.msg`: one manual observation for `AddObservations`
-- `msg/ManagedObject.msg`: object state with blocking and edit metadata (returned by `GetObjects`)
 - `msg/ObjectVisuals.msg`: image crops associated with an object ID
 
 ## Services
 
 - `srv/AddObservations.srv`: register sightings from a non-camera source with the tracker
-- `srv/GetObjects.srv`: return the current object list
+- `srv/AddObject.srv`: add a manual object with the tracker (served by the tracker, returns `object_id`)
+- `srv/GetObjects.srv`: return the current object nodes (`semantic_scene_forests_msgs/ObjectNode[]`)
 - `srv/GetObjectVisuals.srv`: fetch visuals for one or more object IDs
-- `srv/BlockObject.srv`: suppress an object by ID
-- `srv/EditObject.srv`: update class, pose, or stored crops
-- `srv/UnblockObject.srv`: allow a blocked object again
+- `srv/DeleteObject.srv`: remove an object node by ID
+- `srv/EditObject.srv`: set an object's class name
 
 ## Used By
 

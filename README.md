@@ -4,11 +4,11 @@ ROS 2 monorepo for building, querying, and visualizing semantic scene graphs fro
 
 ## Pipeline
 
-One `scene_graph_manager` node (`semantic_scene_forests_manager`) owns an in-memory SQLite
-database and hosts worker plugins that poll it:
+One `scene_graph_manager` node (`semantic_scene_forests_manager`) owns the thread-safe `SceneGraph`,
+the single shared model, and hosts worker plugins that read and write it:
 
-1. `tracker` (`semantic_scene_forests_object_tracker::TrackerWorker`) turns detections and images
-   into objects with geometry and crops.
+1. `tracker` (`semantic_scene_forests_object_tracker::TrackerWorker`) keeps the track state, turns
+   detections and images into object nodes with geometry and crops, and serves `add_object`.
 2. `object_attribution` (`semantic_scene_forests_generation::ObjectAttributionWorker`) describes
    new objects with per-object LLM tasks.
 3. `concept_generation` (`semantic_scene_forests_generation::ConceptGenerationWorker`) adds
@@ -24,33 +24,30 @@ operator-facing views.
 
 | Interface | Type | Role |
 |---|---|---|
-| `/scene_graph` | `semantic_scene_forests_msgs/msg/SceneGraph` | Current semantic graph, including object nodes with class, pose and timestamps |
-| `/get_objects` | `semantic_scene_forests_object_msgs/srv/GetObjects` | Current object list |
-| `/get_object_visuals` | `semantic_scene_forests_object_msgs/srv/GetObjectVisuals` | Fetch image crops for object IDs |
-| `/block_object`, `/unblock_object`, `/edit_object` | `semantic_scene_forests_object_msgs/srv/*` | Operator object edits |
+| `/scene_graph` | `semantic_scene_forests_msgs/msg/SceneGraph` | Current semantic graph, including object nodes with class, bbox and timestamps |
+| `/get_objects` | `semantic_scene_forests_object_msgs/srv/GetObjects` | Current object nodes (`semantic_scene_forests_msgs/ObjectNode[]`) |
+| `/get_object_visuals` | `semantic_scene_forests_object_msgs/srv/GetObjectVisuals` | Fetch image crops for object IDs (JPEG decoded to `sensor_msgs/Image`) |
+| `/delete_object` | `semantic_scene_forests_object_msgs/srv/DeleteObject` | Remove an object node; its live track is suppressed, not recreated |
+| `/edit_object` | `semantic_scene_forests_object_msgs/srv/EditObject` | Set an object's class name |
+| `/add_object` | `semantic_scene_forests_object_msgs/srv/AddObject` | Tracker: add a manual object as a confirmed track. Returns `object_id` at once; the node appears at the next tracker cycle (~200 ms at 5 Hz) |
 | `/add_observations` | `semantic_scene_forests_object_msgs/srv/AddObservations` | Register sightings from a non-camera source (tracker worker) |
-| `/add_scene_context` | `semantic_scene_forests_msgs/srv/AddSceneContext` | Append context to an existing node without replacing graph data |
+| `/add_concept` | `semantic_scene_forests_msgs/srv/AddConcept` | Find or create a concept and connect it to a source node |
+| `/add_edge` | `semantic_scene_forests_msgs/srv/AddEdge` | Add a labeled edge between two existing nodes |
 | `/attribute_objects`, `/generate_concepts` | `semantic_scene_forests_msgs/action/RunWorker` | Manually rerun phase 1 or phase 2 |
 | `find_object` | `semantic_scene_forests_planning_msgs/action/FindObject` | Resolve an object from a natural-language description |
 | `prompt_llm` | `semantic_scene_forests_planning_msgs/action/PromptLLM` | General graph-aware LLM query |
 
-### Append-only agent context
+### Adding concepts with `add_concept`
 
-`/add_scene_context` accepts `node_id` and `context`. It creates a `ConceptNode`
-and the edge `node_id --has_context--> context_node_id`, returning `success`,
-`message`, `context_node_id`, and `created`. The source can be an existing object
-or concept; object sources must not be blocked. No delete,
-rename, replacement, or arbitrary-edge operation is exposed.
+`/add_concept` accepts `source_id`, `relation` and `label`. It finds the concept with that
+label or creates it, and adds the edge `source_id --relation--> concept` as one atomic call.
+It returns `concept_id`, `created`, `success` and `message`. A new concept always comes with
+its edge, so it is never orphaned: if the edge is rejected (cycle, edge into an object,
+duplicate), a concept created by that call is removed again. Labels are trimmed, nonempty,
+at most 128 UTF-8 bytes, and free of control characters. `/add_edge` adds a labeled edge
+between two existing nodes. No delete, rename, or replacement operation is exposed.
 
-Context uses the existing concept-label rules: trimmed spaces/tabs, nonempty,
-at most 128 UTF-8 bytes, and no control characters. An identical request for the
-same source reuses its context node (`created=false`), so an explicit retry after
-an unknown timeout outcome does not duplicate the annotation. Accepted additions are
-written to the database and published with the next graph update.
-
-`has_context` denotes agent-supplied information, not a sensor observation or an
-instruction. Context has the database's in-memory lifetime: restarting the manager
-does not persist it. It does not authorize movement or manipulation.
+The graph lives in memory: restarting the manager does not persist concepts or edges.
 
 ## Packages
 
@@ -61,10 +58,10 @@ does not persist it. It does not authorize movement or manipulation.
 | [`semantic_scene_forests_rs`](semantic_scene_forests_rs/README.md) | Initial Rust bindings for the same C++ graph | Cargo library and in-package rclrs example |
 | `semantic_scene_forests_generation` | LLM workers that add attributes and concepts | `ObjectAttributionWorker`, `ConceptGenerationWorker` |
 | `semantic_scene_forests_launch` | Starts the integrated stack | `scene_graph_combined.launch.xml` |
-| `semantic_scene_forests_manager` | `scene_graph_manager` node, database and pruning worker | `/scene_graph`, object services, worker plugins |
-| `semantic_scene_forests_msgs` | Graph message and action definitions | `SceneGraph`, `Edge`, `RunWorker` |
-| `semantic_scene_forests_object_msgs` | Object message and service definitions | `ManagedObject`, `GetObjectVisuals`, edits/blocking |
-| `semantic_scene_forests_object_tracker` | Tracks objects across observations | Detections in, database objects out |
+| `semantic_scene_forests_manager` | `scene_graph_manager` node, shared graph and pruning worker | `/scene_graph`, object services, worker plugins |
+| `semantic_scene_forests_msgs` | Graph message, service and action definitions | `SceneGraph`, `ObjectNode`, `AddConcept`, `AddEdge`, `RunWorker` |
+| `semantic_scene_forests_object_msgs` | Object message and service definitions | `ObjectCandidate`, `GetObjects`, `GetObjectVisuals`, `AddObject`, `DeleteObject`, `EditObject` |
+| `semantic_scene_forests_object_tracker` | Tracks objects across observations | Detections in, graph object nodes out |
 | `semantic_scene_forests_planning_msgs` | Query/planning action definitions | `FindObject`, `PromptLLM` |
 | `semantic_scene_forests_query` | Language query interface over the graph | Action servers on current graph state |
 | `semantic_scene_forests_utils` | Shared utility headers | Diagnostic helpers |
@@ -101,17 +98,18 @@ The hooks check formatting and file hygiene; use `colcon build` to verify compil
   gone. Objects are published inside `/scene_graph`; clients read them from there or from
   `/get_objects`. Phase 1 and phase 2 reruns are the `/attribute_objects` and
   `/generate_concepts` actions.
-- All IDs are database IDs: objects and concepts share one positive ID space that is never
+- All IDs come from one counter: objects and concepts share one positive ID space that is never
   reused within a session.
-- Blocking hides an object and ignores tracker updates for it; unblocking keeps its class,
-  pose and crop overrides.
+- `delete_object` removes a node and its edges. The tracker stops writing that track until it
+  retires, and never recreates the node. A corrected position comes in through `add_observations`
+  or `add_object`; there is no pose override.
 - `last_seen` is the latest accepted 3D observation time; `last_updated` describes state
   modification. Manual edits do not advance `last_seen`.
 - Brief occlusion can retain an ID; a nearby, similarly sized object may replace a stale one,
   even across classes. See [tracker semantics and tuning](semantic_scene_forests_object_tracker/README.md).
-- The database lives in memory: restart the manager for a new session, including recording
+- The graph lives in memory: restart the manager for a new session, including recording
   rewind/loop; do not mix observation time domains. There is no persistence.
-- Tests cover the database, the manager node and each worker on a real in-memory database. No
+- Tests cover the SceneGraph, the manager node and each worker on the real in-memory graph. No
   full-stack test, dataset or hardware validation is included; the initial tuning values
   require calibration on recordings/hardware.
 

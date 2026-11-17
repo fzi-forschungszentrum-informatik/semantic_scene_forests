@@ -163,8 +163,8 @@ parameter machinery. The world-frame box transform algorithm remains unchanged.
 `test_bbox_transform.cpp`, `test_tracked_object.cpp`, `test_image_rotation.cpp`,
 `test_camera_tracker.cpp` and `test_global_tracker.cpp` cover the
 plain classes with synthetic inputs (no ROS threads, no HTTP). `test_multi_camera_tracker.cpp`
-covers exact sync, camera handover and delayed observations through the worker on a real
-in-memory database. Generation and query are not run. No dataset
+covers exact sync, camera handover and delayed observations through the worker on the real
+in-memory SceneGraph. Generation and query are not run. No dataset
 or hardware calibration is implied.
 
 ## Entry Points

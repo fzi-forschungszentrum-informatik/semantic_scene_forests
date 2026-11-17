@@ -1,6 +1,6 @@
 # semantic_scene_forests_generation
 
-C++23 `scene_graph_manager` worker plugins that add semantics to the database objects using a two-phase VLM/LLM pipeline.
+C++23 `scene_graph_manager` worker plugins that add semantics to the objects in the shared SceneGraph using a two-phase VLM/LLM pipeline.
 
 ## Project Configuration
 
@@ -42,8 +42,8 @@ Act   attribute_objects   semantic_scene_forests_msgs/RunWorker   (ObjectAttribu
 Act   generate_concepts   semantic_scene_forests_msgs/RunWorker   (ConceptGenerationWorker, rerun all concepts)
 ```
 
-Objects, crops and the graph are read from and committed to the manager's database; the manager
-publishes `/scene_graph`.
+Objects, crops and the graph are read from and written to the manager's shared SceneGraph
+(`std::shared_ptr<SceneGraph>`); the manager publishes `/scene_graph`.
 
 ## Plugin System
 
@@ -51,11 +51,11 @@ publishes `/scene_graph`.
 - Called once per object
 - Receive a pre-populated chat history (system message + multimodal object-setup message)
 - Call `chatTurn(client, history, prompt, logger)` from `src/tasks/task_utils.hpp`
-- Write concept nodes and edges into the `SceneGraph`
+- Write concepts and edges through the graph's atomic methods (e.g. `addConceptEdge`), with no lock held during the LLM call
 
 **Phase 2 plugins** implement `semantic_scene_forests_generation::IGraphTask`:
 - Called once per Phase 2 run
-- Receive the input concepts (unprocessed ones, or all on a manual run), a scratch graph to mutate, and a pre-populated meta-setup history
+- Receive the input concepts (unprocessed ones, or all on a manual run), the shared `std::shared_ptr<SceneGraph>`, and a pre-populated meta-setup history
 
 ### Adding a new task plugin
 
@@ -85,8 +85,10 @@ Jinja2 templates live in `resources/{instance,meta}/*.j2`. At runtime they are l
   caught in teardown receives no terminal result.
 - **Cooperative stopping**: stop tokens are checked before external calls, per task, and before
   commit. Waiting is bounded by the per-call timeouts.
-- **Scratch graphs isolate long-running work**: tasks mutate a scratch graph; the database is
-  locked only to read input or commit the result, never across an LLM call.
+- **Plan, then per item**: a worker plans its items (`unprocessedBy`). For each item it reads the
+  current context with short locked getter calls, calls the LLM with no lock held, and applies
+  each result through atomic SceneGraph methods. A rejected or invalid call is logged and skipped;
+  a dependent step runs only if its predecessor succeeded. An object deleted meanwhile is skipped.
 
 ## Build
 

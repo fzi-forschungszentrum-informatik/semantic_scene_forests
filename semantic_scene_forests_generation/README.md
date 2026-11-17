@@ -1,13 +1,13 @@
 # semantic_scene_forests_generation
 
-Worker plugins for the `scene_graph_manager` that add semantics to the objects in its database with
+Worker plugins for the `scene_graph_manager` that add semantics to the objects in the shared SceneGraph with
 a two-phase VLM/LLM pipeline.
 
 ## Task
 
 - `ObjectAttributionWorker` (phase 1): run per-object tasks for instance attributes.
 - `ConceptGenerationWorker` (phase 2): run whole-graph tasks for higher-level semantics.
-- Commit results to the manager's database; the manager publishes `/scene_graph`.
+- Write results to the manager's shared SceneGraph; the manager publishes `/scene_graph`.
 
 ## Runtime Interface
 
@@ -24,15 +24,15 @@ action on the manager node. Parameters live under the worker's configured name
 
 - `ObjectAttributionWorker` polls every `poll_interval_seconds` (default 1.0) for visible objects
   it has not described yet and describes them one at a time with its `tasks`, reading crops from
-  the database. A failed object is logged, marked, and only retried by a manual run.
+  the graph. A failed object is logged, marked, and only retried by a manual run.
 - `ConceptGenerationWorker` runs every `interval_seconds` (default 120) over concepts it has not
   processed yet, and skips the LLM if there are none. A failed run retries at the next tick.
 - `attribute_objects` reruns phase 1 over all visible objects; `generate_concepts` reruns phase 2
   over all visible concepts. Each action is reject-while-busy, one goal at a time.
-- Tasks run against a scratch graph; the result is committed in one short database transaction,
-  with no LLM call inside it. An object deleted before its turn fails and is skipped. The graph
-  is a shared workspace: no worker owns concepts or edges, so whatever a scratch graph drops from
-  its input is removed, whoever added it.
+- Tasks work on the live shared graph. Each concept+edge write is one atomic call, made after the
+  LLM returns; no lock is held during an LLM call. A rejected or invalid write is logged and skipped.
+  An object deleted before its turn is skipped. The graph is a shared workspace: no worker owns
+  concepts or edges.
 - LLM connection and request timeouts are `llm_connect_timeout_seconds` and
   `llm_request_timeout_seconds`. Cancellation is checked at task boundaries; an in-flight HTTP
   call must return first.
