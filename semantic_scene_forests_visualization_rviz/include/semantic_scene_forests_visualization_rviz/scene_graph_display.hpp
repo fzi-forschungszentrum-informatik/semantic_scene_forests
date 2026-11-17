@@ -62,8 +62,9 @@
 #include "rviz_rendering/objects/shape.hpp"
 #include "semantic_scene_forests_msgs/action/run_worker.hpp"
 #include "semantic_scene_forests_msgs/msg/scene_graph.hpp"
-#include "semantic_scene_forests_object_msgs/srv/block_object.hpp"
+#include "semantic_scene_forests_object_msgs/srv/delete_object.hpp"
 #include "semantic_scene_forests_object_msgs/srv/get_object_visuals.hpp"
+#include <semantic_scene_forests/scene_graph.hpp>
 
 namespace Ogre {
 class SceneNode;
@@ -97,11 +98,11 @@ private:
   };
 
   void clearVisuals();
-  void updateObjectNodes(const std::vector<semantic_scene_forests_msgs::msg::ObjectNode>& objects);
+  void updateObjectNodes(const std::vector<fzi::semantic_scene_forests::ObjectNode>& objects);
   bool eventFilter(QObject* obj, QEvent* event) override;
   bool handleContextMenu(const QPoint& pos);
   void showImageDialog(int64_t object_id, const ObjectVisual& visual);
-  void blockObject(int64_t object_id);
+  void deleteObject(int64_t object_id);
 
   void sendGoal(const rclcpp_action::Client<RunWorker>::SharedPtr& client, const QString& name);
   void handleGoalResponse(const GoalHandle::SharedPtr& goal_handle);
@@ -124,7 +125,7 @@ private:
   // Visual storage (unique_ptr for RAII on Shape)
   std::map<int64_t, std::unique_ptr<rviz_rendering::Shape>> m_object_shapes;
   //! Last received objects, re-rendered while some were skipped for missing TF.
-  std::vector<semantic_scene_forests_msgs::msg::ObjectNode> m_last_objects;
+  std::vector<fzi::semantic_scene_forests::ObjectNode> m_last_objects;
   bool m_render_incomplete{false};
   std::chrono::nanoseconds m_retry_elapsed{0};
 
@@ -158,9 +159,9 @@ private:
   rclcpp_action::Client<RunWorker>::SharedPtr m_attribute_objects_client;
   rclcpp_action::Client<RunWorker>::SharedPtr m_generate_concepts_client;
 
-  // Service client for blocking objects
-  rclcpp::Client<semantic_scene_forests_object_msgs::srv::BlockObject>::SharedPtr
-    m_block_object_client;
+  // Service client for deleting objects
+  rclcpp::Client<semantic_scene_forests_object_msgs::srv::DeleteObject>::SharedPtr
+    m_delete_object_client;
 
   // ROS node abstraction for topic property initialization
   rviz_common::ros_integration::RosNodeAbstractionIface::WeakPtr m_rviz_ros_node;

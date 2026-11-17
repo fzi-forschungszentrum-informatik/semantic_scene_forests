@@ -65,7 +65,7 @@ namespace {
 
 // Seconds since the object was last observed, measured with RViz's ROS clock (sim time when
 // use_sim_time is set); nullopt for unset or future stamps.
-std::optional<double> ageSeconds(const semantic_scene_forests_msgs::msg::ObjectNode& obj,
+std::optional<double> ageSeconds(const fzi::semantic_scene_forests::ObjectNode& obj,
                                  const rclcpp::Time& now)
 {
   const rclcpp::Time LAST_SEEN(obj.last_seen, now.get_clock_type());
@@ -185,8 +185,8 @@ void SceneGraphDisplay::onInitialize()
     rclcpp_action::create_client<RunWorker>(ros_node, "attribute_objects");
   m_generate_concepts_client =
     rclcpp_action::create_client<RunWorker>(ros_node, "generate_concepts");
-  m_block_object_client =
-    ros_node->create_client<semantic_scene_forests_object_msgs::srv::BlockObject>("block_object");
+  m_delete_object_client =
+    ros_node->create_client<semantic_scene_forests_object_msgs::srv::DeleteObject>("delete_object");
 
   m_scene_graph_sub = ros_node->create_subscription<semantic_scene_forests_msgs::msg::SceneGraph>(
     m_scene_graph_topic_property->getTopicStd(),
@@ -258,7 +258,7 @@ void SceneGraphDisplay::clearVisuals()
 }
 
 void SceneGraphDisplay::updateObjectNodes(
-  const std::vector<semantic_scene_forests_msgs::msg::ObjectNode>& objects)
+  const std::vector<fzi::semantic_scene_forests::ObjectNode>& objects)
 {
   // Check if context still exists
   auto ros_node_abstraction = context_->getRosNodeAbstraction().lock();
@@ -296,7 +296,7 @@ void SceneGraphDisplay::updateObjectNodes(
     }
     Ogre::Vector3 frame_pos;
     Ogre::Quaternion frame_orient;
-    const std::string& frame_id = obj.detection.header.frame_id;
+    const std::string& frame_id = obj.frame_id;
 
     if (frame_id.empty())
     {
@@ -320,7 +320,8 @@ void SceneGraphDisplay::updateObjectNodes(
       continue;
     }
 
-    if (!context_->getFrameManager()->getTransform(obj.detection.header, frame_pos, frame_orient))
+    if (!context_->getFrameManager()->getTransform(
+          frame_id, rclcpp::Time(obj.last_seen, RCL_ROS_TIME), frame_pos, frame_orient))
     {
       RCLCPP_WARN(ros_node->get_logger(),
                   "Transform failed for object %ld (frame '%s' → '%s'), skipping",
@@ -333,8 +334,8 @@ void SceneGraphDisplay::updateObjectNodes(
       continue;
     }
 
-    // Transform bbox center position from detection frame → fixed frame.
-    const auto& bp = obj.detection.bbox.center.position;
+    // Transform bbox center position from object frame → fixed frame.
+    const auto& bp = obj.bbox.center.position;
     const Ogre::Vector3 LOCAL_POS(
       static_cast<float>(bp.x), static_cast<float>(bp.y), static_cast<float>(bp.z));
     const Ogre::Vector3 WORLD_POS = frame_pos + frame_orient * LOCAL_POS;
@@ -354,7 +355,7 @@ void SceneGraphDisplay::updateObjectNodes(
                  WORLD_POS.y,
                  WORLD_POS.z);
 
-    const auto& sz = obj.detection.bbox.size;
+    const auto& sz = obj.bbox.size;
     const Ogre::Vector3 BBOX_SCALE(static_cast<float>(std::max(sz.x, 0.01) * SCALE),
                                    static_cast<float>(std::max(sz.y, 0.01) * SCALE),
                                    static_cast<float>(std::max(sz.z, 0.01) * SCALE));
@@ -829,13 +830,22 @@ void SceneGraphDisplay::onSceneGraph(
     return;
   }
 
+  auto graph = fzi::semantic_scene_forests::SceneGraph::fromMsg(*msg);
+  if (!graph)
+  {
+    setStatusStd(rviz_common::properties::StatusProperty::Warn,
+                 "Scene Graph",
+                 "Invalid scene graph: " + graph.error().message);
+    return;
+  }
+
   const size_t obj_count     = msg->object_nodes.size();
   const size_t concept_count = msg->concept_nodes.size();
   const size_t edge_count    = msg->edges.size();
 
   QMetaObject::invokeMethod(
     this,
-    [this, objects = msg->object_nodes, obj_count, concept_count, edge_count]() {
+    [this, objects = (*graph)->getObjectNodes(), obj_count, concept_count, edge_count]() {
       m_last_objects = objects;
       clearVisuals();
       updateObjectNodes(m_last_objects);
@@ -1034,26 +1044,15 @@ bool SceneGraphDisplay::handleContextMenu(const QPoint& pos)
 
   menu->addSeparator();
 
-  // Block object action — shows images for confirmation and calls the service
-  QAction* block_action = menu->addAction(QString("Block Object %1").arg(object_id));
-  block_action->setToolTip("Block this object and show its images");
-  connect(block_action, &QAction::triggered, [this, object_id, visual]() {
-    blockObject(object_id);
-    if (!visual.images.empty())
-    {
-      showImageDialog(object_id, visual);
-    }
-    else
-    {
-      requestObjectVisuals(object_id);
-    }
-  });
+  QAction* delete_action = menu->addAction(QString("Delete Object %1").arg(object_id));
+  delete_action->setToolTip("Remove this object from the scene graph");
+  connect(delete_action, &QAction::triggered, [this, object_id]() { deleteObject(object_id); });
 
   m_render_panel->showContextMenu(menu);
   return true;
 }
 
-void SceneGraphDisplay::blockObject(int64_t object_id)
+void SceneGraphDisplay::deleteObject(int64_t object_id)
 {
   auto ros_node_abstraction = context_->getRosNodeAbstraction().lock();
   if (!ros_node_abstraction)
@@ -1062,21 +1061,22 @@ void SceneGraphDisplay::blockObject(int64_t object_id)
   }
   auto ros_node = ros_node_abstraction->get_raw_node();
 
-  if (!m_block_object_client->wait_for_service(std::chrono::milliseconds(500)))
+  if (!m_delete_object_client->wait_for_service(std::chrono::milliseconds(500)))
   {
-    RCLCPP_WARN(ros_node->get_logger(), "block_object service not available");
-    setStatusStd(
-      rviz_common::properties::StatusProperty::Warn, "Block", "block_object service not available");
+    RCLCPP_WARN(ros_node->get_logger(), "delete_object service not available");
+    setStatusStd(rviz_common::properties::StatusProperty::Warn,
+                 "Delete",
+                 "delete_object service not available");
     return;
   }
 
-  auto req = std::make_shared<semantic_scene_forests_object_msgs::srv::BlockObject::Request>();
+  auto req = std::make_shared<semantic_scene_forests_object_msgs::srv::DeleteObject::Request>();
   req->object_id = object_id;
 
-  m_block_object_client->async_send_request(
+  m_delete_object_client->async_send_request(
     req,
     [this, object_id](
-      rclcpp::Client<semantic_scene_forests_object_msgs::srv::BlockObject>::SharedFuture future) {
+      rclcpp::Client<semantic_scene_forests_object_msgs::srv::DeleteObject>::SharedFuture future) {
       try
       {
         auto resp                 = future.get();
@@ -1088,12 +1088,12 @@ void SceneGraphDisplay::blockObject(int64_t object_id)
             if (success)
             {
               setStatusStd(rviz_common::properties::StatusProperty::Ok,
-                           "Block",
-                           "Blocked object " + std::to_string(object_id) + ": " + message);
+                           "Delete",
+                           "Deleted object " + std::to_string(object_id) + ": " + message);
             }
             else
             {
-              setStatusStd(rviz_common::properties::StatusProperty::Warn, "Block", message);
+              setStatusStd(rviz_common::properties::StatusProperty::Warn, "Delete", message);
             }
           },
           Qt::QueuedConnection);
@@ -1104,7 +1104,7 @@ void SceneGraphDisplay::blockObject(int64_t object_id)
         if (node)
         {
           RCLCPP_ERROR(
-            node->get_raw_node()->get_logger(), "block_object call failed: %s", e.what());
+            node->get_raw_node()->get_logger(), "delete_object call failed: %s", e.what());
         }
       }
     });

@@ -75,7 +75,6 @@ public:
   ~GraphView() override;
 
   void setGraph(std::shared_ptr<const fzi::semantic_scene_forests::SceneGraph> graph);
-  void setObjectClassNames(std::unordered_map<int64_t, std::string> names);
 
   void setViewMode(ViewMode mode);
   [[nodiscard]] ViewMode viewMode() const { return m_view_mode; }
@@ -121,7 +120,6 @@ private slots:
   // NOLINTNEXTLINE(readability-redundant-access-specifiers) — Qt slots need their own section.
 private:
   std::shared_ptr<const fzi::semantic_scene_forests::SceneGraph> m_graph;
-  std::unordered_map<int64_t, std::string> m_object_class_names;
   std::unordered_set<int64_t> m_hidden_roots;
   std::optional<std::unordered_set<int64_t>> m_inspected_filter;
   ViewMode m_view_mode{ViewMode::FORCE_DIRECTED};
@@ -150,7 +148,6 @@ private:
   void fitContent();
   void updateSceneRectFromItems();
   [[nodiscard]] std::unordered_set<int64_t> reachableFromVisibleRoots() const;
-  [[nodiscard]] std::string objectLabelFor(int64_t id, const std::string& fallback) const;
 };
 
 } // namespace semantic_scene_forests_visualization_rqt

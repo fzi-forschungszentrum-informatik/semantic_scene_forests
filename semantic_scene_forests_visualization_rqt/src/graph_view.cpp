@@ -175,18 +175,6 @@ void GraphView::setGraph(std::shared_ptr<const fzi::semantic_scene_forests::Scen
   rebuildScene();
 }
 
-void GraphView::setObjectClassNames(std::unordered_map<int64_t, std::string> names)
-{
-  m_object_class_names = std::move(names);
-  for (auto& [id, item] : m_nodes)
-  {
-    if (item->kind() == NodeKind::OBJECT)
-    {
-      item->setLabel(objectLabelFor(id, item->label()));
-    }
-  }
-}
-
 void GraphView::setViewMode(ViewMode mode)
 {
   if (m_view_mode == mode)
@@ -251,15 +239,6 @@ std::vector<TopLevelConcept> GraphView::topLevelConcepts() const
     return a.id < b.id;
   });
   return result;
-}
-
-std::string GraphView::objectLabelFor(int64_t id, const std::string& fallback) const
-{
-  if (auto it = m_object_class_names.find(id); it != m_object_class_names.end())
-  {
-    return it->second;
-  }
-  return fallback.empty() ? "object" : fallback;
 }
 
 std::unordered_set<int64_t> GraphView::reachableFromVisibleRoots() const
@@ -345,14 +324,10 @@ void GraphView::rebuildScene()
     {
       continue;
     }
-    const bool is_concept = isConcept(node);
-    const NodeKind kind   = is_concept ? NodeKind::CONCEPT : NodeKind::OBJECT;
-    std::string label     = nodeName(node);
-    if (!is_concept)
-    {
-      label = objectLabelFor(id, label);
-    }
-    auto* item = new NodeItem{id, kind, label};
+    const bool is_concept   = isConcept(node);
+    const NodeKind kind     = is_concept ? NodeKind::CONCEPT : NodeKind::OBJECT;
+    const std::string label = nodeName(node);
+    auto* item              = new NodeItem{id, kind, label};
     m_scene.addItem(item);
     m_nodes.emplace(id, item);
   }

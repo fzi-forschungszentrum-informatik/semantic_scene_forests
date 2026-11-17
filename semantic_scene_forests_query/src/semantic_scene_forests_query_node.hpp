@@ -148,8 +148,8 @@ private:
   // Build an independent SceneGraph snapshot from the latest received message.
   [[nodiscard]] std::expected<SceneSnapshot, std::string> snapshotGraph() const;
 
-  // Object lookup in the latest scene graph, bound into the agent session.
-  [[nodiscard]] std::optional<ObjectInfo> lookupObject(int64_t id) const;
+  // True if the latest scene graph message still contains this object.
+  [[nodiscard]] bool hasObject(int64_t id) const;
 
   // Vision sub-completion over an object's crops (via /get_object_visuals).
   // Polls the service future so the wait is bounded by the visuals timeout and

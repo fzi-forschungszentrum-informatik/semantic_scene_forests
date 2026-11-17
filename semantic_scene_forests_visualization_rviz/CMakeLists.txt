@@ -35,6 +35,9 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_ros REQUIRED)
+find_package(Boost REQUIRED)
+find_package(fmt REQUIRED)
+find_package(semantic_scene_forests REQUIRED)
 find_package(semantic_scene_forests_msgs REQUIRED)
 find_package(semantic_scene_forests_object_msgs REQUIRED)
 find_package(rclcpp_action REQUIRED)
@@ -75,6 +78,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
 )
 
 target_link_libraries(${PROJECT_NAME} PUBLIC
+  semantic_scene_forests::semantic_scene_forests
   ${semantic_scene_forests_msgs_TARGETS}
   ${semantic_scene_forests_object_msgs_TARGETS}
   ${sensor_msgs_TARGETS}

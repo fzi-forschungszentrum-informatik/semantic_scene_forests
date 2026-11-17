@@ -135,7 +135,6 @@ private:
   mutable std::mutex m_mutex;
   semantic_scene_forests_msgs::msg::SceneGraph::ConstSharedPtr m_latest_scene_graph_msg;
   std::shared_ptr<fzi::semantic_scene_forests::SceneGraph> m_latest_scene_graph;
-  std::unordered_map<int64_t, std::string> m_object_class_names;
   std::unordered_map<int64_t, std::vector<sensor_msgs::msg::Image>> m_visuals_cache;
 
   // Last graph applied to the view; differs from m_latest_scene_graph when the user has

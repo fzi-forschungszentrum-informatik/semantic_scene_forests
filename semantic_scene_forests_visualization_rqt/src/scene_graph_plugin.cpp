@@ -30,6 +30,7 @@
 
 #include <mutex>
 #include <utility>
+#include <variant>
 
 #include <QHBoxLayout>
 #include <QMetaObject>
@@ -221,17 +222,10 @@ void SceneGraphPlugin::onSceneGraphMsg(
     return;
   }
   std::shared_ptr<fzi::semantic_scene_forests::SceneGraph> graph = std::move(parsed.value());
-  std::unordered_map<int64_t, std::string> names;
-  names.reserve(msg->object_nodes.size());
-  for (const auto& obj : msg->object_nodes)
-  {
-    names.emplace(obj.id, obj.class_name);
-  }
   {
     std::lock_guard<std::mutex> lock{m_mutex};
     m_latest_scene_graph_msg = msg;
     m_latest_scene_graph     = graph;
-    m_object_class_names     = std::move(names);
     ++m_latest_message_count;
   }
   emit sceneGraphReceived();
@@ -240,14 +234,12 @@ void SceneGraphPlugin::onSceneGraphMsg(
 void SceneGraphPlugin::onSceneGraphReceived()
 {
   std::shared_ptr<const fzi::semantic_scene_forests::SceneGraph> graph;
-  std::unordered_map<int64_t, std::string> names;
   std::uint64_t latest_count = 0;
   std::size_t node_count     = 0;
   std::size_t edge_count     = 0;
   {
     std::lock_guard<std::mutex> lock{m_mutex};
     graph        = m_latest_scene_graph;
-    names        = m_object_class_names;
     latest_count = m_latest_message_count;
     if (graph != nullptr)
     {
@@ -256,9 +248,8 @@ void SceneGraphPlugin::onSceneGraphReceived()
     }
   }
 
-  // Live updates: counts and label names always refresh so the user can see new data arriving.
+  // Live updates: counts always refresh so the user can see new data arriving.
   m_side_panel->setCounts(node_count, edge_count);
-  m_graph_view->setObjectClassNames(std::move(names));
 
   if (m_displayed_scene_graph == nullptr)
   {
@@ -304,11 +295,14 @@ void SceneGraphPlugin::onNodeSelected(qint64 node_id, bool is_object)
   }
   m_selected_object_id = node_id;
   QString class_name;
+  if (m_displayed_scene_graph != nullptr)
   {
-    std::lock_guard<std::mutex> lock{m_mutex};
-    if (auto it = m_object_class_names.find(node_id); it != m_object_class_names.end())
+    if (const auto NODE = m_displayed_scene_graph->findNode(node_id))
     {
-      class_name = QString::fromStdString(it->second);
+      if (const auto* obj = std::get_if<fzi::semantic_scene_forests::ObjectNode>(&*NODE))
+      {
+        class_name = QString::fromStdString(obj->class_name);
+      }
     }
   }
   m_selected_object_class = class_name;

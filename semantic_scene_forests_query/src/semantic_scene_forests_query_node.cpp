@@ -242,19 +242,6 @@ SceneGraphQueryNode::snapshotGraph() const
     return std::unexpected{
       fmt::format("failed to build graph snapshot: {}", graph.error().message)};
   }
-  // The manager publishes only visible objects, but concepts not reachable from
-  // them can still be in the message; drop those.
-  std::unordered_set<int64_t> visible_ids;
-  for (const auto& node : msg.object_nodes)
-  {
-    visible_ids.insert(node.id);
-  }
-  if (auto retained = (*graph)->retainObjectNodes(visible_ids); !retained)
-  {
-    return std::unexpected{
-      fmt::format("failed to sanitize graph snapshot: {}", retained.error().message)};
-  }
-
   std::unordered_set<int64_t> object_ids;
   for (const auto& node : (*graph)->getObjectNodes())
   {
@@ -263,27 +250,10 @@ SceneGraphQueryNode::snapshotGraph() const
   return SceneSnapshot{.graph = std::move(*graph), .object_ids = std::move(object_ids)};
 }
 
-std::optional<ObjectInfo> SceneGraphQueryNode::lookupObject(int64_t id) const
+bool SceneGraphQueryNode::hasObject(int64_t id) const
 {
   const std::scoped_lock LOCK{m_graph_mutex};
-  if (!m_last_graph)
-  {
-    return std::nullopt;
-  }
-  const auto& nodes = m_last_graph->object_nodes;
-  const auto IT     = std::ranges::find(nodes, id, &ObjectNodeMsg::id);
-  if (IT == nodes.end())
-  {
-    return std::nullopt;
-  }
-  const auto& bbox = IT->detection.bbox;
-  return ObjectInfo{.class_name = IT->class_name,
-                    .position_x = bbox.center.position.x,
-                    .position_y = bbox.center.position.y,
-                    .position_z = bbox.center.position.z,
-                    .size_x     = bbox.size.x,
-                    .size_y     = bbox.size.y,
-                    .size_z     = bbox.size.z};
+  return m_last_graph && std::ranges::contains(m_last_graph->object_nodes, id, &ObjectNodeMsg::id);
 }
 
 std::expected<std::string, std::string> SceneGraphQueryNode::inspectObjectVisual(
@@ -372,14 +342,9 @@ SceneGraphQueryNode::renderObjectCatalog(const fzi::semantic_scene_forests::Scen
   auto objects = minja::Value::array();
   for (const auto& obj : graph.getObjectNodes())
   {
-    std::string class_name;
-    if (const auto INFO = lookupObject(obj.id))
-    {
-      class_name = INFO->class_name;
-    }
     auto entry = minja::Value::object();
     entry.set("id", minja::Value(obj.id));
-    entry.set("class_name", minja::Value(class_name));
+    entry.set("class_name", minja::Value(obj.class_name));
     objects.push_back(entry);
   }
 
@@ -395,12 +360,7 @@ SceneGraphQueryNode::renderObjectCatalog(const fzi::semantic_scene_forests::Scen
   std::string out = "Objects currently in the scene graph (id: class_name):\n";
   for (const auto& obj : graph.getObjectNodes())
   {
-    std::string class_name;
-    if (const auto INFO = lookupObject(obj.id))
-    {
-      class_name = INFO->class_name;
-    }
-    out += fmt::format("- {}: {}\n", obj.id, class_name);
+    out += fmt::format("- {}: {}\n", obj.id, obj.class_name);
   }
   return out;
 }
@@ -445,7 +405,6 @@ SceneGraphQueryNode::runAgent(const std::string& system_prompt_key,
 
   GraphAgentSession session(
     std::move(snapshot->graph),
-    [this](int64_t id) { return lookupObject(id); },
     [this, should_stop](int64_t id, std::string_view focus) {
       return inspectObjectVisual(id, focus, should_stop);
     },
@@ -735,7 +694,7 @@ SceneGraphQueryNode::validateFindObjectAnswer(const AgentOutcome& outcome) const
     return std::unexpected{
       fmt::format("model reported object {} which is not in the scene snapshot", object_id)};
   }
-  if (!lookupObject(object_id))
+  if (!hasObject(object_id))
   {
     return std::unexpected{
       fmt::format("model reported object {} which is no longer active", object_id)};
