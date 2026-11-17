@@ -116,9 +116,10 @@ public:
   SEMANTIC_SCENE_FORESTS_PUBLIC void setCropPolicy(std::size_t max_crops,
                                                    std::chrono::nanoseconds min_interval) noexcept;
 
-  //! Offers a crop to an object. It is taken only if it is at least the policy interval newer
-  //! than the object's newest crop (or the object has none); then it is appended while the
-  //! object holds fewer than max_crops, otherwise it replaces the oldest crop.
+  //! Offers a crop to an object. Below max_crops it is appended if it is at least the policy
+  //! interval newer than the newest crop (or the object has none). When full, it replaces the
+  //! oldest crop only if it is at least the interval newer than both the oldest and the newest
+  //! crop, so a full object never swaps crops every frame.
   //! Returns whether the crop was taken; NODE_DOES_NOT_EXIST for an unknown object.
   [[nodiscard]] SEMANTIC_SCENE_FORESTS_PUBLIC std::expected<bool, SceneGraphError>
   offerCrop(int64_t id, const CropPtr& crop) noexcept;

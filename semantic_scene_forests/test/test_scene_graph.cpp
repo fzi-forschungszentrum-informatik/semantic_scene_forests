@@ -518,8 +518,11 @@ TEST(SceneGraphTest, OfferCropAppendsThenReplacesOldestAfterInterval)
   EXPECT_FALSE(graph.offerCrop(1, crop(5)).value()); // too soon after the newest
   EXPECT_TRUE(graph.offerCrop(1, crop(10)).value());
   EXPECT_TRUE(graph.offerCrop(1, crop(20)).value());
+  // Full: 25 is 25 s after the oldest (0) but only 5 s after the newest (20).
   EXPECT_FALSE(graph.offerCrop(1, crop(25)).value());
-  EXPECT_TRUE(graph.offerCrop(1, crop(30)).value()); // full: replaces the oldest
+  EXPECT_EQ(cropSeconds(graph, 1), (std::vector<int32_t>{0, 10, 20}));
+  // Full: 30 is at least 10 s after both the oldest and the newest, so it replaces the oldest.
+  EXPECT_TRUE(graph.offerCrop(1, crop(30)).value());
   EXPECT_EQ(cropSeconds(graph, 1), (std::vector<int32_t>{10, 20, 30}));
 
   const auto UNKNOWN = graph.offerCrop(99, crop(40));

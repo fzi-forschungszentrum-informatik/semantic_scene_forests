@@ -192,6 +192,8 @@ std::expected<bool, SceneGraphError> SceneGraph::offerCrop(const int64_t id,
   const auto BY_STAMP = [](const CropPtr& a, const CropPtr& b) {
     return cropStamp(a) < cropStamp(b);
   };
+  // The newest-crop gap is checked for appends and replacements alike; since the oldest crop is
+  // never newer than the newest, it also covers the oldest-crop gap a replacement needs.
   if (!crops.empty() &&
       cropStamp(crop) < cropStamp(*std::ranges::max_element(crops, BY_STAMP)) + m_crop_min_interval)
   {
