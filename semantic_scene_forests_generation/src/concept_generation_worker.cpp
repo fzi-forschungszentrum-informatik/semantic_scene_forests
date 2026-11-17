@@ -255,19 +255,7 @@ ConceptGenerationWorker::generate(bool only_unprocessed, const std::function<boo
     return Outcome::STOPPED;
   }
 
-  // Marking a concept that was deleted meanwhile fails harmlessly.
-  // TODO: a concept added by someone else during the run is marked as well and never processed.
-  for (const int64_t ID : INPUT_IDS)
-  {
-    std::ignore = m_graph->markProcessed(ID, m_name);
-  }
-  for (const auto& concept_node : m_graph->getConceptNodes())
-  {
-    if (!existing_ids.contains(concept_node.id))
-    {
-      std::ignore = m_graph->markProcessed(concept_node.id, m_name);
-    }
-  }
+  markRunResults(*m_graph, m_name, INPUT_IDS, existing_ids);
   RCLCPP_INFO(m_logger, "Processed %zu concepts", CONCEPTS.size());
   m_stats.succeeded();
   return Outcome::GENERATED;

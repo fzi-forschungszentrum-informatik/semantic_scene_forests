@@ -38,6 +38,7 @@
 #include <stop_token>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -66,6 +67,14 @@ struct LlmSettings
 
 //! Builds an OpenAI-compatible client. Throws std::invalid_argument for a non-object extra_body.
 oai::OpenAIClient makeClient(const LlmSettings& settings);
+
+//! Marks `input_ids` and the concepts this run created from them (reachable through outgoing
+//! edges, not in `existing_ids`) as processed by `worker`. Concepts other writers added meanwhile
+//! stay unprocessed. Ids deleted meanwhile are ignored.
+void markRunResults(fzi::semantic_scene_forests::SceneGraph& graph,
+                    const std::string& worker,
+                    const std::vector<int64_t>& input_ids,
+                    const std::unordered_set<int64_t>& existing_ids);
 
 //! Parses every `.j2` file below prompt_dir (the package's share/resources when empty), keyed by
 //! its relative path without extension, e.g. "instance/instance_system_prompt".

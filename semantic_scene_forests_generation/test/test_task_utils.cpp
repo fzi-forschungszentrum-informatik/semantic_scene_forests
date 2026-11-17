@@ -28,12 +28,15 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <memory>
 #include <string>
+#include <unordered_set>
 
 #include <rclcpp/rclcpp.hpp>
 #include <semantic_scene_forests/scene_graph.hpp>
 
+#include "generation_common.hpp"
 #include "tasks/task_utils.hpp"
 
 namespace {
@@ -95,6 +98,31 @@ TEST(ApplyLabelsTest, RerunKeepsExistingEdgesAndRejectsNonArray)
   EXPECT_EQ(graph.getConceptNodes().size(), 2U);
   EXPECT_FALSE(
     applyLabels(graph, rclcpp::get_logger("test"), OBJECT, "has_color", "color", json("red")));
+}
+
+TEST(MarkRunResultsTest, MarksInputAndItsNewConceptsButNotOthersWriters)
+{
+  SceneGraph graph;
+  const auto OBJECT = addObject(graph);
+  const auto INPUT  = graph.addConceptEdge(OBJECT, "has_color", "red");
+  ASSERT_TRUE(INPUT);
+  const std::unordered_set<int64_t> EXISTING{INPUT->id};
+  // The run categorizes "red", and another writer adds "plastic" meanwhile.
+  ASSERT_TRUE(applyLabels(
+    graph, rclcpp::get_logger("test"), INPUT->id, "is_type_of", "category", json::array({"warm"})));
+  const auto OTHER = graph.addConceptEdge(OBJECT, "has_material", "plastic");
+  ASSERT_TRUE(OTHER);
+
+  semantic_scene_forests_generation::markRunResults(graph, "gen", {INPUT->id}, EXISTING);
+
+  const auto PENDING    = graph.unprocessedBy("gen");
+  const auto IS_PENDING = [&PENDING](int64_t id) {
+    return std::ranges::find(PENDING, id) != PENDING.end();
+  };
+  EXPECT_FALSE(IS_PENDING(INPUT->id));
+  EXPECT_FALSE(IS_PENDING(graph.findConceptNodesByName("warm").front().id));
+  EXPECT_FALSE(IS_PENDING(graph.findConceptNodesByName("category").front().id));
+  EXPECT_TRUE(IS_PENDING(OTHER->id));
 }
 
 } // namespace
