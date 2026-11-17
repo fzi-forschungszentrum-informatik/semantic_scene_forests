@@ -46,7 +46,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Edge.msg"
   "msg/ObjectNode.msg"
   "msg/ConceptNode.msg"
-  "srv/AddSceneContext.srv"
+  "srv/AddEdge.srv"
+  "srv/AddConcept.srv"
   "action/RunWorker.action"
   DEPENDENCIES builtin_interfaces std_msgs vision_msgs sensor_msgs
 )

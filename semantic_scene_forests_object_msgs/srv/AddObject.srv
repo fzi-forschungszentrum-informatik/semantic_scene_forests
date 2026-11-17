@@ -24,30 +24,14 @@
 # INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
 # CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-# POSSIBILITY OF SUCH DAMAGE.
 
-# Unique identifier for this object
-int64 id
-
-# Semantic class name (e.g., "cup", "chair", "table")
+# Add a manual object. The tracker starts a new, immediately confirmed track; the node appears
+# through the normal track path.
+std_msgs/Header header                  # frame and stamp of bbox
 string class_name
-
-# 3D detection with pose and bounding box
-vision_msgs/Detection3D detection
-
-# Header for timestamping and frame reference
-std_msgs/Header header
-
-# Manual blocking deletes the payload and keeps only a process-local suppression
-# ID; blocked objects are not published. Unblocking waits for a fresh candidate
-# rather than restoring old state.
-bool is_blocked
-
-# Source of object: 0=tracker, 1=manual_edit
-uint8 source
-
-# Timestamp of last modification
-builtin_interfaces/Time last_updated
-
-# Timestamp of the latest accepted 3D observation; not advanced by manual edits or publication
-builtin_interfaces/Time last_seen
+vision_msgs/BoundingBox3D bbox          # center, orientation and size in header.frame_id
+sensor_msgs/Image[] image_crops         # optional
+---
+int64 object_id
+bool success
+string message

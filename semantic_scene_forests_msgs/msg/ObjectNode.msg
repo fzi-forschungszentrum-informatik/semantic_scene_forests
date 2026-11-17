@@ -26,11 +26,12 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
+# header.frame_id is the bbox frame; header.stamp = last_seen
 std_msgs/Header header
 
 int64 id
 string class_name
-vision_msgs/Detection3D detection
+vision_msgs/BoundingBox3D bbox
 
 # Provenance, filled by the scene graph manager.
 uint8 source

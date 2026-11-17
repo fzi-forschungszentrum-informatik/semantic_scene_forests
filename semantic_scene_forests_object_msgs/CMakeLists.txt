@@ -39,19 +39,19 @@ find_package(std_msgs REQUIRED)
 find_package(vision_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(semantic_scene_forests_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
-  "msg/ManagedObject.msg"
   "msg/ObjectCandidate.msg"
   "msg/ObjectVisuals.msg"
   "srv/AddObservations.srv"
   "srv/GetObjects.srv"
   "srv/GetObjectVisuals.srv"
-  "srv/BlockObject.srv"
+  "srv/DeleteObject.srv"
   "srv/EditObject.srv"
-  "srv/UnblockObject.srv"
-  DEPENDENCIES builtin_interfaces std_msgs vision_msgs sensor_msgs geometry_msgs
+  "srv/AddObject.srv"
+  DEPENDENCIES builtin_interfaces std_msgs vision_msgs sensor_msgs geometry_msgs semantic_scene_forests_msgs
 )
 
 ament_package()
