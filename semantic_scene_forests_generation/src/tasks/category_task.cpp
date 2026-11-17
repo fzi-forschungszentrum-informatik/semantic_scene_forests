@@ -42,14 +42,15 @@ void CategoryTask::initialize(rclcpp::Node* node, const TemplateMap& templates)
   m_templates = &templates;
 }
 
-TaskResult CategoryTask::execute(oai::OpenAIClient& client,
-                                 std::vector<oai::Message>& history,
-                                 const fzi::semantic_scene_forests::SceneGraph& current_graph,
-                                 fzi::semantic_scene_forests::SceneGraph& graph)
+TaskResult
+CategoryTask::execute(oai::OpenAIClient& client,
+                      std::vector<oai::Message>& history,
+                      const std::vector<fzi::semantic_scene_forests::ConceptNode>& concepts,
+                      const std::shared_ptr<fzi::semantic_scene_forests::SceneGraph>& graph)
 {
   try
   {
-    const auto CONCEPTS = current_graph.getConceptNodes();
+    const auto& CONCEPTS = concepts;
     if (CONCEPTS.empty())
     {
       return {};
@@ -91,49 +92,17 @@ TaskResult CategoryTask::execute(oai::OpenAIClient& client,
 
       for (const auto& [id_string, categories] : parsed->items())
       {
-        auto source_id = parseAllowedConceptId(id_string, allowed_ids);
+        const auto source_id = parseAllowedConceptId(id_string, allowed_ids);
         if (!source_id)
         {
-          return std::unexpected(source_id.error());
+          RCLCPP_WARN(m_logger, "Skipping '%s': %s", id_string.c_str(), source_id.error().c_str());
+          continue;
         }
-        if (!categories.is_array() || categories.size() > MAX_TASK_LABELS)
+        if (auto applied =
+              applyLabels(*graph, m_logger, *source_id, "is_type_of", "category", categories);
+            !applied)
         {
-          return std::unexpected("category values must be an array with a bounded size");
-        }
-
-        for (const auto& value : categories)
-        {
-          auto category_label = validateConceptLabel(value);
-          if (!category_label)
-          {
-            return std::unexpected(category_label.error());
-          }
-          if (*category_label == "category")
-          {
-            return std::unexpected("categories must not contain the category root");
-          }
-
-          auto category_id = findOrCreateConcept(graph, *category_label);
-          if (!category_id)
-          {
-            return std::unexpected(category_id.error());
-          }
-          if (auto edge_result = addUniqueEdge(graph, *source_id, *category_id, "is_type_of");
-              !edge_result)
-          {
-            return edge_result;
-          }
-
-          auto root_id = findOrCreateConcept(graph, "category");
-          if (!root_id)
-          {
-            return std::unexpected(root_id.error());
-          }
-          if (auto edge_result = addUniqueEdge(graph, *category_id, *root_id, "is_type_of");
-              !edge_result)
-          {
-            return edge_result;
-          }
+          RCLCPP_WARN(m_logger, "Skipping '%s': %s", id_string.c_str(), applied.error().c_str());
         }
       }
       return {};
@@ -144,16 +113,10 @@ TaskResult CategoryTask::execute(oai::OpenAIClient& client,
     {
       return std::unexpected(content.error());
     }
-    auto graph_before_response = graph.clone();
-    if (!graph_before_response)
-    {
-      return std::unexpected(graph_before_response.error().message);
-    }
-    if (auto apply_result = apply_response(*content); apply_result)
+    if (apply_response(*content))
     {
       return {};
     }
-    graph.swap(**graph_before_response);
 
     auto followup_context = minja::Value::object();
     auto category_list    = minja::Value::array();

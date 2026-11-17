@@ -42,14 +42,15 @@ void AffordanceTask::initialize(rclcpp::Node* node, const TemplateMap& templates
   m_templates = &templates;
 }
 
-TaskResult AffordanceTask::execute(oai::OpenAIClient& client,
-                                   std::vector<oai::Message>& history,
-                                   const fzi::semantic_scene_forests::SceneGraph& current_graph,
-                                   fzi::semantic_scene_forests::SceneGraph& graph)
+TaskResult
+AffordanceTask::execute(oai::OpenAIClient& client,
+                        std::vector<oai::Message>& history,
+                        const std::vector<fzi::semantic_scene_forests::ConceptNode>& concepts,
+                        const std::shared_ptr<fzi::semantic_scene_forests::SceneGraph>& graph)
 {
   try
   {
-    const auto CONCEPTS = current_graph.getConceptNodes();
+    const auto& CONCEPTS = concepts;
     if (CONCEPTS.empty())
     {
       return {};
@@ -94,49 +95,17 @@ TaskResult AffordanceTask::execute(oai::OpenAIClient& client,
 
     for (const auto& [id_string, affordances] : parsed->items())
     {
-      auto source_id = parseAllowedConceptId(id_string, allowed_ids);
+      const auto source_id = parseAllowedConceptId(id_string, allowed_ids);
       if (!source_id)
       {
-        return std::unexpected(source_id.error());
+        RCLCPP_WARN(m_logger, "Skipping '%s': %s", id_string.c_str(), source_id.error().c_str());
+        continue;
       }
-      if (!affordances.is_array() || affordances.size() > MAX_TASK_LABELS)
+      if (auto applied =
+            applyLabels(*graph, m_logger, *source_id, "has_affordance", "affordance", affordances);
+          !applied)
       {
-        return std::unexpected("affordance values must be an array with a bounded size");
-      }
-
-      for (const auto& value : affordances)
-      {
-        auto affordance_label = validateConceptLabel(value);
-        if (!affordance_label)
-        {
-          return std::unexpected(affordance_label.error());
-        }
-        if (*affordance_label == "affordance")
-        {
-          return std::unexpected("affordances must not contain the affordance root");
-        }
-
-        auto affordance_id = findOrCreateConcept(graph, *affordance_label);
-        if (!affordance_id)
-        {
-          return std::unexpected(affordance_id.error());
-        }
-        if (auto edge_result = addUniqueEdge(graph, *source_id, *affordance_id, "has_affordance");
-            !edge_result)
-        {
-          return edge_result;
-        }
-
-        auto root_id = findOrCreateConcept(graph, "affordance");
-        if (!root_id)
-        {
-          return std::unexpected(root_id.error());
-        }
-        if (auto edge_result = addUniqueEdge(graph, *affordance_id, *root_id, "is_type_of");
-            !edge_result)
-        {
-          return edge_result;
-        }
+        RCLCPP_WARN(m_logger, "Skipping '%s': %s", id_string.c_str(), applied.error().c_str());
       }
     }
     return {};

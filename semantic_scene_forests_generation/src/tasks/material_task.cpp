@@ -40,11 +40,12 @@ void MaterialTask::initialize(rclcpp::Node* node, const TemplateMap& templates)
   m_templates = &templates;
 }
 
-TaskResult MaterialTask::execute(oai::OpenAIClient& client,
-                                 std::vector<oai::Message>& history,
-                                 int64_t object_id,
-                                 const std::vector<cv::Mat>& /*crops*/,
-                                 fzi::semantic_scene_forests::SceneGraph& graph)
+TaskResult
+MaterialTask::execute(oai::OpenAIClient& client,
+                      std::vector<oai::Message>& history,
+                      int64_t object_id,
+                      const std::vector<cv::Mat>& /*crops*/,
+                      const std::shared_ptr<fzi::semantic_scene_forests::SceneGraph>& graph)
 {
   return runObjectAttributeTask(client,
                                 history,

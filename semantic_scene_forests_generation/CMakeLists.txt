@@ -165,7 +165,7 @@ target_link_libraries(object_attribution_worker
   PUBLIC
     generation_common
     object_attribution_parameters
-    semantic_scene_forests_manager::world_db
+    semantic_scene_forests_manager::worker_interface
     ${semantic_scene_forests_msgs_TARGETS}
     rclcpp_action::rclcpp_action
     cv_bridge::cv_bridge
@@ -182,7 +182,7 @@ target_link_libraries(concept_generation_worker
   PUBLIC
     generation_common
     concept_generation_parameters
-    semantic_scene_forests_manager::world_db
+    semantic_scene_forests_manager::worker_interface
     ${semantic_scene_forests_msgs_TARGETS}
     rclcpp_action::rclcpp_action
 )
@@ -228,6 +228,10 @@ if(BUILD_TESTING)
     TIMEOUT 60)
   target_include_directories(test_concept_generation_worker PRIVATE src)
   target_link_libraries(test_concept_generation_worker concept_generation_worker)
+
+  ament_add_gtest(test_task_utils test/test_task_utils.cpp TIMEOUT 60)
+  target_include_directories(test_task_utils PRIVATE src)
+  target_link_libraries(test_task_utils generation_common)
 endif()
 
 ament_export_targets(${PROJECT_NAME}Targets HAS_LIBRARY_TARGET)

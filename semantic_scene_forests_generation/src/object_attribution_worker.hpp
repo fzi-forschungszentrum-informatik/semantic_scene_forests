@@ -47,7 +47,6 @@
 
 #include "generation_common.hpp"
 #include "semantic_scene_forests_generation/task_interface.hpp"
-#include "semantic_scene_forests_manager/database.hpp"
 #include "semantic_scene_forests_manager/worker_interface.hpp"
 
 namespace semantic_scene_forests_generation {
@@ -66,7 +65,7 @@ public:
   ObjectAttributionWorker& operator=(ObjectAttributionWorker&&)      = delete;
 
   void initialize(rclcpp::Node& node,
-                  semantic_scene_forests_manager::Database& db,
+                  std::shared_ptr<fzi::semantic_scene_forests::SceneGraph> graph,
                   const std::string& name,
                   diagnostic_updater::Updater& diagnostics) override;
   void start() override;
@@ -77,13 +76,8 @@ private:
   {
     DESCRIBED,
     FAILED,
+    SKIPPED, // the object was deleted meanwhile
     STOPPED
-  };
-
-  struct Scratch
-  {
-    fzi::semantic_scene_forests::SceneGraph before;
-    std::unique_ptr<fzi::semantic_scene_forests::SceneGraph> after;
   };
 
   void runBackground(const std::stop_token& stop);
@@ -93,11 +87,12 @@ private:
               const std::function<bool()>& should_stop);
   //! Describes and marks one object; a failed object is marked too, a stopped one is not.
   Outcome describeObject(int64_t id, const std::function<bool()>& should_stop);
-  //! Runs the tasks on a scratch graph holding only the object. nullopt if stopped; throws on
-  //! failure.
-  std::optional<Scratch> runTasks(int64_t id, const std::function<bool()>& should_stop);
+  //! Reads the object, then runs the tasks on it. Throws on failure.
+  Outcome runTasks(int64_t id, const std::function<bool()>& should_stop);
+  //! Ids of the object nodes the worker has not processed yet.
+  [[nodiscard]] std::vector<int64_t> pendingObjects() const;
 
-  semantic_scene_forests_manager::Database* m_db{nullptr};
+  std::shared_ptr<fzi::semantic_scene_forests::SceneGraph> m_graph;
   std::string m_name;
   rclcpp::Logger m_logger{rclcpp::get_logger("object_attribution")};
   std::chrono::duration<double> m_poll_interval{1.0};

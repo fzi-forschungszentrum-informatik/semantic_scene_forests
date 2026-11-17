@@ -31,8 +31,10 @@
 #include <functional>
 #include <optional>
 #include <stdexcept>
+#include <tuple>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 
 #include <minja/minja.hpp>
 #include <oai_api/builder.hpp>
@@ -45,20 +47,20 @@
 
 namespace semantic_scene_forests_generation {
 
-using fzi::semantic_scene_forests::SceneGraph;
-using semantic_scene_forests_manager::Tx;
+using fzi::semantic_scene_forests::ConceptNode;
 
 ConceptGenerationWorker::~ConceptGenerationWorker()
 {
   stop();
 }
 
-void ConceptGenerationWorker::initialize(rclcpp::Node& node,
-                                         semantic_scene_forests_manager::Database& db,
-                                         const std::string& name,
-                                         diagnostic_updater::Updater& diagnostics)
+void ConceptGenerationWorker::initialize(
+  rclcpp::Node& node,
+  std::shared_ptr<fzi::semantic_scene_forests::SceneGraph> graph,
+  const std::string& name,
+  diagnostic_updater::Updater& diagnostics)
 {
-  m_db     = &db;
+  m_graph  = std::move(graph);
   m_name   = name;
   m_logger = node.get_logger().get_child(name);
   const auto PARAMS =
@@ -108,8 +110,7 @@ void ConceptGenerationWorker::initialize(rclcpp::Node& node,
                     });
   diagnostics.add(name + " health", [this](diagnostic_updater::DiagnosticStatusWrapper& stat) {
     m_stats.report(stat);
-    stat.add("Pending concepts",
-             m_db->read([this](const Tx& tx) { return tx.conceptsUnmarkedBy(m_name); }).size());
+    stat.add("Pending concepts", planInput(true).size());
     stat.add("Goal active", m_threads.goalActive());
   });
   RCLCPP_INFO(m_logger,
@@ -134,7 +135,7 @@ void ConceptGenerationWorker::runBackground(const std::stop_token& stop)
   const auto SHOULD_STOP = [&stop] { return stop.stop_requested(); };
   while (m_threads.waitForTick(stop, m_interval))
   {
-    // A failed run keeps its concepts unmarked for the next tick.
+    // A failed run keeps its concepts unprocessed for the next tick.
     try
     {
       generate(true, SHOULD_STOP);
@@ -154,19 +155,40 @@ void ConceptGenerationWorker::runBackground(const std::stop_token& stop)
 }
 
 ConceptGenerationWorker::Outcome
-ConceptGenerationWorker::generate(bool only_unmarked, const std::function<bool()>& should_stop)
+ConceptGenerationWorker::generate(bool only_unprocessed, const std::function<bool()>& should_stop)
 {
   const std::scoped_lock LOCK{m_generate_mutex};
   if (should_stop())
   {
     return Outcome::STOPPED;
   }
-  const SceneGraph INPUT = readInput(only_unmarked);
-  const auto CONCEPTS    = INPUT.getConceptNodes();
-  if (CONCEPTS.empty())
+  const auto INPUT_IDS = planInput(only_unprocessed);
+  if (INPUT_IDS.empty())
   {
     return Outcome::SKIPPED;
   }
+  // Concepts that exist before the run; the ones it creates count as processed afterwards.
+  std::unordered_set<int64_t> existing_ids;
+  for (const auto& concept_node : m_graph->getConceptNodes())
+  {
+    existing_ids.insert(concept_node.id);
+  }
+  // The input as the tasks see it: current names, concepts deleted meanwhile dropped.
+  const auto read_input = [&] {
+    std::vector<ConceptNode> input;
+    for (const int64_t ID : INPUT_IDS)
+    {
+      if (const auto NODE = m_graph->findNode(ID); NODE)
+      {
+        if (const auto* concept_node = std::get_if<ConceptNode>(&*NODE))
+        {
+          input.push_back(*concept_node);
+        }
+      }
+    }
+    return input;
+  };
+  const auto CONCEPTS = read_input();
 
   const auto SYSTEM_TEMPLATE = m_templates.find("meta/meta_system_prompt");
   const auto SETUP_TEMPLATE  = m_templates.find("meta/meta_setup_prompt");
@@ -217,18 +239,13 @@ ConceptGenerationWorker::generate(bool only_unmarked, const std::function<bool()
   }
   history.push_back(std::move(*acknowledgement));
 
-  auto after = INPUT.clone();
-  if (!after)
-  {
-    throw std::runtime_error("failed to clone the scratch graph: " + after.error().message);
-  }
   for (auto& task : m_tasks)
   {
     if (should_stop())
     {
       return Outcome::STOPPED;
     }
-    if (auto task_result = task->execute(client, history, INPUT, **after); !task_result)
+    if (auto task_result = task->execute(client, history, read_input(), m_graph); !task_result)
     {
       throw std::runtime_error("task failed: " + task_result.error());
     }
@@ -238,65 +255,46 @@ ConceptGenerationWorker::generate(bool only_unmarked, const std::function<bool()
     return Outcome::STOPPED;
   }
 
-  commit(INPUT, **after);
+  // Marking a concept that was deleted meanwhile fails harmlessly.
+  // TODO: a concept added by someone else during the run is marked as well and never processed.
+  for (const int64_t ID : INPUT_IDS)
+  {
+    std::ignore = m_graph->markProcessed(ID, m_name);
+  }
+  for (const auto& concept_node : m_graph->getConceptNodes())
+  {
+    if (!existing_ids.contains(concept_node.id))
+    {
+      std::ignore = m_graph->markProcessed(concept_node.id, m_name);
+    }
+  }
   RCLCPP_INFO(m_logger, "Processed %zu concepts", CONCEPTS.size());
   m_stats.succeeded();
   return Outcome::GENERATED;
 }
 
-SceneGraph ConceptGenerationWorker::readInput(bool only_unmarked) const
+std::vector<int64_t> ConceptGenerationWorker::planInput(bool only_unprocessed) const
 {
-  // The input holds the concepts with their database ids and no edges.
-  // TODO: concepts hidden by visibleGraph() (not reachable from a visible object) stay unmarked and
-  // are retried each tick at no LLM cost; revisit if Tx gains a concept-label query.
-  return m_db->read([&](const Tx& tx) {
-    const auto GRAPH = tx.visibleGraph();
-    std::unordered_set<int64_t> wanted;
-    if (only_unmarked)
+  std::vector<int64_t> ids;
+  if (only_unprocessed)
+  {
+    // unprocessedBy also lists objects: keep the concept ids.
+    std::unordered_set<int64_t> concept_ids;
+    for (const auto& concept_node : m_graph->getConceptNodes())
     {
-      const auto IDS = tx.conceptsUnmarkedBy(m_name);
-      wanted.insert(IDS.begin(), IDS.end());
+      concept_ids.insert(concept_node.id);
     }
-    SceneGraph concepts;
-    for (const auto& concept_node : GRAPH.getConceptNodes())
+    ids = m_graph->unprocessedBy(m_name);
+    std::erase_if(ids, [&concept_ids](int64_t id) { return !concept_ids.contains(id); });
+  }
+  else
+  {
+    for (const auto& concept_node : m_graph->getConceptNodes())
     {
-      if (only_unmarked && !wanted.contains(concept_node.id))
-      {
-        continue;
-      }
-      if (auto added = concepts.addConceptNodeWithId(concept_node.id, concept_node.concept_name);
-          !added)
-      {
-        throw std::runtime_error("failed to collect a concept: " + added.error().message);
-      }
+      ids.push_back(concept_node.id);
     }
-    return concepts;
-  });
-}
-
-void ConceptGenerationWorker::commit(const SceneGraph& input, const SceneGraph& after)
-{
-  // Concepts this run created count as processed, or the next tick would categorize its own
-  // categories.
-  // TODO: the scratch graph has no edges, so SceneGraph's cycle rejection does not see the
-  // database's edges and Tx::addEdge has no cycle check; add one if cyclic is_type_of shows up.
-  m_db->write([&](Tx& tx) {
-    tx.commitScratch(input, after);
-    std::unordered_set<int64_t> input_ids;
-    for (const auto& concept_node : input.getConceptNodes())
-    {
-      input_ids.insert(concept_node.id);
-      tx.mark(m_name, concept_node.id);
-    }
-    for (const auto& concept_node : after.getConceptNodes())
-    {
-      if (!input_ids.contains(concept_node.id))
-      {
-        // Returns the id commitScratch merged the scratch concept into.
-        tx.mark(m_name, tx.findOrCreateConcept(concept_node.concept_name));
-      }
-    }
-  });
+  }
+  return ids;
 }
 
 } // namespace semantic_scene_forests_generation

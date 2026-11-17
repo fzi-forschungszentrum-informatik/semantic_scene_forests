@@ -28,11 +28,12 @@
 
 #include "object_attribution_worker.hpp"
 
-#include <array>
 #include <exception>
 #include <functional>
 #include <stdexcept>
+#include <unordered_set>
 #include <utility>
+#include <variant>
 
 #include <cv_bridge/cv_bridge.hpp>
 #include <minja/minja.hpp>
@@ -46,19 +47,18 @@
 
 namespace semantic_scene_forests_generation {
 
-using semantic_scene_forests_manager::Tx;
-
 ObjectAttributionWorker::~ObjectAttributionWorker()
 {
   stop();
 }
 
-void ObjectAttributionWorker::initialize(rclcpp::Node& node,
-                                         semantic_scene_forests_manager::Database& db,
-                                         const std::string& name,
-                                         diagnostic_updater::Updater& diagnostics)
+void ObjectAttributionWorker::initialize(
+  rclcpp::Node& node,
+  std::shared_ptr<fzi::semantic_scene_forests::SceneGraph> graph,
+  const std::string& name,
+  diagnostic_updater::Updater& diagnostics)
 {
-  m_db     = &db;
+  m_graph  = std::move(graph);
   m_name   = name;
   m_logger = node.get_logger().get_child(name);
   const auto PARAMS =
@@ -89,9 +89,7 @@ void ObjectAttributionWorker::initialize(rclcpp::Node& node,
                     });
   diagnostics.add(name + " health", [this](diagnostic_updater::DiagnosticStatusWrapper& stat) {
     m_stats.report(stat);
-    stat.add(
-      "Pending objects",
-      m_db->read([this](const Tx& tx) { return tx.visibleObjectsUnmarkedBy(m_name); }).size());
+    stat.add("Pending objects", pendingObjects().size());
     stat.add("Goal active", m_threads.goalActive());
   });
   RCLCPP_INFO(
@@ -115,9 +113,7 @@ void ObjectAttributionWorker::runBackground(const std::stop_token& stop)
   {
     try
     {
-      const auto IDS =
-        m_db->read([this](const Tx& tx) { return tx.visibleObjectsUnmarkedBy(m_name); });
-      for (const int64_t ID : IDS)
+      for (const int64_t ID : pendingObjects())
       {
         if (m_threads.goalActive() || describeObject(ID, SHOULD_STOP) == Outcome::STOPPED)
         {
@@ -136,7 +132,7 @@ std::optional<std::string>
 ObjectAttributionWorker::executeGoal(const std::shared_ptr<WorkerThreads::GoalHandle>& goal_handle,
                                      const std::function<bool()>& should_stop)
 {
-  const auto OBJECTS = m_db->read([](const Tx& tx) { return tx.visibleObjects(); });
+  const auto OBJECTS = m_graph->getObjectNodes();
   auto feedback      = std::make_shared<WorkerThreads::RunWorker::Feedback>();
   feedback->total    = static_cast<uint32_t>(OBJECTS.size());
   uint32_t described = 0;
@@ -161,18 +157,27 @@ ObjectAttributionWorker::executeGoal(const std::shared_ptr<WorkerThreads::GoalHa
          " objects";
 }
 
+std::vector<int64_t> ObjectAttributionWorker::pendingObjects() const
+{
+  // unprocessedBy also lists concepts: keep the object ids.
+  std::unordered_set<int64_t> object_ids;
+  for (const auto& object : m_graph->getObjectNodes())
+  {
+    object_ids.insert(object.id);
+  }
+  auto ids = m_graph->unprocessedBy(m_name);
+  std::erase_if(ids, [&object_ids](int64_t id) { return !object_ids.contains(id); });
+  return ids;
+}
+
 ObjectAttributionWorker::Outcome
 ObjectAttributionWorker::describeObject(int64_t id, const std::function<bool()>& should_stop)
 {
   const std::scoped_lock LOCK{m_describe_mutex};
-  std::optional<Scratch> scratch;
+  Outcome outcome = Outcome::FAILED;
   try
   {
-    scratch = runTasks(id, should_stop);
-    if (!scratch)
-    {
-      return Outcome::STOPPED;
-    }
+    outcome = runTasks(id, should_stop);
   }
   catch (const std::exception& e)
   {
@@ -185,51 +190,47 @@ ObjectAttributionWorker::describeObject(int64_t id, const std::function<bool()>&
     RCLCPP_WARN(m_logger, "Describing object %ld failed: unknown exception", id);
     m_stats.failed("object " + std::to_string(id) + ": unknown exception");
   }
-  if (should_stop())
+  if (outcome == Outcome::STOPPED || should_stop())
   {
     return Outcome::STOPPED;
   }
-
-  if (scratch)
+  if (outcome == Outcome::SKIPPED)
   {
-    try
-    {
-      m_db->write([&](Tx& tx) {
-        tx.commitScratch(scratch->before, *scratch->after);
-        tx.mark(m_name, id);
-      });
-      RCLCPP_INFO(m_logger, "Described object %ld", id);
-      m_stats.succeeded();
-      return Outcome::DESCRIBED;
-    }
-    catch (const std::exception& e)
-    {
-      RCLCPP_WARN(m_logger, "Committing object %ld failed: %s", id, e.what());
-      m_stats.failed("committing object " + std::to_string(id) + ": " + e.what());
-    }
+    RCLCPP_INFO(m_logger, "Object %ld was deleted, skipped", id);
+    return outcome;
   }
-  // Marked anyway so an LLM outage cannot loop on paid calls; attribute_objects retries it.
-  m_db->write([&](Tx& tx) { tx.mark(m_name, id); });
-  return Outcome::FAILED;
+  // Marked even on failure so an LLM outage cannot loop on paid calls; attribute_objects retries.
+  if (const auto marked = m_graph->markProcessed(id, m_name); !marked)
+  {
+    RCLCPP_WARN(m_logger, "Marking object %ld failed: %s", id, marked.error().message.c_str());
+  }
+  if (outcome == Outcome::DESCRIBED)
+  {
+    RCLCPP_INFO(m_logger, "Described object %ld", id);
+    m_stats.succeeded();
+  }
+  return outcome;
 }
 
-std::optional<ObjectAttributionWorker::Scratch>
+ObjectAttributionWorker::Outcome
 ObjectAttributionWorker::runTasks(int64_t id, const std::function<bool()>& should_stop)
 {
-  const auto [record, images] =
-    m_db->read([id](const Tx& tx) { return std::pair{tx.object(id), tx.crops(id)}; });
-  if (!record)
+  const auto NODE = m_graph->findNode(id);
+  const auto* record =
+    NODE ? std::get_if<fzi::semantic_scene_forests::ObjectNode>(&*NODE) : nullptr;
+  if (record == nullptr)
   {
-    throw std::runtime_error("the object no longer exists");
+    return Outcome::SKIPPED;
   }
   auto& client = *m_client;
   std::vector<cv::Mat> crops;
-  crops.reserve(images.size());
-  for (const auto& image : images)
+  crops.reserve(record->crops.size());
+  for (const auto& image : record->crops)
   {
     try
     {
-      crops.push_back(cv_bridge::toCvCopy(image, "bgr8")->image);
+      // The node stores JPEG; the LLM builder takes decoded bgr8 images.
+      crops.push_back(cv_bridge::toCvCopy(*image, "bgr8")->image);
     }
     catch (const cv_bridge::Exception& e)
     {
@@ -282,7 +283,7 @@ ObjectAttributionWorker::runTasks(int64_t id, const std::function<bool()>& shoul
 
   if (should_stop())
   {
-    return std::nullopt;
+    return Outcome::STOPPED;
   }
   auto ack = client.chat({.messages = history});
   if (!ack)
@@ -297,35 +298,18 @@ ObjectAttributionWorker::runTasks(int64_t id, const std::function<bool()>& shoul
   }
   history.push_back(std::move(*acknowledgement));
 
-  Scratch scratch;
-  if (auto added = scratch.before.addObjectNodeWithId(
-        id,
-        record->class_name,
-        std::make_shared<vision_msgs::msg::Detection3D>(record->detection),
-        std::array<sensor_msgs::msg::Image::SharedPtr, 5>{});
-      !added)
-  {
-    throw std::runtime_error("failed to add the object node: " + added.error().message);
-  }
-  auto after = scratch.before.clone();
-  if (!after)
-  {
-    throw std::runtime_error("failed to clone the scratch graph: " + after.error().message);
-  }
-  scratch.after = std::move(*after);
-
   for (auto& task : m_tasks)
   {
     if (should_stop())
     {
-      return std::nullopt;
+      return Outcome::STOPPED;
     }
-    if (auto task_result = task->execute(client, history, id, crops, *scratch.after); !task_result)
+    if (auto task_result = task->execute(client, history, id, crops, m_graph); !task_result)
     {
       throw std::runtime_error("task failed: " + task_result.error());
     }
   }
-  return scratch;
+  return Outcome::DESCRIBED;
 }
 
 } // namespace semantic_scene_forests_generation

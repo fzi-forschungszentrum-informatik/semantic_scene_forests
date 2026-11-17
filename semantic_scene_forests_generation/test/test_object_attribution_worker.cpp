@@ -36,10 +36,10 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
+#include <semantic_scene_forests/scene_graph.hpp>
 #include <semantic_scene_forests_msgs/action/run_worker.hpp>
 
 #include "object_attribution_worker.hpp"
-#include "semantic_scene_forests_manager/database.hpp"
 
 namespace {
 
@@ -55,10 +55,10 @@ TEST(ObjectAttributionWorkerTest, LoadsWithNoTasksAndServesAction)
                                      {"object_attribution.server_url", "http://127.0.0.1:9"},
                                      {"object_attribution.tasks", std::vector<std::string>{}},
                                    }));
-  semantic_scene_forests_manager::Database db;
+  auto graph = std::make_shared<fzi::semantic_scene_forests::SceneGraph>();
   diagnostic_updater::Updater diagnostics(node);
   ObjectAttributionWorker worker;
-  worker.initialize(*node, db, "object_attribution", diagnostics);
+  worker.initialize(*node, graph, "object_attribution", diagnostics);
   worker.start();
 
   auto client = rclcpp_action::create_client<RunWorker>(node, "attribute_objects");

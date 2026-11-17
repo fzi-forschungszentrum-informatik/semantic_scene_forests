@@ -51,13 +51,13 @@ find_package(semantic_scene_forests REQUIRED)
 
 # Header-only worker interface plus the shared dependencies. The name is kept for the tracker and
 # generation packages, which still link it.
-add_library(world_db INTERFACE)
-target_include_directories(world_db INTERFACE
+add_library(worker_interface INTERFACE)
+target_include_directories(worker_interface INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
-target_compile_features(world_db INTERFACE cxx_std_20)
-target_link_libraries(world_db
+target_compile_features(worker_interface INTERFACE cxx_std_20)
+target_link_libraries(worker_interface
   INTERFACE
     ${semantic_scene_forests_object_msgs_TARGETS}
     ${sensor_msgs_TARGETS}
@@ -77,7 +77,7 @@ add_library(scene_graph_manager_component SHARED
 target_compile_features(scene_graph_manager_component PUBLIC cxx_std_20)
 target_link_libraries(scene_graph_manager_component
   PUBLIC
-    world_db
+    worker_interface
     cv_bridge::cv_bridge
     pluginlib::pluginlib
     rclcpp_components::component
@@ -93,13 +93,13 @@ add_library(manager_workers SHARED
   src/pruning_worker.cpp
 )
 target_compile_features(manager_workers PUBLIC cxx_std_20)
-target_link_libraries(manager_workers PUBLIC world_db pluginlib::pluginlib)
+target_link_libraries(manager_workers PUBLIC worker_interface pluginlib::pluginlib)
 pluginlib_export_plugin_description_file(semantic_scene_forests_manager
   semantic_scene_forests_manager_workers.xml
 )
 
 install(TARGETS
-  world_db
+  worker_interface
   scene_graph_manager_component
   scene_graph_manager_parameters
   manager_workers

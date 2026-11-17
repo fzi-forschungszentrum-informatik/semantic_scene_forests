@@ -90,7 +90,7 @@ target_link_libraries(tracker_worker PUBLIC
   rclcpp::rclcpp
   pluginlib::pluginlib
   semantic_scene_forests::semantic_scene_forests
-  semantic_scene_forests_manager::world_db # worker_interface.hpp (header-only interface target)
+  semantic_scene_forests_manager::worker_interface # worker_interface.hpp (header-only interface target)
   diagnostic_updater::diagnostic_updater
   semantic_scene_forests_utils::semantic_scene_forests_utils
   sensor_msgs::sensor_msgs_library

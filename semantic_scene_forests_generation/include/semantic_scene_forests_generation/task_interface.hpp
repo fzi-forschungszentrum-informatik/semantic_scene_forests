@@ -42,7 +42,6 @@
 #include <minja/minja.hpp>
 
 #include <semantic_scene_forests/scene_graph.hpp>
-#include <semantic_scene_forests_object_msgs/msg/managed_object.hpp>
 
 #include <rclcpp/rclcpp.hpp>
 
@@ -59,7 +58,8 @@ using TaskResult  = std::expected<void, std::string>;
 // Executed once per managed object in Phase 1. The history vector is
 // pre-populated with the system message and the object-setup user message
 // (with image crops). Tasks append their own user prompt, call
-// client.chat({.messages = history}), and update the scene graph.
+// client.chat({.messages = history}) with no graph lock held, and write each result to the
+// shared graph through its atomic methods (addConceptEdge).
 // ---------------------------------------------------------------------------
 
 class SEMANTIC_SCENE_FORESTS_GENERATION_PUBLIC IObjectTask
@@ -70,17 +70,18 @@ public:
 
   virtual void initialize(rclcpp::Node* node, const TemplateMap& templates) = 0;
 
-  virtual TaskResult execute(oai::OpenAIClient& client,
-                             std::vector<oai::Message>& history,
-                             int64_t object_id,
-                             const std::vector<cv::Mat>& crops,
-                             fzi::semantic_scene_forests::SceneGraph& graph) = 0;
+  virtual TaskResult
+  execute(oai::OpenAIClient& client,
+          std::vector<oai::Message>& history,
+          int64_t object_id,
+          const std::vector<cv::Mat>& crops,
+          const std::shared_ptr<fzi::semantic_scene_forests::SceneGraph>& graph) = 0;
 };
 
 // ---------------------------------------------------------------------------
 // IGraphTask — Phase 2 plugin base class
 //
-// Executed once per Phase 2 run on the full scene graph. The history vector
+// Executed once per Phase 2 run on the shared scene graph. The history vector
 // is pre-populated with the system message and the meta-setup user message.
 // ---------------------------------------------------------------------------
 
@@ -92,13 +93,13 @@ public:
 
   virtual void initialize(rclcpp::Node* node, const TemplateMap& templates) = 0;
 
-  // NOTE: `current_graph` holds the input concepts (database ids, no edges): only concepts not yet
-  // processed on automatic runs, all visible concepts on manual runs. It is always a separate
-  // graph from `graph`, the scratch copy that tasks mutate.
-  virtual TaskResult execute(oai::OpenAIClient& client,
-                             std::vector<oai::Message>& history,
-                             const fzi::semantic_scene_forests::SceneGraph& current_graph,
-                             fzi::semantic_scene_forests::SceneGraph& graph) = 0;
+  // NOTE: `concepts` are the input concepts of this run, freshly read for this task: only concepts
+  // not yet processed on automatic runs, all concepts on manual runs.
+  virtual TaskResult
+  execute(oai::OpenAIClient& client,
+          std::vector<oai::Message>& history,
+          const std::vector<fzi::semantic_scene_forests::ConceptNode>& concepts,
+          const std::shared_ptr<fzi::semantic_scene_forests::SceneGraph>& graph) = 0;
 };
 
 } // namespace semantic_scene_forests_generation

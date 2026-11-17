@@ -45,14 +45,13 @@
 
 #include "generation_common.hpp"
 #include "semantic_scene_forests_generation/task_interface.hpp"
-#include "semantic_scene_forests_manager/database.hpp"
 #include "semantic_scene_forests_manager/worker_interface.hpp"
 
 namespace semantic_scene_forests_generation {
 
 //! Runs the IGraphTask plugins every `<name>.interval_seconds` on the concepts it has not
-//! processed yet and commits the results to the database as `<name>`. The `generate_concepts`
-//! action runs them on all visible concepts.
+//! processed yet and writes the results to the shared graph, marking the input as processed by
+//! `<name>`. The `generate_concepts` action runs them on all concepts.
 class ConceptGenerationWorker final : public semantic_scene_forests_manager::IWorker
 {
 public:
@@ -64,7 +63,7 @@ public:
   ConceptGenerationWorker& operator=(ConceptGenerationWorker&&)      = delete;
 
   void initialize(rclcpp::Node& node,
-                  semantic_scene_forests_manager::Database& db,
+                  std::shared_ptr<fzi::semantic_scene_forests::SceneGraph> graph,
                   const std::string& name,
                   diagnostic_updater::Updater& diagnostics) override;
   void start() override;
@@ -79,16 +78,13 @@ private:
   };
 
   void runBackground(const std::stop_token& stop);
-  //! Runs the tasks on the unmarked concepts (all visible concepts if !only_unmarked), commits
-  //! and marks them. Throws on failure, leaving the concepts unmarked.
-  Outcome generate(bool only_unmarked, const std::function<bool()>& should_stop);
-  //! The concepts to process, with their database ids and no edges.
-  [[nodiscard]] fzi::semantic_scene_forests::SceneGraph readInput(bool only_unmarked) const;
-  //! Commits the scratch edits and marks the input concepts and those the run created.
-  void commit(const fzi::semantic_scene_forests::SceneGraph& input,
-              const fzi::semantic_scene_forests::SceneGraph& after);
+  //! Runs the tasks on the unprocessed concepts (all concepts if !only_unprocessed), then marks
+  //! them. Throws on failure, leaving the concepts unprocessed.
+  Outcome generate(bool only_unprocessed, const std::function<bool()>& should_stop);
+  //! The ids of the concepts to process.
+  [[nodiscard]] std::vector<int64_t> planInput(bool only_unprocessed) const;
 
-  semantic_scene_forests_manager::Database* m_db{nullptr};
+  std::shared_ptr<fzi::semantic_scene_forests::SceneGraph> m_graph;
   std::string m_name;
   rclcpp::Logger m_logger{rclcpp::get_logger("concept_generation")};
   std::chrono::seconds m_interval{120};
