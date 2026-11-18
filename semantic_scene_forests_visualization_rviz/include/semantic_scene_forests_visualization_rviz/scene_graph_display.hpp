@@ -154,7 +154,8 @@ private:
   rviz_common::properties::RosTopicProperty* m_scene_graph_topic_property{nullptr};
   // Fixed, not a property: scene_graph is latched and published only on change, so a volatile
   // subscription (e.g. restored from an old .rviz) would miss an unchanged graph entirely.
-  rclcpp::QoS m_scene_graph_qos_profile{rclcpp::QoS(1).reliable().transient_local()};
+  // NOLINTNEXTLINE(readability-identifier-naming): deliberately const; naming rule clashes
+  const rclcpp::QoS m_scene_graph_qos_profile{rclcpp::QoS(1).reliable().transient_local()};
 
   // Worker action clients
   rclcpp_action::Client<RunWorker>::SharedPtr m_attribute_objects_client;

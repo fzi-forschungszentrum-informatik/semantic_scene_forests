@@ -27,7 +27,8 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 # Remove an object node and its edges. The tracker suppresses the live track: camera
-# sightings do not recreate it, an explicit add_observations sighting revives it (same id).
+# sightings do not recreate it; only an explicit add_observations sighting, or a merge with a
+# live track, revives it under the same id.
 int64 object_id
 ---
 bool success

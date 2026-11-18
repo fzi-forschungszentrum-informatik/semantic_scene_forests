@@ -331,7 +331,7 @@ void TrackerWorker::onAddObservations(const std::shared_ptr<rmw_request_id_t>& h
         error = std::string("no transform to ") + m_world_frame + ": " + ex.what();
       }
     }
-    if (!error.empty() || !box)
+    if (!error.empty())
     {
       RCLCPP_WARN(m_logger,
                   "add_observations: rejecting '%s': %s",
@@ -353,6 +353,7 @@ void TrackerWorker::onAddObservations(const std::shared_ptr<rmw_request_id_t>& h
         RCLCPP_WARN(m_logger, "add_observations: skipping a crop that cannot be encoded");
       }
     }
+    // NOLINTBEGIN(bugprone-unchecked-optional-access): box is set whenever error is empty
     const auto& center = box->center.position;
     pending.tracklets.push_back(Tracklet{.camera     = MANUAL_SOURCE,
                                          .local_id   = m_manual_next_id,
@@ -362,6 +363,7 @@ void TrackerWorker::onAddObservations(const std::shared_ptr<rmw_request_id_t>& h
                                          .class_name = observation.class_name,
                                          .score      = 1.0,
                                          .crops      = std::move(crops)});
+    // NOLINTEND(bugprone-unchecked-optional-access)
     pending.local_ids.emplace_back(m_manual_next_id++);
     pending.errors.emplace_back();
   }

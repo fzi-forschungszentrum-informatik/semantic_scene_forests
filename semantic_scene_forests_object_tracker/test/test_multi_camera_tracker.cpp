@@ -38,9 +38,11 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <cv_bridge/cv_bridge.hpp>
@@ -75,6 +77,17 @@ using semantic_scene_forests_object_tracker::TrackerWorker;
 using ObjectCandidate = semantic_scene_forests_object_msgs::msg::ObjectCandidate;
 using AddObservations = semantic_scene_forests_object_msgs::srv::AddObservations;
 using AddObject       = semantic_scene_forests_object_msgs::srv::AddObject;
+
+//! The object node with this id; throws (failing the test) if the graph has none.
+ObjectNode objectNode(const SceneGraph& graph, int64_t id)
+{
+  const auto NODE = graph.findNode(id);
+  if (!NODE || !std::holds_alternative<ObjectNode>(*NODE))
+  {
+    throw std::runtime_error("object node " + std::to_string(id) + " missing");
+  }
+  return std::get<ObjectNode>(*NODE);
+}
 
 rclcpp::NodeOptions twoCameraOptions()
 {
@@ -347,11 +360,22 @@ public:
       5s);
   }
 
-  // NOLINTBEGIN(bugprone-unchecked-optional-access): guarded by ASSERT_TRUE, which the check does
-  // not model
-  CameraPublisher& front() { return *m_front; }
-  CameraPublisher& rear() { return *m_rear; }
-  // NOLINTEND(bugprone-unchecked-optional-access)
+  CameraPublisher& front()
+  {
+    if (!m_front)
+    {
+      throw std::runtime_error("front camera not configured");
+    }
+    return *m_front;
+  }
+  CameraPublisher& rear()
+  {
+    if (!m_rear)
+    {
+      throw std::runtime_error("rear camera not configured in this harness");
+    }
+    return *m_rear;
+  }
 
   bool setConfirmationThreshold(int64_t threshold)
   {
@@ -1112,8 +1136,8 @@ TEST(MultiCameraTracker, AddObjectTrackIsUpdatedMergedAndRetiredLikeAnyOther)
   ASSERT_TRUE(ADDED->success) << ADDED->message;
   const int64_t ID = ADDED->object_id;
   ASSERT_TRUE(TrackerHarness::waitUntil([&]() { return harness.graph().hasNode(ID); }, 2s));
-  const auto NODE = std::get<ObjectNode>(*harness.graph().findNode(ID));
   // NOLINTEND(bugprone-unchecked-optional-access)
+  const auto NODE = objectNode(harness.graph(), ID);
   EXPECT_EQ(NODE.source, ObjectNode::SOURCE_MANUAL);
   EXPECT_EQ(NODE.class_name, "cup");
   ASSERT_EQ(NODE.crops.size(), 1U); // JPEG-encoded on ingress
@@ -1127,10 +1151,7 @@ TEST(MultiCameraTracker, AddObjectTrackIsUpdatedMergedAndRetiredLikeAnyOther)
       return NODES.size() == 1U && NODES.front().id == ID && NODES.front().last_seen.sec >= 12;
     },
     2s));
-  // NOLINTBEGIN(bugprone-unchecked-optional-access): guarded by ASSERT_TRUE, which the check does
-  // not model
-  EXPECT_EQ(std::get<ObjectNode>(*harness.graph().findNode(ID)).source, ObjectNode::SOURCE_MANUAL);
-  // NOLINTEND(bugprone-unchecked-optional-access)
+  EXPECT_EQ(objectNode(harness.graph(), ID).source, ObjectNode::SOURCE_MANUAL);
 
   // Retired: a differently sized track much later takes over its pose.
   publishBatches(harness.rear(), 200.0, 3, "2", 6.0, 40, 10.0);
