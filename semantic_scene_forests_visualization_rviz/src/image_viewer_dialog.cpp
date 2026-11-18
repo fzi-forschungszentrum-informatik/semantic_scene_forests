@@ -30,6 +30,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <limits>
 
@@ -42,6 +43,7 @@
 #include <QScrollArea>
 #include <QVBoxLayout>
 #include <QtGlobal>
+#include <utility>
 
 namespace semantic_scene_forests_visualization_rviz {
 
@@ -77,7 +79,7 @@ ImageViewerDialog::ImageViewerDialog(int64_t object_id,
   static constexpr int K_COLUMNS    = 3;
   static constexpr int K_THUMB_SIZE = 200;
 
-  for (int i = 0; i < static_cast<int>(images.size()); ++i)
+  for (int i = 0; std::cmp_less(i, images.size()); ++i)
   {
     auto* cell        = new QWidget();
     auto* cell_layout = new QVBoxLayout(cell);
@@ -115,6 +117,7 @@ ImageViewerDialog::ImageViewerDialog(int64_t object_id,
   outer->addLayout(btn_row);
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): refactor out of scope
 QPixmap ImageViewerDialog::imageToPixmap(const sensor_msgs::msg::Image& img)
 {
   if (img.data.empty() || img.width == 0 || img.height == 0)
@@ -170,7 +173,8 @@ QPixmap ImageViewerDialog::imageToPixmap(const sensor_msgs::msg::Image& img)
 
     for (int row = 0; row < H; ++row)
     {
-      const auto* row_ptr = reinterpret_cast<const float*>(img.data.data() + row * STEP);
+      const auto* row_ptr =
+        reinterpret_cast<const float*>(img.data.data() + (static_cast<ptrdiff_t>(row * STEP)));
       for (int col = 0; col < W; ++col)
       {
         const float V = row_ptr[col];
@@ -186,8 +190,9 @@ QPixmap ImageViewerDialog::imageToPixmap(const sensor_msgs::msg::Image& img)
     QImage qi(W, H, QImage::Format_Grayscale8);
     for (int row = 0; row < H; ++row)
     {
-      const auto* row_ptr = reinterpret_cast<const float*>(img.data.data() + row * STEP);
-      uint8_t* dst        = qi.scanLine(row);
+      const auto* row_ptr =
+        reinterpret_cast<const float*>(img.data.data() + (static_cast<ptrdiff_t>(row * STEP)));
+      uint8_t* dst = qi.scanLine(row);
       for (int col = 0; col < W; ++col)
       {
         const float V = row_ptr[col];

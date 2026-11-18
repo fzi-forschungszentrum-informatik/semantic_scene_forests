@@ -26,8 +26,8 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 
-#ifndef SEMANTIC_SCENE_FORESTS_VISUALIZATION_RVIZ__SCENE_GRAPH_DISPLAY_HPP_
-#define SEMANTIC_SCENE_FORESTS_VISUALIZATION_RVIZ__SCENE_GRAPH_DISPLAY_HPP_
+#ifndef SEMANTIC_SCENE_FORESTS_VISUALIZATION_RVIZ_SCENE_GRAPH_DISPLAY_HPP_
+#define SEMANTIC_SCENE_FORESTS_VISUALIZATION_RVIZ_SCENE_GRAPH_DISPLAY_HPP_
 
 #include <chrono>
 #include <map>
@@ -112,10 +112,11 @@ private:
   void resetActionState();
   QWidget* createControlWidget();
 
-  void onSceneGraph(semantic_scene_forests_msgs::msg::SceneGraph::ConstSharedPtr msg);
+  void onSceneGraph(const semantic_scene_forests_msgs::msg::SceneGraph::ConstSharedPtr& msg);
   void requestObjectVisuals(int64_t object_id);
   void onObjectVisualsResponse(
-    rclcpp::Client<semantic_scene_forests_object_msgs::srv::GetObjectVisuals>::SharedFuture result);
+    const rclcpp::Client<semantic_scene_forests_object_msgs::srv::GetObjectVisuals>::SharedFuture&
+      result);
 
   // Scene nodes (raw pointers — owned by Ogre scene manager)
   Ogre::SceneNode* m_scene_graph_node{nullptr};
@@ -153,7 +154,7 @@ private:
   rviz_common::properties::RosTopicProperty* m_scene_graph_topic_property{nullptr};
   // Fixed, not a property: scene_graph is latched and published only on change, so a volatile
   // subscription (e.g. restored from an old .rviz) would miss an unchanged graph entirely.
-  const rclcpp::QoS m_scene_graph_qos_profile{rclcpp::QoS(1).reliable().transient_local()};
+  rclcpp::QoS m_scene_graph_qos_profile{rclcpp::QoS(1).reliable().transient_local()};
 
   // Worker action clients
   rclcpp_action::Client<RunWorker>::SharedPtr m_attribute_objects_client;
@@ -187,6 +188,7 @@ private:
   void sendAttributeObjectsGoal();
   void sendGenerateConceptsGoal();
 
+  // NOLINTNEXTLINE(readability-redundant-access-specifiers): Q_SLOTS section for moc
 private Q_SLOTS:
   void updateObjectColor();
   void updateLabels();
@@ -195,4 +197,4 @@ private Q_SLOTS:
 
 } // namespace semantic_scene_forests_visualization_rviz
 
-#endif // SEMANTIC_SCENE_FORESTS_VISUALIZATION_RVIZ__SCENE_GRAPH_DISPLAY_HPP_
+#endif // SEMANTIC_SCENE_FORESTS_VISUALIZATION_RVIZ_SCENE_GRAPH_DISPLAY_HPP_

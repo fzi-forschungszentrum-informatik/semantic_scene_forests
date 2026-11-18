@@ -38,6 +38,7 @@
 #include <QMetaObject>
 #include <QMouseEvent>
 #include <QVBoxLayout>
+#include <utility>
 
 #include <OgreEntity.h>
 #include <OgreSceneManager.h>
@@ -191,7 +192,9 @@ void SceneGraphDisplay::onInitialize()
   m_scene_graph_sub = ros_node->create_subscription<semantic_scene_forests_msgs::msg::SceneGraph>(
     m_scene_graph_topic_property->getTopicStd(),
     m_scene_graph_qos_profile,
-    std::bind(&SceneGraphDisplay::onSceneGraph, this, std::placeholders::_1));
+    [this](const semantic_scene_forests_msgs::msg::SceneGraph::ConstSharedPtr& msg) {
+      onSceneGraph(msg);
+    });
 
   // Create service client for requesting object visuals
   m_get_visuals_client =
@@ -257,6 +260,7 @@ void SceneGraphDisplay::clearVisuals()
   m_object_visuals.clear();
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): refactor out of scope
 void SceneGraphDisplay::updateObjectNodes(
   const std::vector<fzi::semantic_scene_forests::ObjectNode>& objects)
 {
@@ -396,7 +400,7 @@ void SceneGraphDisplay::updateObjectNodes(
     if (SHOW_LABELS)
     {
       Ogre::SceneNode* label_node = m_labels_node->createChildSceneNode();
-      const float Z_OFFSET        = static_cast<float>(sz.z) * SCALE / 2.0F + 0.15F;
+      const float Z_OFFSET        = (static_cast<float>(sz.z) * SCALE / 2.0F) + 0.15F;
       label_node->setPosition(WORLD_POS + Ogre::Vector3(0.0F, 0.0F, Z_OFFSET));
 
       auto* text = new rviz_rendering::MovableText(
@@ -405,7 +409,7 @@ void SceneGraphDisplay::updateObjectNodes(
                              rviz_rendering::MovableText::V_ABOVE);
       text->showOnTop(true);
       label_node->attachObject(text);
-      m_object_labels[obj.id] = {label_node, text};
+      m_object_labels[obj.id] = {.node = label_node, .text = text};
     }
   }
 
@@ -805,7 +809,9 @@ void SceneGraphDisplay::updateSceneGraphTopic()
     m_scene_graph_sub = ros_node->create_subscription<semantic_scene_forests_msgs::msg::SceneGraph>(
       topic_name_str,
       m_scene_graph_qos_profile,
-      std::bind(&SceneGraphDisplay::onSceneGraph, this, std::placeholders::_1));
+      [this](const semantic_scene_forests_msgs::msg::SceneGraph::ConstSharedPtr& msg) {
+        onSceneGraph(msg);
+      });
 
     RCLCPP_INFO(
       ros_node->get_logger(), "Subscribed to scene graph topic: %s", topic_name_str.c_str());
@@ -823,7 +829,7 @@ void SceneGraphDisplay::updateSceneGraphTopic()
 }
 
 void SceneGraphDisplay::onSceneGraph(
-  semantic_scene_forests_msgs::msg::SceneGraph::ConstSharedPtr msg)
+  const semantic_scene_forests_msgs::msg::SceneGraph::ConstSharedPtr& msg)
 {
   if (!context_->getRosNodeAbstraction().lock())
   {
@@ -839,34 +845,34 @@ void SceneGraphDisplay::onSceneGraph(
     return;
   }
 
-  const size_t obj_count     = msg->object_nodes.size();
-  const size_t concept_count = msg->concept_nodes.size();
-  const size_t edge_count    = msg->edges.size();
+  const size_t OBJ_COUNT     = msg->object_nodes.size();
+  const size_t CONCEPT_COUNT = msg->concept_nodes.size();
+  const size_t EDGE_COUNT    = msg->edges.size();
 
   QMetaObject::invokeMethod(
     this,
-    [this, objects = (*graph)->getObjectNodes(), obj_count, concept_count, edge_count]() {
+    [this, objects = (*graph)->getObjectNodes(), OBJ_COUNT, CONCEPT_COUNT, EDGE_COUNT]() {
       m_last_objects = objects;
       clearVisuals();
       updateObjectNodes(m_last_objects);
       if (m_node_count_label)
       {
-        m_node_count_label->setText(QString("Objects: %1").arg(static_cast<int>(obj_count)));
+        m_node_count_label->setText(QString("Objects: %1").arg(static_cast<int>(OBJ_COUNT)));
       }
       if (m_scene_graph_info_label)
       {
         m_scene_graph_info_label->setText(QString("Graph: %1 obj, %2 concept, %3 edges")
-                                            .arg(static_cast<int>(obj_count))
-                                            .arg(static_cast<int>(concept_count))
-                                            .arg(static_cast<int>(edge_count)));
+                                            .arg(static_cast<int>(OBJ_COUNT))
+                                            .arg(static_cast<int>(CONCEPT_COUNT))
+                                            .arg(static_cast<int>(EDGE_COUNT)));
       }
     },
     Qt::QueuedConnection);
 
   setStatusStd(rviz_common::properties::StatusProperty::Ok,
                "Scene Graph",
-               "Nodes: " + std::to_string(obj_count + concept_count) +
-                 ", Edges: " + std::to_string(edge_count));
+               "Nodes: " + std::to_string(OBJ_COUNT + CONCEPT_COUNT) +
+                 ", Edges: " + std::to_string(EDGE_COUNT));
 }
 
 void SceneGraphDisplay::requestObjectVisuals(int64_t object_id)
@@ -888,14 +894,17 @@ void SceneGraphDisplay::requestObjectVisuals(int64_t object_id)
     std::make_shared<semantic_scene_forests_object_msgs::srv::GetObjectVisuals::Request>();
   request->object_ids.push_back(object_id);
 
+  // NOLINTBEGIN(performance-unnecessary-value-param): rclcpp deduces the callback from SharedFuture
   auto result = m_get_visuals_client->async_send_request(
     request,
     [this](rclcpp::Client<semantic_scene_forests_object_msgs::srv::GetObjectVisuals>::SharedFuture
              future) { onObjectVisualsResponse(future); });
+  // NOLINTEND(performance-unnecessary-value-param)
 }
 
 void SceneGraphDisplay::onObjectVisualsResponse(
-  rclcpp::Client<semantic_scene_forests_object_msgs::srv::GetObjectVisuals>::SharedFuture result)
+  const rclcpp::Client<semantic_scene_forests_object_msgs::srv::GetObjectVisuals>::SharedFuture&
+    result)
 {
   auto ros_node_abstraction = context_->getRosNodeAbstraction().lock();
   if (!ros_node_abstraction)
@@ -906,7 +915,7 @@ void SceneGraphDisplay::onObjectVisualsResponse(
 
   try
   {
-    auto response = result.get();
+    const auto& response = result.get();
     if (response->visuals.empty())
     {
       RCLCPP_WARN(ros_node->get_logger(), "No visuals received");
@@ -1012,11 +1021,11 @@ bool SceneGraphDisplay::handleContextMenu(const QPoint& pos)
     return false;
   }
 
-  const int64_t object_id = sg_handler->getObjectId();
+  const int64_t OBJECT_ID = sg_handler->getObjectId();
   ObjectVisual visual;
   {
     const std::scoped_lock LOCK{m_object_visuals_mutex};
-    auto it = m_object_visuals.find(object_id);
+    auto it = m_object_visuals.find(OBJECT_ID);
     if (it == m_object_visuals.end())
     {
       return false;
@@ -1031,22 +1040,22 @@ bool SceneGraphDisplay::handleContextMenu(const QPoint& pos)
   {
     QAction* action =
       menu->addAction(QString("Show Images (%1)").arg(static_cast<int>(visual.images.size())));
-    connect(action, &QAction::triggered, [this, object_id, visual]() {
-      showImageDialog(object_id, visual);
+    connect(action, &QAction::triggered, [this, OBJECT_ID, visual]() {
+      showImageDialog(OBJECT_ID, visual);
     });
   }
   else
   {
     QAction* action = menu->addAction("Load Images");
     action->setToolTip("Request object images from Object Manager");
-    connect(action, &QAction::triggered, [this, object_id]() { requestObjectVisuals(object_id); });
+    connect(action, &QAction::triggered, [this, OBJECT_ID]() { requestObjectVisuals(OBJECT_ID); });
   }
 
   menu->addSeparator();
 
-  QAction* delete_action = menu->addAction(QString("Delete Object %1").arg(object_id));
+  QAction* delete_action = menu->addAction(QString("Delete Object %1").arg(OBJECT_ID));
   delete_action->setToolTip("Remove this object from the scene graph");
-  connect(delete_action, &QAction::triggered, [this, object_id]() { deleteObject(object_id); });
+  connect(delete_action, &QAction::triggered, [this, OBJECT_ID]() { deleteObject(OBJECT_ID); });
 
   m_render_panel->showContextMenu(menu);
   return true;
@@ -1073,27 +1082,28 @@ void SceneGraphDisplay::deleteObject(int64_t object_id)
   auto req = std::make_shared<semantic_scene_forests_object_msgs::srv::DeleteObject::Request>();
   req->object_id = object_id;
 
+  // NOLINTBEGIN(performance-unnecessary-value-param): rclcpp deduces the callback from SharedFuture
   m_delete_object_client->async_send_request(
     req,
     [this, object_id](
       rclcpp::Client<semantic_scene_forests_object_msgs::srv::DeleteObject>::SharedFuture future) {
       try
       {
-        auto resp                 = future.get();
-        const bool success        = resp->success;
-        const std::string message = resp->message;
+        const auto& resp          = future.get();
+        const bool SUCCESS        = resp->success;
+        const std::string MESSAGE = resp->message;
         QMetaObject::invokeMethod(
           this,
-          [this, object_id, success, message]() {
-            if (success)
+          [this, object_id, SUCCESS, MESSAGE]() {
+            if (SUCCESS)
             {
               setStatusStd(rviz_common::properties::StatusProperty::Ok,
                            "Delete",
-                           "Deleted object " + std::to_string(object_id) + ": " + message);
+                           "Deleted object " + std::to_string(object_id) + ": " + MESSAGE);
             }
             else
             {
-              setStatusStd(rviz_common::properties::StatusProperty::Warn, "Delete", message);
+              setStatusStd(rviz_common::properties::StatusProperty::Warn, "Delete", MESSAGE);
             }
           },
           Qt::QueuedConnection);
@@ -1108,6 +1118,7 @@ void SceneGraphDisplay::deleteObject(int64_t object_id)
         }
       }
     });
+  // NOLINTEND(performance-unnecessary-value-param)
 }
 
 void SceneGraphDisplay::showImageDialog(int64_t id, const ObjectVisual& visual)
