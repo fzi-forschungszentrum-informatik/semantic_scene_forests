@@ -95,16 +95,16 @@ signals:
 private slots:
   void onSceneGraphReceived();
   void onVisualsReceived(qint64 object_id);
-  void onActionFeedback(unsigned current, unsigned total, QString status);
-  void onActionFinished(bool success, QString message);
+  void onActionFeedback(unsigned current, unsigned total, const QString& status);
+  void onActionFinished(bool success, const QString& message);
   void onNodeSelected(qint64 node_id, bool is_object);
   void onSelectionCleared();
   void onViewModeChanged(ViewMode mode);
   void onRefreshRequested();
-  void onQueryRequested(int kind, QString text);
+  void onQueryRequested(int kind, const QString& text);
   void onQueryCancel();
-  void onQueryInspected(QVector<qint64> ids, QString status);
-  void onQueryFinished(bool success, QString message, qint64 object_id);
+  void onQueryInspected(const QVector<qint64>& ids, const QString& status);
+  void onQueryFinished(bool success, const QString& message, qint64 object_id);
   void onShowInspectedToggled(bool enabled);
 
   // NOLINTNEXTLINE(readability-redundant-access-specifiers) — Qt slots section.
@@ -152,7 +152,7 @@ private:
   // Whether the in-flight query is a FindObject (carries an answer node to focus). UI-thread only.
   bool m_active_query_is_find{false};
 
-  void onSceneGraphMsg(semantic_scene_forests_msgs::msg::SceneGraph::ConstSharedPtr msg);
+  void onSceneGraphMsg(const semantic_scene_forests_msgs::msg::SceneGraph::ConstSharedPtr& msg);
   void sendActionGoal(const rclcpp_action::Client<RunWorker>::SharedPtr& client);
   void requestVisuals(int64_t object_id);
   void syncDisplayedGraphToLatest();

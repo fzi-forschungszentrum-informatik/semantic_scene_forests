@@ -114,21 +114,21 @@ void SidePanel::buildLayout()
   query_layout->addWidget(m_show_inspected);
   outer->addWidget(query_box);
 
-  const auto emit_query = [this]() {
+  const auto EMIT_QUERY = [this]() {
     if (m_query_running)
     {
       emit queryCancelRequested();
       return;
     }
-    const QString text = m_query_input->text().trimmed();
-    if (text.isEmpty())
+    const QString TEXT = m_query_input->text().trimmed();
+    if (TEXT.isEmpty())
     {
       return;
     }
-    emit queryRequested(m_query_kind->currentIndex(), text);
+    emit queryRequested(m_query_kind->currentIndex(), TEXT);
   };
-  connect(m_query_button, &QPushButton::clicked, this, emit_query);
-  connect(m_query_input, &QLineEdit::returnPressed, this, emit_query);
+  connect(m_query_button, &QPushButton::clicked, this, EMIT_QUERY);
+  connect(m_query_input, &QLineEdit::returnPressed, this, EMIT_QUERY);
   connect(m_show_inspected, &QCheckBox::toggled, this, &SidePanel::showInspectedToggled);
 
   auto* action_box = new QFrame{this};
@@ -197,7 +197,7 @@ void SidePanel::setQueryStatus(const QString& text)
 
 void SidePanel::setInspectedFilterAvailable(bool available)
 {
-  const QSignalBlocker block{m_show_inspected};
+  const QSignalBlocker BLOCK{m_show_inspected};
   m_show_inspected->setEnabled(available);
   m_show_inspected->setChecked(available);
 }
@@ -216,6 +216,7 @@ void SidePanel::setViewMode(ViewMode mode)
   }
 }
 
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters): fixed parameter order
 void SidePanel::setActionProgress(unsigned current, unsigned total, const QString& status)
 {
   m_progress_bar->setVisible(true);
