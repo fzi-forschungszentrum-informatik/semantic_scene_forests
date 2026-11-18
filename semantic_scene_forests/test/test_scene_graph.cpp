@@ -586,13 +586,14 @@ TEST(SceneGraphTest, AddConceptEdgeRemovesOnlyTheConceptItCreated)
   ASSERT_TRUE(RED.has_value());
   EXPECT_TRUE(RED->created);
 
-  // Duplicate edge and cycle: the concept existed before, so it stays.
-  const auto DUPLICATE = graph.addConceptEdge(CUP, "has_color", "red");
+  // An existing label is an error and changes nothing; findConcept retrieves it.
+  const auto DUPLICATE = graph.addConceptEdge(CUP, "has_color", " red ");
   ASSERT_FALSE(DUPLICATE.has_value());
-  EXPECT_EQ(DUPLICATE.error().kind, SceneGraphErrorKind::EDGE_ALREADY_EXISTS);
-  const auto SELF_LOOP = graph.addConceptEdge(RED->id, "is_type_of", "red");
-  ASSERT_FALSE(SELF_LOOP.has_value());
-  EXPECT_EQ(SELF_LOOP.error().kind, SceneGraphErrorKind::CYCLE);
+  EXPECT_EQ(DUPLICATE.error().kind, SceneGraphErrorKind::NODE_ALREADY_EXISTS);
+  EXPECT_EQ(graph.findConcept(" red "), RED->id);
+  EXPECT_FALSE(graph.findConcept("blue").has_value());
+  EXPECT_FALSE(graph.findConcept("  ").has_value());
+  EXPECT_EQ(graph.getConceptNodes().size(), 1U);
 
   EXPECT_TRUE(graph.hasNode(RED->id));
   EXPECT_EQ(graph.getEdges().size(), 1U);

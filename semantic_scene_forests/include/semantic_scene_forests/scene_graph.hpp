@@ -94,7 +94,7 @@ public:
   // m_id_map pointing into the source. Use clone() for an independent copy.
   SceneGraph(const SceneGraph&)            = delete;
   SceneGraph& operator=(const SceneGraph&) = delete;
-  //! Both lock both graphs.
+  //! Move construction and move assignment lock both graphs.
   SEMANTIC_SCENE_FORESTS_PUBLIC SceneGraph(SceneGraph&& other) noexcept;
   SEMANTIC_SCENE_FORESTS_PUBLIC SceneGraph& operator=(SceneGraph&& other) noexcept;
 
@@ -139,8 +139,15 @@ public:
   [[nodiscard]] SEMANTIC_SCENE_FORESTS_PUBLIC std::expected<ConceptLookup, SceneGraphError>
   findOrAddConcept(const std::string& label) noexcept;
 
-  //! findOrAddConcept(label), then the edge source_id --relation--> concept. If the edge is
-  //! rejected (cycle, duplicate, unknown source), a concept created by this call is removed.
+  //! Id of the concept with this (normalized) label, or nullopt if there is none or the label is
+  //! invalid. The lowest id wins when several concepts share a label.
+  [[nodiscard]] SEMANTIC_SCENE_FORESTS_PUBLIC std::optional<int64_t>
+  findConcept(const std::string& label) const noexcept;
+
+  //! Creates a new concept with this label and the edge source_id --relation--> concept. Fails
+  //! (NODE_ALREADY_EXISTS) without changing anything if a concept with the label exists; use
+  //! findConcept + addEdge for that. If the edge is rejected (unknown source), the new
+  //! concept is removed again.
   [[nodiscard]] SEMANTIC_SCENE_FORESTS_PUBLIC std::expected<ConceptLookup, SceneGraphError>
   addConceptEdge(int64_t source_id, const std::string& relation, const std::string& label) noexcept;
 
@@ -251,6 +258,7 @@ private:
   std::expected<void, SceneGraphError> addObjectUnlocked(ObjectNode node) noexcept;
   std::expected<int64_t, SceneGraphError> addConceptUnlocked(int64_t id,
                                                              const std::string& label) noexcept;
+  std::optional<int64_t> findConceptUnlocked(const std::string& clean_label) const noexcept;
   std::expected<ConceptLookup, SceneGraphError>
   findOrAddConceptUnlocked(const std::string& label) noexcept;
   std::expected<SceneGraphNode, SceneGraphError> removeNodeUnlocked(int64_t id) noexcept;

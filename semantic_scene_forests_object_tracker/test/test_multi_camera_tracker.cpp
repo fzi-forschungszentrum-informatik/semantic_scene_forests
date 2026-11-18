@@ -1022,6 +1022,25 @@ TEST(MultiCameraTracker, DeletedNodeIsNotRecreatedWhileItsTrackLives)
   EXPECT_TRUE(harness.graph().getObjectNodes().empty());
 }
 
+// An explicit sighting (add_observations) brings a deleted object back under the same id.
+TEST(MultiCameraTracker, ExplicitSightingRevivesDeletedObject)
+{
+  TrackerHarness harness;
+  ASSERT_TRUE(harness.ready());
+  publishBatches(harness.front(), 80.0, 3, "1", 4.0, 10);
+  ASSERT_TRUE(
+    TrackerHarness::waitUntil([&]() { return harness.graph().getObjectNodes().size() == 1U; }, 2s));
+  const int64_t ID = harness.graph().getObjectNodes().front().id;
+  ASSERT_TRUE(harness.graph().removeNode(ID));
+  publishBatches(harness.front(), 81.0, 3, "1", 4.0, 11); // camera sightings: stays hidden
+  std::this_thread::sleep_for(200ms);
+  ASSERT_TRUE(harness.graph().getObjectNodes().empty());
+  const auto RESPONSE = harness.addObservations({observation("cup", "map", 5.0, 1.0)});
+  ASSERT_TRUE(RESPONSE && RESPONSE->success) << (RESPONSE ? RESPONSE->message : "no response");
+  EXPECT_EQ(RESPONSE->object_ids.front(), ID);
+  ASSERT_TRUE(TrackerHarness::waitUntil([&]() { return harness.graph().hasNode(ID); }, 2s));
+}
+
 // D3: retire. A stale track whose pose a differently sized track now occupies is replaced.
 TEST(MultiCameraTracker, RetiredTrackLeavesTheGraph)
 {

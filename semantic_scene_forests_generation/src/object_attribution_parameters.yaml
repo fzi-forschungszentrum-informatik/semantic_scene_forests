@@ -67,6 +67,6 @@ object_attribution:
   poll_interval_seconds:
     type: double
     default_value: 1.0
-    description: "Period of the query for visible objects this worker has not described yet."
+    description: "Period of the query for objects this worker has not described yet."
     validation:
       gt<>: [0.0]

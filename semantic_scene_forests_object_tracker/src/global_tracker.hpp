@@ -111,6 +111,8 @@ public:
   std::optional<uint64_t> linkedTrack(const std::string& camera, uint64_t local_id) const;
   // IDs of the tracks created in the last cycle, in creation order.
   const std::vector<uint64_t>& createdLastCycle() const { return m_created; }
+  // {merged-away id, surviving id} of the merges in the last cycle, in order.
+  const std::vector<TrackPair>& mergedLastCycle() const { return m_merged; }
   Stats stats(const object_tracker::Params& params) const;
   // Labels the arbiter judged not to be physical objects; only grows.
   const std::set<std::string>& rejectedLabels() const { return m_rejected_labels; }
@@ -150,6 +152,7 @@ private:
   std::set<LinkKey> m_rejected_links;      // camera tracks of rejected tracks, ignored while alive
   std::optional<rclcpp::Time> m_latest;    // latest observation time across all cameras
   std::vector<uint64_t> m_created;         // tracks created in the last cycle
+  std::vector<TrackPair> m_merged;         // {removed, survivor} merges in the last cycle
   size_t m_decisions{0};
   size_t m_merges{0};
   size_t m_replacements{0};

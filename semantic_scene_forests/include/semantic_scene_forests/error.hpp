@@ -83,6 +83,11 @@ struct SceneGraphError
     return {.kind    = SceneGraphErrorKind::EDGE_ALREADY_EXISTS,
             .message = fmt::format("Edge from {} to {} already exists!", from, to)};
   }
+  static SceneGraphError conceptAlreadyExists(int64_t id, std::string_view label)
+  {
+    return {.kind    = SceneGraphErrorKind::NODE_ALREADY_EXISTS,
+            .message = fmt::format("Concept '{}' already exists with id {}", label, id)};
+  }
   static SceneGraphError cycle(int64_t from, int64_t to)
   {
     return {.kind    = SceneGraphErrorKind::CYCLE,

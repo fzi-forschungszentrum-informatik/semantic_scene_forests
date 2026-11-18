@@ -36,7 +36,7 @@ scene_graph_manager:
   publish_max_rate_hz:
     type: double
     default_value: 2.0
-    description: "Rate at which scene_graph is published."
+    description: "The full scene_graph is published every 1/publish_max_rate_hz seconds, whether or not it changed."
     validation:
       gt<>: [0.0]
   workers:

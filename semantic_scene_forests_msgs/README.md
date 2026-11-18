@@ -18,7 +18,9 @@ ROS 2 interface package for scene graph data and worker actions.
 
 ### Services
 
-- `srv/AddConcept.srv`: find or create a concept and connect it to `source_id` with `relation`
+- `srv/AddConcept.srv`: create a new concept and connect it to `source_id` with `relation`; fails if
+  a concept with the label already exists
+- `srv/GetConcept.srv`: look up a concept id by label (`found=false` if there is none)
 - `srv/AddEdge.srv`: add a labeled edge between two existing nodes
 
 ### Actions

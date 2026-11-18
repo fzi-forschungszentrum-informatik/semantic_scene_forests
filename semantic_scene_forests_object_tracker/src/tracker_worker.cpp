@@ -509,6 +509,7 @@ void TrackerWorker::onGlobalCycle()
   {
     m_arbiter->enqueue(std::move(request));
   }
+  reviveDeletedObjects();
   writeToGraph();
   answerObservations(); // after the write, so answered objects are already in the graph
 
@@ -525,6 +526,37 @@ void TrackerWorker::onGlobalCycle()
   m_decision_errors     = STATS.decision_errors;
   m_last_decision_error = STATS.last_error;
   m_arbiter_pending     = m_arbiter ? m_arbiter->pending() : 0;
+}
+
+void TrackerWorker::reviveDeletedObjects()
+{
+  // Forgetting a track's record makes writeToGraph add its node again under the same id.
+  const auto REVIVE = [&](uint64_t id) {
+    if (m_written.contains(id) && !m_graph->hasNode(static_cast<int64_t>(id)))
+    {
+      m_written.erase(id);
+    }
+  };
+  // An explicit sighting brings back a deleted object; camera sightings never do.
+  for (const auto& pending : m_manual_pending)
+  {
+    for (const auto& local_id : pending.local_ids)
+    {
+      if (const auto ID = local_id ? m_global->linkedTrack(MANUAL_SOURCE, *local_id) : std::nullopt)
+      {
+        REVIVE(*ID);
+      }
+    }
+  }
+  // A visible (or add_object) track that merges into a deleted one must not vanish with it.
+  for (const auto& [removed, survivor] : m_global->mergedLastCycle())
+  {
+    const auto IT = m_written.find(removed);
+    if (m_manual_tracks.contains(removed) || (IT != m_written.end() && !IT->second.suppressed))
+    {
+      REVIVE(survivor);
+    }
+  }
 }
 
 void TrackerWorker::writeToGraph()

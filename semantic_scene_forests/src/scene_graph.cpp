@@ -262,6 +262,28 @@ SceneGraph::findOrAddConcept(const std::string& label) noexcept
   return findOrAddConceptUnlocked(label);
 }
 
+std::optional<int64_t> SceneGraph::findConcept(const std::string& label) const noexcept
+{
+  const std::shared_lock LOCK(m_mutex);
+  const auto clean = conceptLabel(label);
+  return clean ? findConceptUnlocked(*clean) : std::nullopt;
+}
+
+std::optional<int64_t>
+SceneGraph::findConceptUnlocked(const std::string& clean_label) const noexcept
+{
+  // The lowest id wins when several concepts share a label.
+  for (const auto& [id, vertex_desc] : m_id_map.left)
+  {
+    if (const auto* concept_node = std::get_if<ConceptNode>(&m_graph[vertex_desc]);
+        concept_node != nullptr && concept_node->concept_name == clean_label)
+    {
+      return id;
+    }
+  }
+  return std::nullopt;
+}
+
 std::expected<ConceptLookup, SceneGraphError>
 SceneGraph::findOrAddConceptUnlocked(const std::string& label) noexcept
 {
@@ -270,14 +292,9 @@ SceneGraph::findOrAddConceptUnlocked(const std::string& label) noexcept
   {
     return std::unexpected(clean.error());
   }
-  // The lowest id wins when several concepts share a label.
-  for (const auto& [id, vertex_desc] : m_id_map.left)
+  if (const auto EXISTING = findConceptUnlocked(*clean))
   {
-    if (const auto* concept_node = std::get_if<ConceptNode>(&m_graph[vertex_desc]);
-        concept_node != nullptr && concept_node->concept_name == *clean)
-    {
-      return ConceptLookup{.id = id, .created = false};
-    }
+    return ConceptLookup{.id = *EXISTING, .created = false};
   }
   auto added = addConceptUnlocked(allocateId(), *clean);
   if (!added)
@@ -291,21 +308,27 @@ std::expected<ConceptLookup, SceneGraphError> SceneGraph::addConceptEdge(
   const int64_t source_id, const std::string& relation, const std::string& label) noexcept
 {
   const std::unique_lock LOCK(m_mutex);
-  auto concept_node = findOrAddConceptUnlocked(label);
-  if (!concept_node)
+  const auto CLEAN = conceptLabel(label);
+  if (!CLEAN)
   {
-    return std::unexpected(concept_node.error());
+    return std::unexpected(CLEAN.error());
   }
-  if (auto edge = addEdgeUnlocked(source_id, concept_node->id, relation); !edge)
+  if (const auto EXISTING = findConceptUnlocked(*CLEAN))
   {
-    if (concept_node->created)
-    {
-      // A fresh concept has no edges, so removing it cannot fail or touch other data.
-      (void)removeNodeUnlocked(concept_node->id);
-    }
+    return std::unexpected(SceneGraphError::conceptAlreadyExists(*EXISTING, *CLEAN));
+  }
+  auto added = addConceptUnlocked(allocateId(), *CLEAN);
+  if (!added)
+  {
+    return std::unexpected(added.error());
+  }
+  if (auto edge = addEdgeUnlocked(source_id, *added, relation); !edge)
+  {
+    // A fresh concept has no edges, so removing it cannot fail or touch other data.
+    (void)removeNodeUnlocked(*added);
     return std::unexpected(edge.error());
   }
-  return *concept_node;
+  return ConceptLookup{.id = *added, .created = true};
 }
 
 std::expected<void, SceneGraphError> SceneGraph::markProcessed(const int64_t id,

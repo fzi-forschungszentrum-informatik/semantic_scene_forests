@@ -51,9 +51,9 @@
 
 namespace semantic_scene_forests_generation {
 
-//! Runs the IObjectTask plugins on each visible object it has not described yet, polling every
-//! `<name>.poll_interval_seconds`, and commits the results to the database as `<name>`. The
-//! `attribute_objects` action re-describes all visible objects.
+//! Runs the IObjectTask plugins on each object it has not described yet, polling every
+//! `<name>.poll_interval_seconds`, and writes the results to the shared scene graph as `<name>`.
+//! The `attribute_objects` action re-describes all objects.
 class ObjectAttributionWorker final : public semantic_scene_forests_manager::IWorker
 {
 public:
@@ -81,7 +81,7 @@ private:
   };
 
   void runBackground(const std::stop_token& stop);
-  //! Describes all visible objects; nullopt if stopped.
+  //! Describes all objects; nullopt if stopped.
   std::optional<std::string>
   executeGoal(const std::shared_ptr<WorkerThreads::GoalHandle>& goal_handle,
               const std::function<bool()>& should_stop);

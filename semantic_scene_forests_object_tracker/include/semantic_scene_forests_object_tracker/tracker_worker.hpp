@@ -156,6 +156,9 @@ private:
   // Answers the requests whose tracks are all written or removed.
   void answerObservations();
   void onGlobalCycle();
+  // Re-adds nodes of deleted objects that an explicit sighting or a merge with a live track
+  // brought back.
+  void reviveDeletedObjects();
   void writeToGraph();
   void onHealthDiagnostic(diagnostic_updater::DiagnosticStatusWrapper& stat);
 

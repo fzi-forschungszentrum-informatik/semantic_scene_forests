@@ -6,7 +6,7 @@ Tracking package that converts detections into persistent objects in the shared 
 
 - Synchronize 2D detections, 3D detections, and camera images.
 - Maintain object tracks over time.
-- Write every global track as an object node (box, `last_seen`, bounded JPEG crops) to the scene graph each global cycle. The tracker keeps all track state; class votes after creation never touch the graph, and a node removed by `delete_object` is not recreated while its track lives.
+- Write every global track as an object node (box, `last_seen`, bounded JPEG crops) to the scene graph each global cycle. The tracker keeps all track state; class votes after creation never touch the graph, and a node removed by `delete_object` is not recreated by camera sightings; an `add_observations` sighting of it (or a merge with a live track) brings it back under the same ID.
 
 ## Exported Worker Plugin
 
@@ -75,7 +75,7 @@ All cameras must use a common clock, compatible class labels, and valid TF from
 each detection frame to `world_frame`. The manager's `frame_id` must name the same frame (the
 combined launch sets both from `scene_graph_frame`). Crops retain their source image headers and
 are bounded by the shared `max_crops_per_object` limit. Crops are stored as JPEG (`crop_jpeg_quality`); the graph takes a newer crop only if it is at
-least `crop_replace_min_interval_seconds` newer than the node's newest one. Global track IDs are
+least `crop_replace_min_interval_seconds` newer than the node's newest one. Crops given at creation (`add_object`) are stored as-is up to the limit; later crops follow that interval rule. Global track IDs are
 scene graph node IDs; the graph lives in memory, so restarting the manager starts a new ID space.
 
 `add_object` starts a manual track that is confirmed at once (no confirmation count, no label

@@ -26,13 +26,12 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-# Connect a concept to an existing node. The concept is found by label or created, so a new
-# concept is never orphaned. If the edge is rejected, a concept created by this call is removed.
+# Create a new concept with this label and connect it to an existing node. Fails if a concept with
+# the label already exists (link to it with AddEdge). If the edge is rejected, no concept is left.
 int64 source_id
 string relation
 string label
 ---
 int64 concept_id    # valid only on success
-bool created        # true: a new concept was created
 bool success
 string message

@@ -129,25 +129,44 @@ inline TaskResult applyLabels(fzi::semantic_scene_forests::SceneGraph& graph,
   const auto link = [&](int64_t source,
                         const std::string& edge_relation,
                         const std::string& label) -> std::optional<int64_t> {
-    const auto added = graph.addConceptEdge(source, edge_relation, label);
-    if (added)
-    {
-      return added->id;
-    }
-    if (added.error().kind == SceneGraphErrorKind::EDGE_ALREADY_EXISTS)
-    {
-      // The edge exists, so the concept does too: this only looks its id up.
-      if (const auto existing = graph.findOrAddConcept(label); existing)
+    // Links `source` to an existing concept; an edge that is already there counts as success.
+    const auto attach = [&](int64_t concept_id) -> std::expected<int64_t, SceneGraphError> {
+      const auto edge = graph.addEdge(source, concept_id, edge_relation);
+      if (edge || edge.error().kind == SceneGraphErrorKind::EDGE_ALREADY_EXISTS)
       {
-        return existing->id;
+        return concept_id;
       }
+      return std::unexpected(edge.error());
+    };
+    std::expected<int64_t, SceneGraphError> result =
+      std::unexpected(SceneGraphError::graphEditingFailed("unreachable"));
+    if (const auto existing = graph.findConcept(label))
+    {
+      result = attach(*existing);
+    }
+    else if (const auto added = graph.addConceptEdge(source, edge_relation, label); added)
+    {
+      result = added->id;
+    }
+    else if (const auto raced = graph.findConcept(label);
+             raced && added.error().kind == SceneGraphErrorKind::NODE_ALREADY_EXISTS)
+    {
+      result = attach(*raced); // another writer created the concept meanwhile
+    }
+    else
+    {
+      result = std::unexpected(added.error());
+    }
+    if (result)
+    {
+      return *result;
     }
     RCLCPP_WARN(logger,
                 "Skipping '%s' --%s--> '%s': %s",
                 std::to_string(source).c_str(),
                 edge_relation.c_str(),
                 label.c_str(),
-                added.error().message.c_str());
+                result.error().message.c_str());
     return std::nullopt;
   };
 

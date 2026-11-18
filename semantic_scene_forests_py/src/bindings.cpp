@@ -359,6 +359,10 @@ PYBIND11_MODULE(_semantic_scene_forests, module)
       },
       py::arg("label"))
     .def(
+      "find_concept",
+      [](const SceneGraph& graph, const std::string& label) { return graph.findConcept(label); },
+      py::arg("label"))
+    .def(
       "add_concept_edge",
       [](SceneGraph& graph,
          int64_t source_id,

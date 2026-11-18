@@ -40,6 +40,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <semantic_scene_forests_msgs/srv/add_concept.hpp>
 #include <semantic_scene_forests_msgs/srv/add_edge.hpp>
+#include <semantic_scene_forests_msgs/srv/get_concept.hpp>
 #include <semantic_scene_forests_object_msgs/srv/delete_object.hpp>
 #include <semantic_scene_forests_object_msgs/srv/edit_object.hpp>
 #include <semantic_scene_forests_object_msgs/srv/get_object_visuals.hpp>
@@ -54,6 +55,7 @@ using fzi::semantic_scene_forests::ObjectNode;
 using fzi::semantic_scene_forests::SceneGraph;
 using semantic_scene_forests_manager::SceneGraphManagerNode;
 using AddConcept       = semantic_scene_forests_msgs::srv::AddConcept;
+using GetConcept       = semantic_scene_forests_msgs::srv::GetConcept;
 using AddEdge          = semantic_scene_forests_msgs::srv::AddEdge;
 using DeleteObject     = semantic_scene_forests_object_msgs::srv::DeleteObject;
 using EditObject       = semantic_scene_forests_object_msgs::srv::EditObject;
@@ -197,14 +199,20 @@ TEST_F(SceneGraphManagerNodeTest, AddConceptNewExistingInvalidAndMissingSource)
   AddConcept::Response response;
 
   ASSERT_TRUE(addConcept(CUP, "on", "kitchen table", response));
-  EXPECT_TRUE(response.created);
   const int64_t CONCEPT = response.concept_id;
   EXPECT_TRUE(m_node->graph()->hasEdge(CUP, CONCEPT, "on"));
 
-  // Same label from another source reuses the concept.
-  ASSERT_TRUE(addConcept(PLATE, "on", "kitchen table", response));
-  EXPECT_FALSE(response.created);
-  EXPECT_EQ(response.concept_id, CONCEPT);
+  // An existing label is an error: add_concept only creates; link with add_edge instead.
+  EXPECT_FALSE(addConcept(PLATE, "on", "kitchen table", response));
+  EXPECT_FALSE(m_node->graph()->hasEdge(PLATE, CONCEPT, "on"));
+  GetConcept::Request lookup;
+  lookup.label     = " kitchen table ";
+  const auto FOUND = call<GetConcept>("get_concept", lookup);
+  ASSERT_TRUE(FOUND->found);
+  EXPECT_EQ(FOUND->concept_id, CONCEPT);
+  lookup.label = "garage";
+  EXPECT_FALSE(call<GetConcept>("get_concept", lookup)->found);
+  EXPECT_TRUE(addEdge(PLATE, CONCEPT, "on"));
 
   const size_t CONCEPTS = m_node->graph()->getConceptNodes().size();
   EXPECT_FALSE(addConcept(CUP, "on", "   ", response));

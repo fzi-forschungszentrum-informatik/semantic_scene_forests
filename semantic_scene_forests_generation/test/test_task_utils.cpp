@@ -78,6 +78,22 @@ TEST(ApplyLabelsTest, InvalidLabelIsSkippedAndTheOthersAreWritten)
   EXPECT_EQ(graph.getConceptNodes().size(), 3U); // red, blue, color
 }
 
+TEST(ApplyLabelsTest, LinksToAnExistingConceptOfAnotherObject)
+{
+  SceneGraph graph;
+  const auto FIRST  = addObject(graph);
+  const auto SECOND = addObject(graph);
+  ASSERT_TRUE(applyLabels(
+    graph, rclcpp::get_logger("test"), FIRST, "has_color", "color", json::array({"red"})));
+  ASSERT_TRUE(applyLabels(
+    graph, rclcpp::get_logger("test"), SECOND, "has_color", "color", json::array({"red"})));
+  const auto RED = graph.findConcept("red");
+  ASSERT_TRUE(RED);
+  EXPECT_TRUE(graph.hasEdge(FIRST, *RED, "has_color"));
+  EXPECT_TRUE(graph.hasEdge(SECOND, *RED, "has_color"));
+  EXPECT_EQ(graph.getConceptNodes().size(), 2U); // red, color
+}
+
 TEST(ApplyLabelsTest, DependentStepIsSkippedWhenItsPredecessorFailed)
 {
   SceneGraph graph;

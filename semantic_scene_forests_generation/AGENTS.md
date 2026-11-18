@@ -79,7 +79,7 @@ Jinja2 templates live in `resources/{instance,meta}/*.j2`. At runtime they are l
 
 ## Update Execution
 
-- **Workers poll**: attribution describes visible objects it has not marked yet; concept
+- **Workers poll**: attribution describes objects it has not marked yet; concept
   generation processes unmarked concepts on its interval. Both run on owned `std::jthread`s.
 - **Goals are serialized**: each action accepts one goal at a time (reject-while-busy); a goal
   caught in teardown receives no terminal result.

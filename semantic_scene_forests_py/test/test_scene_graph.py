@@ -194,6 +194,12 @@ def test_concepts_and_worker_state() -> None:
     assert graph.find_or_add_concept("red") == (concept_id, False)
     edge_concept, edge_created = graph.add_concept_edge(object_id, "has_color", "blue")
     assert edge_created
+    assert graph.find_concept("blue") == edge_concept
+    assert graph.find_concept("green") is None
+    with pytest.raises(GraphError):
+        graph.add_concept_edge(
+            object_id, "has_color", "blue"
+        )  # existing label is an error
     assert graph.has_edge(object_id, edge_concept, "has_color")
 
     assert object_id in graph.unprocessed_by("describer")

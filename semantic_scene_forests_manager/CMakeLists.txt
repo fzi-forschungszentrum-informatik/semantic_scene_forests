@@ -49,8 +49,7 @@ find_package(fmt REQUIRED)
 find_package(semantic_scene_forests_msgs REQUIRED)
 find_package(semantic_scene_forests REQUIRED)
 
-# Header-only worker interface plus the shared dependencies. The name is kept for the tracker and
-# generation packages, which still link it.
+# Header-only worker interface plus the shared dependencies, linked by the tracker and generation.
 add_library(worker_interface INTERFACE)
 target_include_directories(worker_interface INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

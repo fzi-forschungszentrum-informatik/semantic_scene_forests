@@ -22,12 +22,12 @@ action on the manager node. Parameters live under the worker's configured name
 
 ## Update Behavior
 
-- `ObjectAttributionWorker` polls every `poll_interval_seconds` (default 1.0) for visible objects
+- `ObjectAttributionWorker` polls every `poll_interval_seconds` (default 1.0) for objects not yet described
   it has not described yet and describes them one at a time with its `tasks`, reading crops from
   the graph. A failed object is logged, marked, and only retried by a manual run.
 - `ConceptGenerationWorker` runs every `interval_seconds` (default 120) over concepts it has not
   processed yet, and skips the LLM if there are none. A failed run retries at the next tick.
-- `attribute_objects` reruns phase 1 over all visible objects; `generate_concepts` reruns phase 2
+- `attribute_objects` reruns phase 1 over all objects; `generate_concepts` reruns phase 2
   over all visible concepts. Each action is reject-while-busy, one goal at a time.
 - Tasks work on the live shared graph. Each concept+edge write is one atomic call, made after the
   LLM returns; no lock is held during an LLM call. A rejected or invalid write is logged and skipped.

@@ -45,6 +45,7 @@ using fzi::semantic_scene_forests::ObjectNode;
 using fzi::semantic_scene_forests::SceneGraph;
 using SceneGraphMsg    = semantic_scene_forests_msgs::msg::SceneGraph;
 using AddConcept       = semantic_scene_forests_msgs::srv::AddConcept;
+using GetConcept       = semantic_scene_forests_msgs::srv::GetConcept;
 using AddEdge          = semantic_scene_forests_msgs::srv::AddEdge;
 using ObjectVisuals    = semantic_scene_forests_object_msgs::msg::ObjectVisuals;
 using GetObjects       = semantic_scene_forests_object_msgs::srv::GetObjects;
@@ -178,8 +179,17 @@ SceneGraphManagerNode::SceneGraphManagerNode(const rclcpp::NodeOptions& options)
         return;
       }
       response->concept_id = RESULT->id;
-      response->created    = RESULT->created;
-      response->message    = RESULT->created ? "Concept added" : "Concept already exists";
+      response->message    = "Concept added";
+    }));
+
+  m_services.push_back(create_service<GetConcept>(
+    "get_concept",
+    [this](const GetConcept::Request::SharedPtr& request,
+           const GetConcept::Response::SharedPtr& response) {
+      const auto ID        = m_graph->findConcept(request->label);
+      response->found      = ID.has_value();
+      response->concept_id = ID.value_or(0);
+      response->message    = ID ? "Concept found" : "No concept with that label";
     }));
 
   m_services.push_back(create_service<AddEdge>(

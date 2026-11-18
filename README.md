@@ -31,7 +31,8 @@ operator-facing views.
 | `/edit_object` | `semantic_scene_forests_object_msgs/srv/EditObject` | Set an object's class name |
 | `/add_object` | `semantic_scene_forests_object_msgs/srv/AddObject` | Tracker: add a manual object as a confirmed track. Returns `object_id` at once; the node appears at the next tracker cycle (~200 ms at 5 Hz) |
 | `/add_observations` | `semantic_scene_forests_object_msgs/srv/AddObservations` | Register sightings from a non-camera source (tracker worker) |
-| `/add_concept` | `semantic_scene_forests_msgs/srv/AddConcept` | Find or create a concept and connect it to a source node |
+| `/add_concept` | `semantic_scene_forests_msgs/srv/AddConcept` | Create a new concept and connect it to a source node; fails if the label exists |
+| `/get_concept` | `semantic_scene_forests_msgs/srv/GetConcept` | Look up a concept id by label |
 | `/add_edge` | `semantic_scene_forests_msgs/srv/AddEdge` | Add a labeled edge between two existing nodes |
 | `/attribute_objects`, `/generate_concepts` | `semantic_scene_forests_msgs/action/RunWorker` | Manually rerun phase 1 or phase 2 |
 | `find_object` | `semantic_scene_forests_planning_msgs/action/FindObject` | Resolve an object from a natural-language description |
@@ -39,11 +40,12 @@ operator-facing views.
 
 ### Adding concepts with `add_concept`
 
-`/add_concept` accepts `source_id`, `relation` and `label`. It finds the concept with that
-label or creates it, and adds the edge `source_id --relation--> concept` as one atomic call.
-It returns `concept_id`, `created`, `success` and `message`. A new concept always comes with
-its edge, so it is never orphaned: if the edge is rejected (cycle, edge into an object,
-duplicate), a concept created by that call is removed again. Labels are trimmed, nonempty,
+`/add_concept` accepts `source_id`, `relation` and `label`. It creates a new concept
+and adds the edge `source_id --relation--> concept` as one atomic call. It returns `concept_id`,
+`success` and `message`. If a concept with that label already exists it fails and changes
+nothing: look the id up with `/get_concept` (`label` -> `concept_id`, `found`, `message`) and
+link it with `/add_edge`. A new concept always comes with its edge, so it is never orphaned: if
+the edge is rejected (cycle, unknown source), the new concept is removed again. Labels are trimmed, nonempty,
 at most 128 UTF-8 bytes, and free of control characters. `/add_edge` adds a labeled edge
 between two existing nodes. No delete, rename, or replacement operation is exposed.
 
@@ -59,7 +61,7 @@ The graph lives in memory: restarting the manager does not persist concepts or e
 | `semantic_scene_forests_generation` | LLM workers that add attributes and concepts | `ObjectAttributionWorker`, `ConceptGenerationWorker` |
 | `semantic_scene_forests_launch` | Starts the integrated stack | `scene_graph_combined.launch.xml` |
 | `semantic_scene_forests_manager` | `scene_graph_manager` node, shared graph and pruning worker | `/scene_graph`, object services, worker plugins |
-| `semantic_scene_forests_msgs` | Graph message, service and action definitions | `SceneGraph`, `ObjectNode`, `AddConcept`, `AddEdge`, `RunWorker` |
+| `semantic_scene_forests_msgs` | Graph message, service and action definitions | `SceneGraph`, `ObjectNode`, `AddConcept`, `GetConcept`, `AddEdge`, `RunWorker` |
 | `semantic_scene_forests_object_msgs` | Object message and service definitions | `ObjectCandidate`, `GetObjects`, `GetObjectVisuals`, `AddObject`, `DeleteObject`, `EditObject` |
 | `semantic_scene_forests_object_tracker` | Tracks objects across observations | Detections in, graph object nodes out |
 | `semantic_scene_forests_planning_msgs` | Query/planning action definitions | `FindObject`, `PromptLLM` |

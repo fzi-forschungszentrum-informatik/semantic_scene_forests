@@ -227,6 +227,7 @@ uint64_t GlobalTracker::merge(uint64_t a_id, uint64_t b_id)
   }
   m_distinct = std::move(distinct);
   m_removed.insert(REMOVED);
+  m_merged.emplace_back(REMOVED, SURVIVOR);
   ++m_merges;
   return SURVIVOR;
 }
@@ -458,6 +459,7 @@ std::vector<ArbiterRequest> GlobalTracker::cycle(const std::vector<Tracklet>& tr
                                                  bool arbiter_enabled)
 {
   m_created.clear();
+  m_merged.clear();
   for (const auto& tracklet : tracklets)
   {
     if (!m_latest || tracklet.last_seen > *m_latest)
