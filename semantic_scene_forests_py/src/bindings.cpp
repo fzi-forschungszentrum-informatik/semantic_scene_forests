@@ -166,6 +166,7 @@ CropPtr cropFromPython(py::handle stamp, const std::string& jpeg)
 std::vector<CropPtr> cropsFromPython(const std::vector<std::pair<py::object, std::string>>& crops)
 {
   std::vector<CropPtr> result;
+  result.reserve(crops.size());
   for (const auto& [stamp, jpeg] : crops)
   {
     result.push_back(cropFromPython(stamp, jpeg));
