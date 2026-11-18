@@ -124,6 +124,7 @@ CameraTracker::CameraTracker(std::string camera, int rotation_cw, rclcpp::Logger
 }
 
 CameraTracker::FrameResult
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): refactor out of scope
 CameraTracker::process(const vision_msgs::msg::Detection2DArray& det2d_msg,
                        const vision_msgs::msg::Detection3DArray& det3d_msg,
                        const sensor_msgs::msg::Image& image_msg,
@@ -307,7 +308,8 @@ CameraTracker::process(const vision_msgs::msg::Detection2DArray& det2d_msg,
       ++m_crop_errors;
       continue;
     }
-    auto jpeg = detail::encodeCrop(*crop, image_msg.header, params.crop_jpeg_quality);
+    auto jpeg =
+      detail::encodeCrop(*crop, image_msg.header, static_cast<int>(params.crop_jpeg_quality));
     if (!jpeg)
     {
       ++m_crop_errors;

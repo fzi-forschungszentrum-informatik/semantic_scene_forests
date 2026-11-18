@@ -31,6 +31,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <future>
 #include <memory>
@@ -95,6 +96,7 @@ rclcpp::NodeOptions twoCameraOptions()
   return options;
 }
 
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters): fixed parameter order
 rclcpp::NodeOptions commonTrackerOptions(int confirmation_threshold      = 3,
                                          double gate_threshold_strict    = 3.0,
                                          double gate_threshold_confirmed = 10.0,
@@ -143,7 +145,7 @@ makeImage(const rclcpp::Time& stamp, const std::string& frame_id, uint8_t tag)
   image.width           = 32;
   image.encoding        = sensor_msgs::image_encodings::BGR8;
   image.step            = image.width * 3;
-  image.data.assign(image.height * image.step, tag);
+  image.data.assign(static_cast<size_t>(image.height) * image.step, tag);
   return image;
 }
 
@@ -168,11 +170,13 @@ makeDetections2D(const rclcpp::Time& stamp, const std::string& frame_id, const s
   return array;
 }
 
-vision_msgs::msg::Detection3DArray makeDetections3D(const rclcpp::Time& stamp,
-                                                    const std::string& frame_id,
-                                                    const std::string& id,
-                                                    double x,
-                                                    double size)
+vision_msgs::msg::Detection3DArray
+makeDetections3D(const rclcpp::Time& stamp,
+                 const std::string& frame_id,
+                 const std::string& id,
+                 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters): fixed parameter order
+                 double x,
+                 double size)
 {
   vision_msgs::msg::Detection3DArray array;
   array.header.stamp    = stamp;
@@ -202,6 +206,7 @@ struct CameraPublisher
 
   void publish(const rclcpp::Time& stamp,
                const std::string& local_id,
+               // NOLINTNEXTLINE(bugprone-easily-swappable-parameters): fixed parameter order
                double local_x,
                uint8_t tag,
                bool publish_2d                   = true,
@@ -307,8 +312,8 @@ public:
     m_worker.stop();
   }
 
-  template <typename Predicate>
-  static bool waitUntil(Predicate&& predicate, std::chrono::milliseconds timeout)
+  template <typename TPredicate>
+  static bool waitUntil(TPredicate&& predicate, std::chrono::milliseconds timeout)
   {
     const auto DEADLINE = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < DEADLINE)
@@ -342,8 +347,11 @@ public:
       5s);
   }
 
+  // NOLINTBEGIN(bugprone-unchecked-optional-access): guarded by ASSERT_TRUE, which the check does
+  // not model
   CameraPublisher& front() { return *m_front; }
   CameraPublisher& rear() { return *m_rear; }
+  // NOLINTEND(bugprone-unchecked-optional-access)
 
   bool setConfirmationThreshold(int64_t threshold)
   {
@@ -409,11 +417,13 @@ public:
     return m_host->set_parameter(rclcpp::Parameter(name, value)).successful;
   }
 
-  std::optional<AddObject::Response> addObject(const std::string& class_name,
-                                               const std::string& frame_id,
-                                               double x,
-                                               double size,
-                                               int stamp_sec = 0) const
+  std::optional<AddObject::Response>
+  addObject(const std::string& class_name,
+            const std::string& frame_id,
+            // NOLINTNEXTLINE(bugprone-easily-swappable-parameters): fixed parameter order
+            double x,
+            double size,
+            int stamp_sec = 0) const
   {
     if (!m_add_object->wait_for_service(2s))
     {
@@ -497,6 +507,7 @@ private:
     m_latest_candidates = std::move(objects);
   }
 
+  // NOLINTNEXTLINE(bugprone-easily-swappable-parameters): fixed parameter order
   CameraPublisher makeCamera(const std::string& frame_id,
                              const std::string& detections_2d_topic,
                              const std::string& detections_3d_topic,
@@ -552,6 +563,7 @@ std::set<int64_t> candidateIds(const std::vector<ObjectCandidate>& candidates)
 }
 
 void publishBatches(CameraPublisher& camera,
+                    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters): fixed parameter order
                     double start_time,
                     int count,
                     const std::string& local_id,
@@ -888,6 +900,7 @@ TEST(TrackedObject, ObservationTimeNeverMovesBackwards)
 }
 
 ObjectCandidate
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters): fixed parameter order
 observation(const std::string& class_name, const std::string& frame_id, double x, double size)
 {
   ObjectCandidate observation;
@@ -921,6 +934,8 @@ TEST(MultiCameraTracker, ManualObservationsJoinTracksOrStartPersistentOnes)
     negative_stamp,
   });
   ASSERT_TRUE(RESPONSE);
+  // NOLINTBEGIN(bugprone-unchecked-optional-access): guarded by ASSERT_TRUE, which the check does
+  // not model
   EXPECT_FALSE(RESPONSE->success);
   ASSERT_EQ(RESPONSE->object_ids.size(), 6U);
   EXPECT_EQ(RESPONSE->object_ids[0], CAMERA_ID);
@@ -938,6 +953,7 @@ TEST(MultiCameraTracker, ManualObservationsJoinTracksOrStartPersistentOnes)
   EXPECT_EQ(RESPONSE->object_ids[5], 0);
   EXPECT_NE(RESPONSE->message.find("empty class_name"), std::string::npos);
   EXPECT_NE(RESPONSE->message.find("negative detection timestamp"), std::string::npos);
+  // NOLINTEND(bugprone-unchecked-optional-access)
 
   // The manual track outlives its one-cycle tracklet and carries the observation's crop.
   std::this_thread::sleep_for(100ms); // ~10 global cycles at 100 Hz
@@ -1037,7 +1053,10 @@ TEST(MultiCameraTracker, ExplicitSightingRevivesDeletedObject)
   ASSERT_TRUE(harness.graph().getObjectNodes().empty());
   const auto RESPONSE = harness.addObservations({observation("cup", "map", 5.0, 1.0)});
   ASSERT_TRUE(RESPONSE && RESPONSE->success) << (RESPONSE ? RESPONSE->message : "no response");
+  // NOLINTBEGIN(bugprone-unchecked-optional-access): guarded by ASSERT_TRUE, which the check does
+  // not model
   EXPECT_EQ(RESPONSE->object_ids.front(), ID);
+  // NOLINTEND(bugprone-unchecked-optional-access)
   ASSERT_TRUE(TrackerHarness::waitUntil([&]() { return harness.graph().hasNode(ID); }, 2s));
 }
 
@@ -1084,6 +1103,8 @@ TEST(MultiCameraTracker, AddObjectTrackIsUpdatedMergedAndRetiredLikeAnyOther)
 
   const auto BAD = harness.addObject("", "map", 0.0, 0.5);
   ASSERT_TRUE(BAD);
+  // NOLINTBEGIN(bugprone-unchecked-optional-access): guarded by ASSERT_TRUE, which the check does
+  // not model
   EXPECT_FALSE(BAD->success);
 
   const auto ADDED = harness.addObject("cup", "map", 5.0, 1.0, 10);
@@ -1092,6 +1113,7 @@ TEST(MultiCameraTracker, AddObjectTrackIsUpdatedMergedAndRetiredLikeAnyOther)
   const int64_t ID = ADDED->object_id;
   ASSERT_TRUE(TrackerHarness::waitUntil([&]() { return harness.graph().hasNode(ID); }, 2s));
   const auto NODE = std::get<ObjectNode>(*harness.graph().findNode(ID));
+  // NOLINTEND(bugprone-unchecked-optional-access)
   EXPECT_EQ(NODE.source, ObjectNode::SOURCE_MANUAL);
   EXPECT_EQ(NODE.class_name, "cup");
   ASSERT_EQ(NODE.crops.size(), 1U); // JPEG-encoded on ingress
@@ -1105,7 +1127,10 @@ TEST(MultiCameraTracker, AddObjectTrackIsUpdatedMergedAndRetiredLikeAnyOther)
       return NODES.size() == 1U && NODES.front().id == ID && NODES.front().last_seen.sec >= 12;
     },
     2s));
+  // NOLINTBEGIN(bugprone-unchecked-optional-access): guarded by ASSERT_TRUE, which the check does
+  // not model
   EXPECT_EQ(std::get<ObjectNode>(*harness.graph().findNode(ID)).source, ObjectNode::SOURCE_MANUAL);
+  // NOLINTEND(bugprone-unchecked-optional-access)
 
   // Retired: a differently sized track much later takes over its pose.
   publishBatches(harness.rear(), 200.0, 3, "2", 6.0, 40, 10.0);
@@ -1129,7 +1154,10 @@ TEST(MultiCameraTracker, AddObjectTrackMergesIntoOverlappingCameraTrack)
   const int64_t CAMERA_ID = harness.graph().getObjectNodes().front().id;
   const auto ADDED        = harness.addObject("cup", "map", 5.0, 1.0, 20);
   ASSERT_TRUE(ADDED && ADDED->success);
+  // NOLINTBEGIN(bugprone-unchecked-optional-access): guarded by ASSERT_TRUE, which the check does
+  // not model
   EXPECT_NE(ADDED->object_id, CAMERA_ID);
+  // NOLINTEND(bugprone-unchecked-optional-access)
   ASSERT_TRUE(TrackerHarness::waitUntil(
     [&]() {
       const auto NODES = harness.graph().getObjectNodes();
@@ -1137,7 +1165,10 @@ TEST(MultiCameraTracker, AddObjectTrackMergesIntoOverlappingCameraTrack)
              NODES.front().last_seen.sec == 20;
     },
     2s));
+  // NOLINTBEGIN(bugprone-unchecked-optional-access): guarded by ASSERT_TRUE, which the check does
+  // not model
   EXPECT_FALSE(harness.graph().hasNode(ADDED->object_id));
+  // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 } // namespace

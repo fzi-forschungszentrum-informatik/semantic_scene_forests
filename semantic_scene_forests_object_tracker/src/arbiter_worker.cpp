@@ -169,6 +169,7 @@ void ArbiterWorker::run(const std::stop_token& stop)
   }
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): refactor out of scope
 ArbiterResult ArbiterWorker::decide(const DecideFn& decide,
                                     oai::DecisionFormat format,
                                     const std::string& model,
@@ -297,7 +298,9 @@ ArbiterResult ArbiterWorker::decide(const DecideFn& decide,
       return result;
     }
     result.object_probability = answers[1].probability;
-    result.same_probability   = std::min(*answers[0].probability, *answers[1].probability);
+    // both probabilities were checked above
+    result.same_probability =
+      std::min(answers[0].probability.value_or(0.0), answers[1].probability.value_or(0.0));
   }
   // An invalid or missing choice leaves the label empty: the vote stays in charge.
   const auto CHOICE =

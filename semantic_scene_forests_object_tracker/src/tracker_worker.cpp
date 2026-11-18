@@ -183,16 +183,18 @@ void TrackerWorker::initialize(rclcpp::Node& node,
   // Same group as the cycle: requests and the cycle never run at the same time.
   m_add_observations_srv = node.create_service<AddObservations>(
     "add_observations",
-    [this](const std::shared_ptr<rmw_request_id_t> header,
-           const std::shared_ptr<AddObservations::Request> request) {
+    [this](const std::shared_ptr<rmw_request_id_t>& header,
+           const std::shared_ptr<AddObservations::Request>& request) {
       onAddObservations(header, request);
     },
     rclcpp::ServicesQoS(),
     m_global_group);
   m_add_object_srv = node.create_service<AddObject>(
     "add_object",
-    [this](const std::shared_ptr<AddObject::Request> request,
-           std::shared_ptr<AddObject::Response> response) { onAddObject(request, response); },
+    [this](const std::shared_ptr<AddObject::Request>& request,
+           const std::shared_ptr<AddObject::Response>& response) {
+      onAddObject(request, response);
+    },
     rclcpp::ServicesQoS(),
     m_global_group);
 
@@ -280,6 +282,7 @@ void TrackerWorker::onCameraFrame(CameraInput& camera,
   camera.crop_errors  = camera.tracker->cropErrors();
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): refactor out of scope
 void TrackerWorker::onAddObservations(const std::shared_ptr<rmw_request_id_t>& header,
                                       const std::shared_ptr<AddObservations::Request>& request)
 {
@@ -328,7 +331,7 @@ void TrackerWorker::onAddObservations(const std::shared_ptr<rmw_request_id_t>& h
         error = std::string("no transform to ") + m_world_frame + ": " + ex.what();
       }
     }
-    if (!error.empty())
+    if (!error.empty() || !box)
     {
       RCLCPP_WARN(m_logger,
                   "add_observations: rejecting '%s': %s",
@@ -341,7 +344,7 @@ void TrackerWorker::onAddObservations(const std::shared_ptr<rmw_request_id_t>& h
     auto crops = std::make_shared<std::vector<CropPtr>>();
     for (const auto& image : observation.image_crops)
     {
-      if (auto jpeg = detail::encodeCrop(image, PARAMS.crop_jpeg_quality))
+      if (auto jpeg = detail::encodeCrop(image, static_cast<int>(PARAMS.crop_jpeg_quality)))
       {
         crops->push_back(std::move(jpeg));
       }
@@ -413,7 +416,7 @@ void TrackerWorker::onAddObject(const std::shared_ptr<AddObject::Request>& reque
   std::vector<CropPtr> crops;
   for (const auto& image : request->image_crops)
   {
-    if (auto jpeg = detail::encodeCrop(image, PARAMS.crop_jpeg_quality))
+    if (auto jpeg = detail::encodeCrop(image, static_cast<int>(PARAMS.crop_jpeg_quality)))
     {
       crops.push_back(std::move(jpeg));
     }
@@ -435,6 +438,7 @@ void TrackerWorker::onAddObject(const std::shared_ptr<AddObject::Request>& reque
   response->message   = "added track " + std::to_string(ID);
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): refactor out of scope
 void TrackerWorker::answerObservations()
 {
   std::erase_if(m_manual_pending, [&](PendingObservations& pending) {
@@ -461,10 +465,13 @@ void TrackerWorker::answerObservations()
                : tracks.end();
       if (TRACK == tracks.end())
       {
-        const auto& error = !pending.errors[i].empty() ? pending.errors[i]
-                            : m_arbiter                ? "rejected by the tracker's label check"
-                                                       : "rejected by the global tracker";
-        response.success  = false;
+        std::string error = pending.errors[i];
+        if (error.empty())
+        {
+          error =
+            m_arbiter ? "rejected by the tracker's label check" : "rejected by the global tracker";
+        }
+        response.success = false;
         response.message += "observation " + std::to_string(i) + ": " + error + "; ";
         response.object_ids.push_back(0);
         response.class_names.emplace_back();
@@ -559,6 +566,7 @@ void TrackerWorker::reviveDeletedObjects()
   }
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): refactor out of scope
 void TrackerWorker::writeToGraph()
 {
   using fzi::semantic_scene_forests::ObjectNode;
@@ -646,7 +654,8 @@ void TrackerWorker::writeToGraph()
     }
     if (!it->second.suppressed)
     {
-      (void)m_graph->removeNode(static_cast<int64_t>(it->first)); // already gone is fine
+      // already gone is fine
+      [[maybe_unused]] const auto REMOVED = m_graph->removeNode(static_cast<int64_t>(it->first));
     }
     m_manual_tracks.erase(it->first);
     it = m_written.erase(it);

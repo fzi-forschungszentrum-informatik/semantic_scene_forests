@@ -249,6 +249,7 @@ void GlobalTracker::eraseRemoved()
   m_removed.clear();
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): refactor out of scope
 void GlobalTracker::applyResult(const ArbiterResult& result, const object_tracker::Params& params)
 {
   if (result.label_check)
@@ -361,6 +362,7 @@ void GlobalTracker::applyResult(const ArbiterResult& result, const object_tracke
   }
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): refactor out of scope
 std::vector<ArbiterRequest> GlobalTracker::reconcilePairs(const object_tracker::Params& params,
                                                           bool arbiter_enabled)
 {
@@ -453,6 +455,7 @@ std::vector<ArbiterRequest> GlobalTracker::reconcilePairs(const object_tracker::
   return requests;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): refactor out of scope
 std::vector<ArbiterRequest> GlobalTracker::cycle(const std::vector<Tracklet>& tracklets,
                                                  const std::vector<ArbiterResult>& results,
                                                  const object_tracker::Params& params,

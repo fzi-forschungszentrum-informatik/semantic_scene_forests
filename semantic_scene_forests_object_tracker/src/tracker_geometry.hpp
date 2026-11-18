@@ -38,8 +38,8 @@
 #include <std_msgs/msg/header.hpp>
 #include <vision_msgs/msg/bounding_box3_d.hpp>
 
-namespace semantic_scene_forests_object_tracker {
-namespace detail {
+
+namespace semantic_scene_forests_object_tracker::detail {
 
 // Transforms a bounding box from its source frame into the target frame of
 // `transform`: world center = R_tf * center + translation, world extents from
@@ -60,5 +60,4 @@ encodeCrop(const cv::Mat& bgr, const std_msgs::msg::Header& header, int jpeg_qua
 std::shared_ptr<const sensor_msgs::msg::CompressedImage>
 encodeCrop(const sensor_msgs::msg::Image& image, int jpeg_quality);
 
-} // namespace detail
-} // namespace semantic_scene_forests_object_tracker
+} // namespace semantic_scene_forests_object_tracker::detail

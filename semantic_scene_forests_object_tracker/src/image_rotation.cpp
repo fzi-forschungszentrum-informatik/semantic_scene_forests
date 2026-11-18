@@ -60,6 +60,7 @@ cv::Mat rotateImage(const cv::Mat& image, int degrees_cw)
 }
 
 vision_msgs::msg::BoundingBox2D
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters): fixed parameter order
 rotateBox(const vision_msgs::msg::BoundingBox2D& box, int degrees_cw, int width, int height)
 {
   // Continuous pixel coordinates: 90 deg CW maps (x, y) to (height - y, x).

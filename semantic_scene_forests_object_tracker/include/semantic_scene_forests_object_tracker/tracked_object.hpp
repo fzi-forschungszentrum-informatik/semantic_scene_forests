@@ -61,7 +61,7 @@ class TrackedObject
 {
 public:
   TrackedObject(const DetectionAdapter& initial_detection,
-                const rclcpp::Time& initial_time,
+                rclcpp::Time initial_time,
                 uint64_t track_id,
                 double measurement_std,
                 double process_noise_std,
@@ -111,7 +111,7 @@ public:
   Eigen::Vector3d bbox3d_size;
   double score;
   bool confirmed;
-  int observation_count;
+  int observation_count{1};
   rclcpp::Time last_seen;
   double time_since_update{0.0};
   DetectionAdapter last_detection;

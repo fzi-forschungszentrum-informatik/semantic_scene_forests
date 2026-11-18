@@ -88,9 +88,9 @@ public:
                       const object_tracker::Params& params,
                       const std::set<std::string>& rejected_labels);
 
-  std::vector<Tracklet> tracklets() const;
-  size_t trackCount() const { return m_tracks.size(); }
-  size_t cropErrors() const { return m_crop_errors; }
+  [[nodiscard]] std::vector<Tracklet> tracklets() const;
+  [[nodiscard]] size_t trackCount() const { return m_tracks.size(); }
+  [[nodiscard]] size_t cropErrors() const { return m_crop_errors; }
 
 private:
   std::string m_camera;

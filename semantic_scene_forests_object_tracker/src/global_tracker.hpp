@@ -101,21 +101,29 @@ public:
                         const rclcpp::Time& stamp,
                         const std::vector<CropPtr>& crops,
                         const object_tracker::Params& params);
-  const std::vector<std::unique_ptr<TrackedObject>>& tracks() const { return m_tracks; }
-  bool isStale(const TrackedObject& track, const object_tracker::Params& params) const;
+  [[nodiscard]] const std::vector<std::unique_ptr<TrackedObject>>& tracks() const
+  {
+    return m_tracks;
+  }
+  [[nodiscard]] bool isStale(const TrackedObject& track,
+                             const object_tracker::Params& params) const;
   // True while a new track waits for its label check; held tracks are not published.
-  bool isHeld(const TrackedObject& track) const { return m_held.contains(track.track_id); }
-  bool isHeld(uint64_t id) const { return m_held.contains(id); }
+  [[nodiscard]] bool isHeld(const TrackedObject& track) const
+  {
+    return m_held.contains(track.track_id);
+  }
+  [[nodiscard]] bool isHeld(uint64_t id) const { return m_held.contains(id); }
   // Global track a tracklet of the last cycle is linked to; nullopt if it was skipped or its
   // track was removed. Links end in the first cycle that no longer contains the tracklet.
-  std::optional<uint64_t> linkedTrack(const std::string& camera, uint64_t local_id) const;
+  [[nodiscard]] std::optional<uint64_t> linkedTrack(const std::string& camera,
+                                                    uint64_t local_id) const;
   // IDs of the tracks created in the last cycle, in creation order.
-  const std::vector<uint64_t>& createdLastCycle() const { return m_created; }
+  [[nodiscard]] const std::vector<uint64_t>& createdLastCycle() const { return m_created; }
   // {merged-away id, surviving id} of the merges in the last cycle, in order.
-  const std::vector<TrackPair>& mergedLastCycle() const { return m_merged; }
-  Stats stats(const object_tracker::Params& params) const;
+  [[nodiscard]] const std::vector<TrackPair>& mergedLastCycle() const { return m_merged; }
+  [[nodiscard]] Stats stats(const object_tracker::Params& params) const;
   // Labels the arbiter judged not to be physical objects; only grows.
-  const std::set<std::string>& rejectedLabels() const { return m_rejected_labels; }
+  [[nodiscard]] const std::set<std::string>& rejectedLabels() const { return m_rejected_labels; }
 
 private:
   using LinkKey = std::pair<std::string, uint64_t>; // {camera, local id}
@@ -126,7 +134,7 @@ private:
   };
 
   TrackedObject* find(uint64_t id);
-  bool labelAccepted(const TrackedObject& track, const std::string& label) const;
+  [[nodiscard]] bool labelAccepted(const TrackedObject& track, const std::string& label) const;
   // Starts a global track; with the arbiter it is held and a label check is returned.
   std::optional<ArbiterRequest>
   createFrom(const Tracklet& tracklet, const object_tracker::Params& params, bool arbiter_enabled);

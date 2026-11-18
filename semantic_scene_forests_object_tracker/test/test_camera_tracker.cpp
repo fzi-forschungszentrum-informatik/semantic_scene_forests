@@ -28,6 +28,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstddef>
 #include <initializer_list>
 #include <string>
 
@@ -51,9 +52,9 @@ class CameraTrackerTest : public testing::Test
 protected:
   CameraTrackerTest()
   {
-    params.world_frame            = "map";
-    params.confirmation_threshold = 3;
-    params.crop_padding           = 0;
+    m_params.world_frame            = "map";
+    m_params.confirmation_threshold = 3;
+    m_params.crop_padding           = 0;
   }
 
   CameraTracker::FrameResult frame(CameraTracker& tracker, int sec, std::initializer_list<Det> dets)
@@ -91,62 +92,62 @@ protected:
     image.height   = 16;
     image.encoding = sensor_msgs::image_encodings::BGR8;
     image.step     = image.width * 3;
-    image.data.assign(image.height * image.step, 127);
+    image.data.assign(static_cast<size_t>(image.height) * image.step, 127);
     const auto IDENTITY = []() -> std::optional<geometry_msgs::msg::TransformStamped> {
       geometry_msgs::msg::TransformStamped transform;
       transform.transform.rotation.w = 1.0;
       return transform;
     };
-    return tracker.process(two, three, image, IDENTITY, params, {});
+    return tracker.process(two, three, image, IDENTITY, m_params, {});
   }
 
-  object_tracker::Params params;
-  rclcpp::Logger logger = rclcpp::get_logger("test");
+  object_tracker::Params m_params;
+  rclcpp::Logger m_logger = rclcpp::get_logger("test");
 };
 
 TEST_F(CameraTrackerTest, FlickeringLabelKeepsOneTrack)
 {
-  CameraTracker tracker("front", 0, logger);
-  frame(tracker, 1, {{0, "box"}});
-  frame(tracker, 2, {{0, "chair"}});
-  frame(tracker, 3, {{0, "box"}});
-  ASSERT_EQ(tracker.tracklets().size(), 1u);
+  CameraTracker tracker("front", 0, m_logger);
+  frame(tracker, 1, {{.x = 0, .label = "box"}});
+  frame(tracker, 2, {{.x = 0, .label = "chair"}});
+  frame(tracker, 3, {{.x = 0, .label = "box"}});
+  ASSERT_EQ(tracker.tracklets().size(), 1U);
   EXPECT_EQ(tracker.tracklets()[0].class_name, "box");
 }
 
 TEST_F(CameraTrackerTest, SameFrameDuplicatesBecomeOneTrack)
 {
-  CameraTracker tracker("front", 0, logger);
+  CameraTracker tracker("front", 0, m_logger);
   for (int sec = 1; sec <= 3; ++sec)
   {
-    frame(tracker, sec, {{0, "box"}, {0.05, "crate"}});
+    frame(tracker, sec, {{.x = 0, .label = "box"}, {.x = 0.05, .label = "crate"}});
   }
-  EXPECT_EQ(tracker.trackCount(), 1u);
-  EXPECT_EQ(tracker.tracklets().size(), 1u);
+  EXPECT_EQ(tracker.trackCount(), 1U);
+  EXPECT_EQ(tracker.tracklets().size(), 1U);
 }
 
 TEST_F(CameraTrackerTest, IncompatibleSizeStartsNewTrack)
 {
-  CameraTracker tracker("front", 0, logger);
+  CameraTracker tracker("front", 0, m_logger);
   for (int sec = 1; sec <= 3; ++sec)
   {
-    frame(tracker, sec, {{0}});
+    frame(tracker, sec, {{.x = 0}});
   }
   for (int sec = 4; sec <= 6; ++sec)
   {
-    frame(tracker, sec, {{0, "box", 1.0}});
+    frame(tracker, sec, {{.x = 0, .label = "box", .size = 1.0}});
   }
-  EXPECT_EQ(tracker.tracklets().size(), 2u);
+  EXPECT_EQ(tracker.tracklets().size(), 2U);
 }
 
 TEST_F(CameraTrackerTest, TrackEndsAfterLocalTimeoutAndOldFramesAreRejected)
 {
-  CameraTracker tracker("front", 0, logger);
+  CameraTracker tracker("front", 0, m_logger);
   for (int sec = 1; sec <= 3; ++sec)
   {
-    frame(tracker, sec, {{0}});
+    frame(tracker, sec, {{.x = 0}});
   }
-  ASSERT_EQ(tracker.tracklets().size(), 1u);
+  ASSERT_EQ(tracker.tracklets().size(), 1U);
   EXPECT_EQ(frame(tracker, 3, {{0}}), CameraTracker::FrameResult::OUT_OF_ORDER);
   frame(tracker, 9, {}); // 6 s > local_track_timeout (5 s)
   EXPECT_TRUE(tracker.tracklets().empty());
@@ -154,13 +155,13 @@ TEST_F(CameraTrackerTest, TrackEndsAfterLocalTimeoutAndOldFramesAreRejected)
 
 TEST_F(CameraTrackerTest, CropsAreRotatedUpright)
 {
-  CameraTracker tracker("front", 90, logger);
+  CameraTracker tracker("front", 90, m_logger);
   for (int sec = 1; sec <= 3; ++sec)
   {
-    frame(tracker, sec, {{0}});
+    frame(tracker, sec, {{.x = 0}});
   }
   const auto TRACKLETS = tracker.tracklets();
-  ASSERT_EQ(TRACKLETS.size(), 1u);
+  ASSERT_EQ(TRACKLETS.size(), 1U);
   ASSERT_FALSE(TRACKLETS[0].crops->empty());
   // An 8 x 4 box in the unrotated image is 4 x 8 after a quarter turn.
   const auto DECODED = cv_bridge::toCvCopy(*TRACKLETS[0].crops->back(), "bgr8")->image;

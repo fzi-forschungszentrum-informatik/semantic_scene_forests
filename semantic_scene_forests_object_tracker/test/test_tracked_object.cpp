@@ -45,9 +45,10 @@ CropPtr jpeg(int sec)
 
 rclcpp::Time observationTime(int32_t seconds, uint32_t nanoseconds = 0)
 {
-  return rclcpp::Time(seconds, nanoseconds, RCL_ROS_TIME);
+  return {seconds, nanoseconds, RCL_ROS_TIME};
 }
 
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters): fixed parameter order
 DetectionAdapter detection(double x = 0.0, double size = 0.2, const std::string& label = "cup")
 {
   DetectionAdapter result;
@@ -95,10 +96,10 @@ TEST(TrackedObject, PredictionAndSerializationPreserveObservationTime)
   object.update(detection(0.1), observationTime(1792713600, 123456790));
   object.predict(20.0);
   EXPECT_EQ(object.last_seen, observationTime(1792713600, 123456790));
-  const auto message = object.toDetection3D();
-  EXPECT_EQ(message.header.stamp.sec, 1792713600);
-  EXPECT_EQ(message.header.stamp.nanosec, 123456790u);
-  EXPECT_EQ(message.header.frame_id, "world");
+  const auto MESSAGE = object.toDetection3D();
+  EXPECT_EQ(MESSAGE.header.stamp.sec, 1792713600);
+  EXPECT_EQ(MESSAGE.header.stamp.nanosec, 123456790U);
+  EXPECT_EQ(MESSAGE.header.frame_id, "world");
 }
 
 TEST(TrackedObject, MergePreservesNewestCoherentStateAndSurvivorHistory)
@@ -118,7 +119,7 @@ TEST(TrackedObject, MergePreservesNewestCoherentStateAndSurvivorHistory)
   newer.addCrop(jpeg(3));
 
   survivor.mergeFrom(newer);
-  EXPECT_EQ(survivor.track_id, 1u);
+  EXPECT_EQ(survivor.track_id, 1U);
   EXPECT_EQ(survivor.last_seen, observationTime(13, 500000000));
   EXPECT_TRUE(survivor.getPosition().isApprox(newer.getPosition()));
   EXPECT_TRUE(survivor.getPositionCovariance().isApprox(newer.getPositionCovariance()));
@@ -128,7 +129,7 @@ TEST(TrackedObject, MergePreservesNewestCoherentStateAndSurvivorHistory)
   EXPECT_DOUBLE_EQ(survivor.toDetection3D().bbox.center.orientation.z, 0.6);
   EXPECT_EQ(survivor.toDetection3D().header.stamp.sec, 13);
   EXPECT_TRUE(survivor.confirmed);
-  ASSERT_EQ(survivor.getCrops().size(), 2u);
+  ASSERT_EQ(survivor.getCrops().size(), 2U);
   EXPECT_EQ(survivor.getCrops()[0]->header.stamp.sec, 2);
   EXPECT_EQ(survivor.getCrops()[1]->header.stamp.sec, 3);
   // Crops are shared, not copied.
