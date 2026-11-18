@@ -174,7 +174,7 @@ ConceptGenerationWorker::generate(bool only_unprocessed, const std::function<boo
     existing_ids.insert(concept_node.id);
   }
   // The input as the tasks see it: current names, concepts deleted meanwhile dropped.
-  const auto read_input = [&] {
+  const auto READ_INPUT = [&] {
     std::vector<ConceptNode> input;
     for (const int64_t ID : INPUT_IDS)
     {
@@ -188,7 +188,7 @@ ConceptGenerationWorker::generate(bool only_unprocessed, const std::function<boo
     }
     return input;
   };
-  const auto CONCEPTS = read_input();
+  const auto CONCEPTS = READ_INPUT();
 
   const auto SYSTEM_TEMPLATE = m_templates.find("meta/meta_system_prompt");
   const auto SETUP_TEMPLATE  = m_templates.find("meta/meta_setup_prompt");
@@ -245,7 +245,7 @@ ConceptGenerationWorker::generate(bool only_unprocessed, const std::function<boo
     {
       return Outcome::STOPPED;
     }
-    if (auto task_result = task->execute(client, history, read_input(), m_graph); !task_result)
+    if (auto task_result = task->execute(client, history, READ_INPUT(), m_graph); !task_result)
     {
       throw std::runtime_error("task failed: " + task_result.error());
     }

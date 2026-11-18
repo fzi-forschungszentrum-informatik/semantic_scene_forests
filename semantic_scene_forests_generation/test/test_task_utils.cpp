@@ -88,7 +88,10 @@ TEST(ApplyLabelsTest, LinksToAnExistingConceptOfAnotherObject)
   ASSERT_TRUE(applyLabels(
     graph, rclcpp::get_logger("test"), SECOND, "has_color", "color", json::array({"red"})));
   const auto RED = graph.findConcept("red");
-  ASSERT_TRUE(RED);
+  if (!RED)
+  {
+    FAIL() << "concept 'red' missing";
+  }
   EXPECT_TRUE(graph.hasEdge(FIRST, *RED, "has_color"));
   EXPECT_TRUE(graph.hasEdge(SECOND, *RED, "has_color"));
   EXPECT_EQ(graph.getConceptNodes().size(), 2U); // red, color

@@ -50,23 +50,22 @@ CategoryTask::execute(oai::OpenAIClient& client,
 {
   try
   {
-    const auto& CONCEPTS = concepts;
-    if (CONCEPTS.empty())
+    if (concepts.empty())
     {
       return {};
     }
 
-    const auto category_template = m_templates->find("meta/category");
-    const auto followup_template = m_templates->find("meta/category_follow_up");
-    if (category_template == m_templates->end() || followup_template == m_templates->end())
+    const auto CATEGORY_TEMPLATE = m_templates->find("meta/category");
+    const auto FOLLOWUP_TEMPLATE = m_templates->find("meta/category_follow_up");
+    if (CATEGORY_TEMPLATE == m_templates->end() || FOLLOWUP_TEMPLATE == m_templates->end())
     {
       return std::unexpected("required category template is missing");
     }
 
     std::unordered_set<int64_t> allowed_ids;
-    allowed_ids.reserve(CONCEPTS.size());
+    allowed_ids.reserve(concepts.size());
     auto input_list = minja::Value::array();
-    for (const auto& concept_node : CONCEPTS)
+    for (const auto& concept_node : concepts)
     {
       allowed_ids.insert(concept_node.id);
       auto item = minja::Value::object();
@@ -76,10 +75,10 @@ CategoryTask::execute(oai::OpenAIClient& client,
     }
     auto prompt_context = minja::Value::object();
     prompt_context.set("input_list", input_list);
-    const auto context       = minja::Context::make(std::move(prompt_context));
-    const std::string prompt = category_template->second->render(context);
+    const auto CONTEXT       = minja::Context::make(std::move(prompt_context));
+    const std::string PROMPT = CATEGORY_TEMPLATE->second->render(CONTEXT);
 
-    const auto apply_response = [&](const std::string& raw) -> TaskResult {
+    const auto APPLY_RESPONSE = [&](const std::string& raw) -> TaskResult {
       auto parsed = parseJsonObject(raw);
       if (!parsed)
       {
@@ -92,14 +91,14 @@ CategoryTask::execute(oai::OpenAIClient& client,
 
       for (const auto& [id_string, categories] : parsed->items())
       {
-        const auto source_id = parseAllowedConceptId(id_string, allowed_ids);
-        if (!source_id)
+        const auto SOURCE_ID = parseAllowedConceptId(id_string, allowed_ids);
+        if (!SOURCE_ID)
         {
-          RCLCPP_WARN(m_logger, "Skipping '%s': %s", id_string.c_str(), source_id.error().c_str());
+          RCLCPP_WARN(m_logger, "Skipping '%s': %s", id_string.c_str(), SOURCE_ID.error().c_str());
           continue;
         }
         if (auto applied =
-              applyLabels(*graph, m_logger, *source_id, "is_type_of", "category", categories);
+              applyLabels(*graph, m_logger, *SOURCE_ID, "is_type_of", "category", categories);
             !applied)
         {
           RCLCPP_WARN(m_logger, "Skipping '%s': %s", id_string.c_str(), applied.error().c_str());
@@ -108,31 +107,31 @@ CategoryTask::execute(oai::OpenAIClient& client,
       return {};
     };
 
-    auto content = chatTurn(client, history, prompt, m_logger);
+    auto content = chatTurn(client, history, PROMPT, m_logger);
     if (!content)
     {
       return std::unexpected(content.error());
     }
-    if (apply_response(*content))
+    if (APPLY_RESPONSE(*content))
     {
       return {};
     }
 
     auto followup_context = minja::Value::object();
     auto category_list    = minja::Value::array();
-    for (const auto& concept_node : CONCEPTS)
+    for (const auto& concept_node : concepts)
     {
       category_list.push_back(minja::Value(concept_node.concept_name));
     }
     followup_context.set("categories", category_list);
-    const auto followup_minja_context = minja::Context::make(std::move(followup_context));
-    const std::string followup        = followup_template->second->render(followup_minja_context);
-    auto retry                        = chatTurn(client, history, followup, m_logger);
+    const auto FOLLOWUP_MINJA_CONTEXT = minja::Context::make(std::move(followup_context));
+    const std::string FOLLOWUP        = FOLLOWUP_TEMPLATE->second->render(FOLLOWUP_MINJA_CONTEXT);
+    auto retry                        = chatTurn(client, history, FOLLOWUP, m_logger);
     if (!retry)
     {
       return std::unexpected(retry.error());
     }
-    if (auto retry_result = apply_response(*retry); !retry_result)
+    if (auto retry_result = APPLY_RESPONSE(*retry); !retry_result)
     {
       return std::unexpected("invalid category response after follow-up: " + retry_result.error());
     }

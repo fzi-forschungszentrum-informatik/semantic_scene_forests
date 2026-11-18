@@ -50,22 +50,21 @@ AffordanceTask::execute(oai::OpenAIClient& client,
 {
   try
   {
-    const auto& CONCEPTS = concepts;
-    if (CONCEPTS.empty())
+    if (concepts.empty())
     {
       return {};
     }
 
-    const auto affordance_template = m_templates->find("meta/affordance");
-    if (affordance_template == m_templates->end())
+    const auto AFFORDANCE_TEMPLATE = m_templates->find("meta/affordance");
+    if (AFFORDANCE_TEMPLATE == m_templates->end())
     {
       return std::unexpected("required affordance template is missing");
     }
 
     std::unordered_set<int64_t> allowed_ids;
-    allowed_ids.reserve(CONCEPTS.size());
+    allowed_ids.reserve(concepts.size());
     auto input_list = minja::Value::array();
-    for (const auto& concept_node : CONCEPTS)
+    for (const auto& concept_node : concepts)
     {
       allowed_ids.insert(concept_node.id);
       auto item = minja::Value::object();
@@ -75,10 +74,10 @@ AffordanceTask::execute(oai::OpenAIClient& client,
     }
     auto prompt_context = minja::Value::object();
     prompt_context.set("input_list", input_list);
-    const auto context       = minja::Context::make(std::move(prompt_context));
-    const std::string prompt = affordance_template->second->render(context);
+    const auto CONTEXT       = minja::Context::make(std::move(prompt_context));
+    const std::string PROMPT = AFFORDANCE_TEMPLATE->second->render(CONTEXT);
 
-    auto content = chatTurn(client, history, prompt, m_logger);
+    auto content = chatTurn(client, history, PROMPT, m_logger);
     if (!content)
     {
       return std::unexpected(content.error());
@@ -95,14 +94,14 @@ AffordanceTask::execute(oai::OpenAIClient& client,
 
     for (const auto& [id_string, affordances] : parsed->items())
     {
-      const auto source_id = parseAllowedConceptId(id_string, allowed_ids);
-      if (!source_id)
+      const auto SOURCE_ID = parseAllowedConceptId(id_string, allowed_ids);
+      if (!SOURCE_ID)
       {
-        RCLCPP_WARN(m_logger, "Skipping '%s': %s", id_string.c_str(), source_id.error().c_str());
+        RCLCPP_WARN(m_logger, "Skipping '%s': %s", id_string.c_str(), SOURCE_ID.error().c_str());
         continue;
       }
       if (auto applied =
-            applyLabels(*graph, m_logger, *source_id, "has_affordance", "affordance", affordances);
+            applyLabels(*graph, m_logger, *SOURCE_ID, "has_affordance", "affordance", affordances);
           !applied)
       {
         RCLCPP_WARN(m_logger, "Skipping '%s': %s", id_string.c_str(), applied.error().c_str());

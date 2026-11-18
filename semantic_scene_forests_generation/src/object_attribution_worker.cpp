@@ -200,9 +200,9 @@ ObjectAttributionWorker::describeObject(int64_t id, const std::function<bool()>&
     return outcome;
   }
   // Marked even on failure so an LLM outage cannot loop on paid calls; attribute_objects retries.
-  if (const auto marked = m_graph->markProcessed(id, m_name); !marked)
+  if (const auto MARKED = m_graph->markProcessed(id, m_name); !MARKED)
   {
-    RCLCPP_WARN(m_logger, "Marking object %ld failed: %s", id, marked.error().message.c_str());
+    RCLCPP_WARN(m_logger, "Marking object %ld failed: %s", id, MARKED.error().message.c_str());
   }
   if (outcome == Outcome::DESCRIBED)
   {
