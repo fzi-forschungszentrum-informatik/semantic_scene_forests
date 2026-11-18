@@ -265,8 +265,8 @@ SceneGraph::findOrAddConcept(const std::string& label) noexcept
 std::optional<int64_t> SceneGraph::findConcept(const std::string& label) const noexcept
 {
   const std::shared_lock LOCK(m_mutex);
-  const auto clean = conceptLabel(label);
-  return clean ? findConceptUnlocked(*clean) : std::nullopt;
+  const auto CLEAN = conceptLabel(label);
+  return CLEAN ? findConceptUnlocked(*CLEAN) : std::nullopt;
 }
 
 std::optional<int64_t>
