@@ -40,7 +40,7 @@
 
 #include <fmt/format.h>
 
-#include <ament_index_cpp/get_package_share_directory.hpp>
+#include <ament_index_cpp/get_package_share_path.hpp>
 
 #include <cv_bridge/cv_bridge.hpp>
 
@@ -108,33 +108,34 @@ SceneGraphQueryNode::SceneGraphQueryNode(const rclcpp::NodeOptions& options)
   else
   {
     prompt_dir =
-      fs::path(ament_index_cpp::get_package_share_directory("semantic_scene_forests_query")) /
-      "resources";
+      ament_index_cpp::get_package_share_path("semantic_scene_forests_query") / "resources";
   }
   loadTemplates(prompt_dir.string());
 
   // Match the scene_graph_manager publisher so the latest graph is latched.
   const auto QOS = rclcpp::QoS(1).reliable().transient_local();
 
-  // NOLINTNEXTLINE(performance-unnecessary-value-param): rclcpp delivers SharedPtr by value.
   m_graph_sub = create_subscription<SceneGraphMsg>(
-    K_SCENE_GRAPH_TOPIC, QOS, [this](const SceneGraphMsg::SharedPtr msg) { onSceneGraph(msg); });
+    K_SCENE_GRAPH_TOPIC,
+    QOS,
+    // NOLINTNEXTLINE(performance-unnecessary-value-param): rclcpp needs the SharedPtr by value
+    [this](const SceneGraphMsg::SharedPtr msg) { onSceneGraph(msg); });
 
   m_visuals_client = create_client<GetObjectVisuals>(K_GET_OBJECT_VISUALS);
 
   m_find_object_server = rclcpp_action::create_server<FindObjectAction>(
     this,
     K_FIND_OBJECT_ACTION,
-    [this](const auto& uuid, auto goal) { return handleFindObjectGoal(uuid, std::move(goal)); },
-    [this](auto goal_handle) { return handleFindObjectCancel(std::move(goal_handle)); },
-    [this](auto goal_handle) { handleFindObjectAccepted(std::move(goal_handle)); });
+    [this](const auto& uuid, const auto& goal) { return handleFindObjectGoal(uuid, goal); },
+    [](const auto& goal_handle) { return handleFindObjectCancel(goal_handle); },
+    [this](const auto& goal_handle) { handleFindObjectAccepted(goal_handle); });
 
   m_prompt_llm_server = rclcpp_action::create_server<PromptLLMAction>(
     this,
     K_PROMPT_LLM_ACTION,
-    [this](const auto& uuid, auto goal) { return handlePromptLLMGoal(uuid, std::move(goal)); },
-    [this](auto goal_handle) { return handlePromptLLMCancel(std::move(goal_handle)); },
-    [this](auto goal_handle) { handlePromptLLMAccepted(std::move(goal_handle)); });
+    [this](const auto& uuid, const auto& goal) { return handlePromptLLMGoal(uuid, goal); },
+    [](const auto& goal_handle) { return handlePromptLLMCancel(goal_handle); },
+    [this](const auto& goal_handle) { handlePromptLLMAccepted(goal_handle); });
 
   RCLCPP_INFO(get_logger(),
               "SceneGraphQueryNode started (model: %s, server: %s)",
@@ -382,7 +383,7 @@ oai::OpenAIClient SceneGraphQueryNode::makeClient() const
             "semantic_scene_forests_query")
     .header("X-OpenRouter-Title", "semantic_scene_forests_query")
     .temperature(static_cast<float>(m_params.temperature))
-    .maxTokens(m_params.max_tokens)
+    .maxTokens(static_cast<int>(m_params.max_tokens))
     .extraBody(m_extra_body)
     .connectTimeout(CONNECT_TIMEOUT)
     .requestTimeout(REQUEST_TIMEOUT)
@@ -414,7 +415,7 @@ SceneGraphQueryNode::runAgent(const std::string& system_prompt_key,
 
   auto agent = oai::AgentBuilder{}
                  .systemPrompt(renderSystemPrompt(system_prompt_key))
-                 .maxSteps(m_params.max_steps)
+                 .maxSteps(static_cast<int>(m_params.max_steps))
                  .client(makeClient())
                  .tools(session.buildTools())
                  .build();
@@ -457,7 +458,7 @@ void SceneGraphQueryNode::guardedTerminal(const std::function<void()>& terminal)
 
 rclcpp_action::GoalResponse
 SceneGraphQueryNode::handleFindObjectGoal(const rclcpp_action::GoalUUID& /*uuid*/,
-                                          std::shared_ptr<const FindObjectAction::Goal> goal)
+                                          const std::shared_ptr<const FindObjectAction::Goal>& goal)
 {
   if (goal->object_description.empty())
   {
@@ -709,7 +710,7 @@ SceneGraphQueryNode::validateFindObjectAnswer(const AgentOutcome& outcome) const
 
 rclcpp_action::GoalResponse
 SceneGraphQueryNode::handlePromptLLMGoal(const rclcpp_action::GoalUUID& /*uuid*/,
-                                         std::shared_ptr<const PromptLLMAction::Goal> goal)
+                                         const std::shared_ptr<const PromptLLMAction::Goal>& goal)
 {
   if (goal->query.empty())
   {
@@ -867,7 +868,7 @@ void SceneGraphQueryNode::executePromptLLM(const std::shared_ptr<PromptLLMGoal>&
 void SceneGraphQueryNode::onConnectivityDiagnostic(
   diagnostic_updater::DiagnosticStatusWrapper& stat)
 {
-  const bool service_ready = m_visuals_client->service_is_ready();
+  const bool SERVICE_READY = m_visuals_client->service_is_ready();
 
   bool has_graph = false;
   size_t objects = 0;
@@ -879,7 +880,7 @@ void SceneGraphQueryNode::onConnectivityDiagnostic(
 
   stat.add("Has scene graph", has_graph);
   stat.add("Scene graph objects", objects);
-  stat.add("GetObjectVisuals ready", service_ready);
+  stat.add("GetObjectVisuals ready", SERVICE_READY);
   m_llm_errors.report(stat, "LLM");
   m_service_errors.report(stat, "Service");
   m_action_errors.report(stat, "Action");
@@ -897,7 +898,7 @@ void SceneGraphQueryNode::onConnectivityDiagnostic(
     stat.summary(diagnostic_msgs::msg::DiagnosticStatus::ERROR,
                  "LLM endpoint unreachable: " + m_params.server_url);
   }
-  else if (!service_ready)
+  else if (!SERVICE_READY)
   {
     stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN,
                  "GetObjectVisuals service not available");

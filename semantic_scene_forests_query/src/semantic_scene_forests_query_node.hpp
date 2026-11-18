@@ -203,8 +203,8 @@ private:
 
   rclcpp_action::GoalResponse
   handleFindObjectGoal(const rclcpp_action::GoalUUID& uuid,
-                       std::shared_ptr<const FindObjectAction::Goal> goal);
-  rclcpp_action::CancelResponse
+                       const std::shared_ptr<const FindObjectAction::Goal>& goal);
+  static rclcpp_action::CancelResponse
   handleFindObjectCancel(const std::shared_ptr<FindObjectGoal>& goal_handle);
   void handleFindObjectAccepted(const std::shared_ptr<FindObjectGoal>& goal_handle);
   void executeFindObject(const std::shared_ptr<FindObjectGoal>& goal_handle, std::stop_token stop);
@@ -212,8 +212,8 @@ private:
   // ── PromptLLM action ────────────────────────────────────────────────────--
   rclcpp_action::GoalResponse
   handlePromptLLMGoal(const rclcpp_action::GoalUUID& uuid,
-                      std::shared_ptr<const PromptLLMAction::Goal> goal);
-  rclcpp_action::CancelResponse
+                      const std::shared_ptr<const PromptLLMAction::Goal>& goal);
+  static rclcpp_action::CancelResponse
   handlePromptLLMCancel(const std::shared_ptr<PromptLLMGoal>& goal_handle);
   void handlePromptLLMAccepted(const std::shared_ptr<PromptLLMGoal>& goal_handle);
   void executePromptLLM(const std::shared_ptr<PromptLLMGoal>& goal_handle, std::stop_token stop);

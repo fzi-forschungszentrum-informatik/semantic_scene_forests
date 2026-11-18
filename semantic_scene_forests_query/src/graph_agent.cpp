@@ -63,6 +63,7 @@ std::expected<int64_t, std::string> parseId(std::string_view args)
 }
 
 // Extract an optional string field; returns "" when absent.
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters): fixed parameter order
 std::string parseOptionalString(std::string_view args, std::string_view key)
 {
   const json PARSED = json::parse(args, nullptr, /*allow_exceptions=*/false);
