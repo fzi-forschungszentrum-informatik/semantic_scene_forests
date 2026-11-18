@@ -126,8 +126,7 @@ protected:
     return out.success;
   }
 
-  // NOLINTNEXTLINE(bugprone-easily-swappable-parameters): source/target ids, mirrors the service
-  // request
+  // NOLINTNEXTLINE(bugprone-easily-swappable-parameters): source/target ids
   bool addEdge(int64_t source, int64_t target, const std::string& label)
   {
     AddEdge::Request request;
