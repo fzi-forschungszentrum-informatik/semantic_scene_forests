@@ -27,7 +27,8 @@
 // POSSIBILITY OF SUCH DAMAGE.
 
 #ifndef SEMANTIC_SCENE_FORESTS__VISIBILITY_CONTROL_HPP_
-#define SEMANTIC_SCENE_FORESTS__VISIBILITY_CONTROL_HPP_
+// ROS visibility-header naming convention
+#define SEMANTIC_SCENE_FORESTS__VISIBILITY_CONTROL_HPP_ // NOLINT(bugprone-reserved-identifier)
 
 // This logic was borrowed (then namespaced) from the examples on the gcc wiki:
 //     https://gcc.gnu.org/wiki/Visibility

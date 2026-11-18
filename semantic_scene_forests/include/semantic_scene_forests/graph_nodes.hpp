@@ -54,6 +54,8 @@ struct WorkerState
   bool processed{false};
 };
 
+// NOLINTBEGIN(readability-redundant-member-init): the `{}` initializers are required, removing them
+// breaks the build
 struct ConceptNode
 {
   int64_t id{0};
@@ -89,6 +91,7 @@ struct ObjectNode
   std::strong_ordering operator<=>(const ObjectNode& other) const { return id <=> other.id; }
   bool operator==(const ObjectNode& other) const { return id == other.id; }
 };
+// NOLINTEND(readability-redundant-member-init)
 
 inline std::ostream& operator<<(std::ostream& os, const ObjectNode& n)
 {

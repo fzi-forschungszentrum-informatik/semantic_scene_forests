@@ -305,7 +305,10 @@ SceneGraph::findOrAddConceptUnlocked(const std::string& label) noexcept
 }
 
 std::expected<ConceptLookup, SceneGraphError> SceneGraph::addConceptEdge(
-  const int64_t source_id, const std::string& relation, const std::string& label) noexcept
+  const int64_t source_id,
+  // NOLINTNEXTLINE(bugprone-easily-swappable-parameters): relation vs. label, both free text
+  const std::string& relation,
+  const std::string& label) noexcept
 {
   const std::unique_lock LOCK(m_mutex);
   const auto CLEAN = conceptLabel(label);
@@ -325,12 +328,13 @@ std::expected<ConceptLookup, SceneGraphError> SceneGraph::addConceptEdge(
   if (auto edge = addEdgeUnlocked(source_id, *added, relation); !edge)
   {
     // A fresh concept has no edges, so removing it cannot fail or touch other data.
-    (void)removeNodeUnlocked(*added);
+    [[maybe_unused]] const auto REMOVED = removeNodeUnlocked(*added);
     return std::unexpected(edge.error());
   }
   return ConceptLookup{.id = *added, .created = true};
 }
 
+// NOLINTNEXTLINE(bugprone-exception-escape): allocation failure terminates, by design
 std::expected<void, SceneGraphError> SceneGraph::markProcessed(const int64_t id,
                                                                const std::string& worker) noexcept
 {
@@ -344,6 +348,7 @@ std::expected<void, SceneGraphError> SceneGraph::markProcessed(const int64_t id,
   return {};
 }
 
+// NOLINTNEXTLINE(bugprone-exception-escape): allocation failure terminates, by design
 std::vector<int64_t> SceneGraph::unprocessedBy(const std::string& worker) const noexcept
 {
   const std::shared_lock LOCK(m_mutex);
@@ -866,6 +871,7 @@ std::expected<std::unique_ptr<SceneGraph>, SceneGraphError> SceneGraph::clone() 
   return result;
 }
 
+// NOLINTNEXTLINE(bugprone-exception-escape): allocation failure terminates, by design
 void SceneGraph::swap(SceneGraph& other) noexcept
 {
   if (this == &other)
