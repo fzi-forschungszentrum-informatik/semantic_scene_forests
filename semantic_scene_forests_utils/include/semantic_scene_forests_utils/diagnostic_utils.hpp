@@ -26,8 +26,8 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 
-#ifndef SEMANTIC_SCENE_FORESTS_UTILS__DIAGNOSTIC_UTILS_HPP_
-#define SEMANTIC_SCENE_FORESTS_UTILS__DIAGNOSTIC_UTILS_HPP_
+#ifndef SEMANTIC_SCENE_FORESTS_UTILS_DIAGNOSTIC_UTILS_HPP_
+#define SEMANTIC_SCENE_FORESTS_UTILS_DIAGNOSTIC_UTILS_HPP_
 
 #include <chrono>
 #include <mutex>
@@ -54,57 +54,57 @@ class ErrorCounter
 public:
   void increment()
   {
-    std::lock_guard<std::mutex> lock(mutex_);
-    error_count_++;
-    last_error_time_ = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_error_count++;
+    m_last_error_time = std::chrono::steady_clock::now();
   }
 
   void increment(const std::string& last_error_msg)
   {
-    std::lock_guard<std::mutex> lock(mutex_);
-    error_count_++;
-    last_error_time_    = std::chrono::steady_clock::now();
-    last_error_message_ = last_error_msg;
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_error_count++;
+    m_last_error_time    = std::chrono::steady_clock::now();
+    m_last_error_message = last_error_msg;
   }
 
   size_t count() const
   {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return error_count_;
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_error_count;
   }
 
   // Adds the count / last-error fields to an existing status wrapper without
   // touching the summary, so several counters can share one diagnostic task.
   void report(diagnostic_updater::DiagnosticStatusWrapper& stat, const std::string& label) const
   {
-    std::lock_guard<std::mutex> lock(mutex_);
-    stat.add(label + " error count", error_count_);
-    if (!last_error_message_.empty())
+    std::lock_guard<std::mutex> lock(m_mutex);
+    stat.add(label + " error count", m_error_count);
+    if (!m_last_error_message.empty())
     {
-      stat.add(label + " last error", last_error_message_);
+      stat.add(label + " last error", m_last_error_message);
     }
-    if (error_count_ > 0)
+    if (m_error_count > 0)
     {
       auto age =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - last_error_time_).count();
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - m_last_error_time).count();
       stat.add(label + " time since last error (s)", age);
     }
   }
 
   void reset()
   {
-    std::lock_guard<std::mutex> lock(mutex_);
-    error_count_ = 0;
-    last_error_message_.clear();
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_error_count = 0;
+    m_last_error_message.clear();
   }
 
 private:
-  mutable std::mutex mutex_;
-  size_t error_count_{0};
-  std::chrono::time_point<std::chrono::steady_clock> last_error_time_;
-  std::string last_error_message_;
+  mutable std::mutex m_mutex;
+  size_t m_error_count{0};
+  std::chrono::time_point<std::chrono::steady_clock> m_last_error_time;
+  std::string m_last_error_message;
 };
 
 } // namespace semantic_scene_forests_utils
 
-#endif // SEMANTIC_SCENE_FORESTS_UTILS__DIAGNOSTIC_UTILS_HPP_
+#endif // SEMANTIC_SCENE_FORESTS_UTILS_DIAGNOSTIC_UTILS_HPP_
