@@ -26,7 +26,8 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-# Remove an object node and its edges. The tracker suppresses the live track.
+# Remove an object node and its edges. The tracker suppresses the live track: camera
+# sightings do not recreate it, an explicit add_observations sighting revives it (same id).
 int64 object_id
 ---
 bool success

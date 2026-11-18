@@ -43,7 +43,7 @@ loaded = SceneGraph.from_msg(message)
 
 Methods use snake_case. Mutating operations return their successful C++ values and raise `GraphError` with a `GraphErrorKind` on graph failures. `find_node()` returns `None` for an absent ID.
 
-`ObjectNode.bbox`, `last_seen`, `last_updated` and the stamps of `ObjectNode.crops` are copied between Python and C++; they do not share mutable message storage with the graph. `ObjectNode.workers` is a `dict[str, bool]` (worker name to processed flag). Atomic helpers (`update_object_pose`, `offer_crop`, `set_crop_policy`, `set_object_class`, `find_or_add_concept`, `find_concept`, `add_concept_edge`, `mark_processed`, `unprocessed_by`, `prune_isolated_concepts`) mirror the C++ methods. Object and concept ids are positive and come from one counter.
+`ObjectNode.bbox`, `last_seen`, `last_updated` and the stamps of `ObjectNode.crops` are copied between Python and C++; they do not share mutable message storage with the graph. `ObjectNode.workers` is a `dict[str, bool]` (worker name to processed flag). Atomic helpers (`update_object_pose`, `offer_crop`, `set_crop_policy`, `set_object_class`, `find_or_add_concept`, `find_concept`, `add_concept_edge` (returns the new concept id; an existing label raises), `mark_processed`, `unprocessed_by`, `prune_isolated_concepts`) mirror the C++ methods. Object and concept ids are positive and come from one counter.
 
 ## ROS Message Conversion
 

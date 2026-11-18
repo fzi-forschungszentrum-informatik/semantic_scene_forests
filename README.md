@@ -27,7 +27,7 @@ operator-facing views.
 | `/scene_graph` | `semantic_scene_forests_msgs/msg/SceneGraph` | Current semantic graph, including object nodes with class, bbox and timestamps |
 | `/get_objects` | `semantic_scene_forests_object_msgs/srv/GetObjects` | Current object nodes (`semantic_scene_forests_msgs/ObjectNode[]`) |
 | `/get_object_visuals` | `semantic_scene_forests_object_msgs/srv/GetObjectVisuals` | Fetch image crops for object IDs (JPEG decoded to `sensor_msgs/Image`) |
-| `/delete_object` | `semantic_scene_forests_object_msgs/srv/DeleteObject` | Remove an object node; its live track is suppressed, not recreated |
+| `/delete_object` | `semantic_scene_forests_object_msgs/srv/DeleteObject` | Remove an object node; camera sightings do not recreate it, an explicit `add_observations` sighting revives it (same id) |
 | `/edit_object` | `semantic_scene_forests_object_msgs/srv/EditObject` | Set an object's class name |
 | `/add_object` | `semantic_scene_forests_object_msgs/srv/AddObject` | Tracker: add a manual object as a confirmed track. Returns `object_id` at once; the node appears at the next tracker cycle (~200 ms at 5 Hz) |
 | `/add_observations` | `semantic_scene_forests_object_msgs/srv/AddObservations` | Register sightings from a non-camera source (tracker worker) |

@@ -368,8 +368,7 @@ PYBIND11_MODULE(_semantic_scene_forests, module)
          int64_t source_id,
          const std::string& relation,
          const std::string& label) {
-        const auto LOOKUP = unwrap(graph.addConceptEdge(source_id, relation, label));
-        return std::make_pair(LOOKUP.id, LOOKUP.created);
+        return unwrap(graph.addConceptEdge(source_id, relation, label)).id;
       },
       py::arg("source_id"),
       py::arg("relation"),
