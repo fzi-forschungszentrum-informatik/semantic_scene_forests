@@ -126,6 +126,8 @@ protected:
     return out.success;
   }
 
+  // NOLINTNEXTLINE(bugprone-easily-swappable-parameters): source/target ids, mirrors the service
+  // request
   bool addEdge(int64_t source, int64_t target, const std::string& label)
   {
     AddEdge::Request request;
@@ -184,7 +186,10 @@ TEST_F(SceneGraphManagerNodeTest, EditObjectChangesClass)
 
   EXPECT_TRUE(call<EditObject>("edit_object", request)->success);
   const auto NODE = m_node->graph()->findNode(CUP);
-  ASSERT_TRUE(NODE.has_value());
+  if (!NODE)
+  {
+    FAIL() << "object node missing";
+  }
   EXPECT_EQ(std::get<ObjectNode>(*NODE).class_name, "mug");
 
   request.object_id = CUP + 100;
