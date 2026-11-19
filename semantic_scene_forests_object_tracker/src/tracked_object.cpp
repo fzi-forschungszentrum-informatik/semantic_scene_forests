@@ -30,31 +30,39 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 #include <vision_msgs/msg/object_hypothesis_with_pose.hpp>
 
 namespace semantic_scene_forests_object_tracker {
 
 TrackedObject::TrackedObject(const DetectionAdapter& initial_detection,
-                             double initial_time,
+                             const rclcpp::Time& initial_time,
                              uint64_t track_id,
                              double measurement_std,
                              double process_noise_std,
                              int confirmation_threshold,
-                             size_t max_crops)
+                             size_t max_crops,
+                             double bbox_size_alpha)
   : track_id(track_id)
   , class_id(initial_detection.class_id)
   , class_name(initial_detection.class_name)
   , bbox3d_frame_id(initial_detection.frame_id)
   , score(initial_detection.score)
-  , confirmed(false)
+  , confirmed(confirmation_threshold <= 1)
   , observation_count(1)
   , last_seen(initial_time)
   , last_detection(initial_detection)
   , m_process_noise_std(process_noise_std)
+  , m_bbox_size_alpha(bbox_size_alpha)
   , m_confirmation_threshold(confirmation_threshold)
   , m_max_crops(max_crops)
 {
+  if (!(bbox_size_alpha > 0.0 && bbox_size_alpha <= 1.0))
+  {
+    throw std::invalid_argument("bbox_size_alpha must be in (0, 1]");
+  }
+
   bbox3d_size = Eigen::Vector3d(initial_detection.bbox3d.size.x,
                                 initial_detection.bbox3d.size.y,
                                 initial_detection.bbox3d.size.z);
@@ -77,7 +85,7 @@ void TrackedObject::predict(double dt)
   m_covariance += Eigen::Matrix3d::Identity() * (q * q);
 }
 
-void TrackedObject::update(const DetectionAdapter& detection, double current_time)
+void TrackedObject::update(const DetectionAdapter& detection, const rclcpp::Time& current_time)
 {
   Eigen::Vector3d z(detection.bbox3d.center.position.x,
                     detection.bbox3d.center.position.y,
@@ -92,34 +100,12 @@ void TrackedObject::update(const DetectionAdapter& detection, double current_tim
 
   m_class_history[detection.class_name]++;
   m_class_id_map[detection.class_name] = detection.class_id;
-
-  int max_count = 0;
-  for (const auto& [name, count] : m_class_history)
-  {
-    if (count > max_count)
-    {
-      max_count  = count;
-      class_name = name;
-    }
-  }
-  class_id = m_class_id_map[class_name];
-
-  Eigen::Vector3d cur_pos = getPosition();
-  Eigen::Vector3d cur_min = cur_pos - bbox3d_size / 2.0;
-  Eigen::Vector3d cur_max = cur_pos + bbox3d_size / 2.0;
+  refreshClassName();
 
   Eigen::Vector3d det_size(
     detection.bbox3d.size.x, detection.bbox3d.size.y, detection.bbox3d.size.z);
-  Eigen::Vector3d det_min = z - det_size / 2.0;
-  Eigen::Vector3d det_max = z + det_size / 2.0;
-
-  Eigen::Vector3d union_min  = cur_min.cwiseMin(det_min);
-  Eigen::Vector3d union_max  = cur_max.cwiseMax(det_max);
-  Eigen::Vector3d union_size = union_max - union_min;
-
-  double alpha = 1.0 / (observation_count + 1);
-  bbox3d_size  = (1.0 - alpha) * bbox3d_size + alpha * union_size;
-  score        = detection.score;
+  bbox3d_size = (1.0 - m_bbox_size_alpha) * bbox3d_size + m_bbox_size_alpha * det_size;
+  score       = detection.score;
 
   last_detection    = detection;
   last_seen         = std::max(last_seen, current_time);
@@ -162,34 +148,50 @@ double TrackedObject::mahalanobisDistance(const DetectionAdapter& detection)
   return std::sqrt(std::max(0.0, dist_sq));
 }
 
-double TrackedObject::bbox3dOverlap(const TrackedObject& a, const TrackedObject& b)
+double TrackedObject::coveredFraction(const Eigen::Vector3d& center_a,
+                                      const Eigen::Vector3d& size_a,
+                                      const Eigen::Vector3d& center_b,
+                                      const Eigen::Vector3d& size_b,
+                                      double min_extent)
 {
-  Eigen::Vector3d a_pos = a.getPosition();
-  Eigen::Vector3d b_pos = b.getPosition();
+  const Eigen::Vector3d A_SIZE    = size_a.cwiseMax(min_extent);
+  const Eigen::Vector3d B_SIZE    = size_b.cwiseMax(min_extent);
+  const Eigen::Vector3d INTER_MIN = (center_a - A_SIZE / 2.0).cwiseMax(center_b - B_SIZE / 2.0);
+  const Eigen::Vector3d INTER_MAX = (center_a + A_SIZE / 2.0).cwiseMin(center_b + B_SIZE / 2.0);
+  const double B_VOLUME           = B_SIZE.prod();
+  return B_VOLUME > 0.0 ? (INTER_MAX - INTER_MIN).cwiseMax(0.0).prod() / B_VOLUME : 0.0;
+}
 
-  Eigen::Vector3d a_min = a_pos - a.bbox3d_size / 2.0;
-  Eigen::Vector3d a_max = a_pos + a.bbox3d_size / 2.0;
-  Eigen::Vector3d b_min = b_pos - b.bbox3d_size / 2.0;
-  Eigen::Vector3d b_max = b_pos + b.bbox3d_size / 2.0;
+double
+TrackedObject::overlapOfSmaller(const TrackedObject& a, const TrackedObject& b, double min_extent)
+{
+  return std::max(
+    coveredFraction(a.m_position, a.bbox3d_size, b.m_position, b.bbox3d_size, min_extent),
+    coveredFraction(b.m_position, b.bbox3d_size, a.m_position, a.bbox3d_size, min_extent));
+}
 
-  Eigen::Vector3d inter_min  = a_min.cwiseMax(b_min);
-  Eigen::Vector3d inter_max  = a_max.cwiseMin(b_max);
-  Eigen::Vector3d inter_size = (inter_max - inter_min).cwiseMax(0.0);
-  double inter_vol           = inter_size.x() * inter_size.y() * inter_size.z();
-
-  double a_vol     = a.bbox3d_size.x() * a.bbox3d_size.y() * a.bbox3d_size.z();
-  double b_vol     = b.bbox3d_size.x() * b.bbox3d_size.y() * b.bbox3d_size.z();
-  double union_vol = a_vol + b_vol - inter_vol;
-
-  if (union_vol <= 0.0)
-  {
-    return 0.0;
-  }
-  return inter_vol / union_vol;
+bool TrackedObject::sizesCompatible(const Eigen::Vector3d& a,
+                                    const Eigen::Vector3d& b,
+                                    double max_ratio)
+{
+  const double LARGER  = std::max(a.maxCoeff(), b.maxCoeff());
+  const double SMALLER = std::min(a.maxCoeff(), b.maxCoeff());
+  return SMALLER > 0.0 && LARGER <= max_ratio * SMALLER;
 }
 
 void TrackedObject::mergeFrom(const TrackedObject& other)
 {
+  if (other.last_seen > last_seen)
+  {
+    m_position      = other.m_position;
+    m_covariance    = other.m_covariance;
+    last_detection  = other.last_detection;
+    bbox3d_frame_id = other.bbox3d_frame_id;
+    bbox3d_size     = other.bbox3d_size;
+    score           = other.score;
+    last_seen       = other.last_seen;
+  }
+
   for (const auto& [name, count] : other.m_class_history)
   {
     m_class_history[name] += count;
@@ -207,6 +209,46 @@ void TrackedObject::mergeFrom(const TrackedObject& other)
   observation_count = std::max(observation_count, other.observation_count);
   last_seen         = std::max(last_seen, other.last_seen);
   time_since_update = std::min(time_since_update, other.time_since_update);
+  refreshClassName();
+}
+
+bool TrackedObject::setDecidedLabel(const std::string& label)
+{
+  if (!m_class_history.contains(label))
+  {
+    return false;
+  }
+  m_decided_label = label;
+  m_decided_over.clear();
+  for (const auto& [name, count] : m_class_history)
+  {
+    m_decided_over.insert(name);
+  }
+  refreshClassName();
+  return true;
+}
+
+std::set<std::string> TrackedObject::labels() const
+{
+  std::set<std::string> result;
+  for (const auto& [name, count] : m_class_history)
+  {
+    result.insert(name);
+  }
+  return result;
+}
+
+void TrackedObject::refreshClassName()
+{
+  if (m_decided_label && std::ranges::all_of(m_class_history, [this](const auto& entry) {
+        return m_decided_over.contains(entry.first);
+      }))
+  {
+    class_name = *m_decided_label;
+    class_id   = m_class_id_map[class_name];
+    return;
+  }
+  m_decided_label.reset();
 
   int max_count = 0;
   for (const auto& [name, count] : m_class_history)
@@ -225,7 +267,9 @@ vision_msgs::msg::Detection3D TrackedObject::toDetection3D() const
   vision_msgs::msg::Detection3D det;
 
   det.header.frame_id = bbox3d_frame_id;
-  det.id              = std::to_string(track_id);
+  // Observation time, independent of prediction and snapshot publication time.
+  det.header.stamp = last_seen;
+  det.id           = std::to_string(track_id);
 
   det.bbox.center.position.x  = m_position.x();
   det.bbox.center.position.y  = m_position.y();

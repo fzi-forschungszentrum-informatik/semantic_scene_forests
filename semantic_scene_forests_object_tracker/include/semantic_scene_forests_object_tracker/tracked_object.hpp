@@ -30,11 +30,14 @@
 
 #include <cstdint>
 #include <deque>
+#include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include <Eigen/Dense>
+#include <rclcpp/time.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <vision_msgs/msg/detection2_d.hpp>
 #include <vision_msgs/msg/detection3_d.hpp>
@@ -55,22 +58,41 @@ class TrackedObject
 {
 public:
   TrackedObject(const DetectionAdapter& initial_detection,
-                double initial_time,
+                const rclcpp::Time& initial_time,
                 uint64_t track_id,
                 double measurement_std,
                 double process_noise_std,
                 int confirmation_threshold,
-                size_t max_crops);
+                size_t max_crops,
+                double bbox_size_alpha = 0.2);
 
   void predict(double dt);
-  void update(const DetectionAdapter& detection, double current_time);
+  void update(const DetectionAdapter& detection, const rclcpp::Time& current_time);
 
   Eigen::Vector3d getPosition() const;
   Eigen::Matrix3d getPositionCovariance() const;
   double mahalanobisDistance(const DetectionAdapter& detection);
 
-  static double bbox3dOverlap(const TrackedObject& a, const TrackedObject& b);
+  // Fraction of box b's volume inside box a. Extents are padded to min_extent first: depth
+  // often gives near-zero extents along the viewing ray, which makes raw volumes meaningless.
+  static double coveredFraction(const Eigen::Vector3d& center_a,
+                                const Eigen::Vector3d& size_a,
+                                const Eigen::Vector3d& center_b,
+                                const Eigen::Vector3d& size_b,
+                                double min_extent);
+  // Fraction of the smaller box inside the other: 1 when one box contains the other. Unlike IoU
+  // it stays high for partial-view boxes of one object.
+  static double overlapOfSmaller(const TrackedObject& a, const TrackedObject& b, double min_extent);
+  // True when the largest dimensions differ by at most max_ratio. Per-axis ratios are useless
+  // here: depth often yields a near-zero extent along the viewing direction.
+  static bool sizesCompatible(const Eigen::Vector3d& a, const Eigen::Vector3d& b, double max_ratio);
   void mergeFrom(const TrackedObject& other);
+
+  // Externally decided label; it wins over the majority vote until a label not
+  // seen at decision time is observed. Rejects labels outside the class history.
+  bool setDecidedLabel(const std::string& label);
+  // Every label this track was observed with.
+  std::set<std::string> labels() const;
 
   vision_msgs::msg::Detection3D toDetection3D() const;
 
@@ -84,9 +106,8 @@ public:
   Eigen::Vector3d bbox3d_size;
   double score;
   bool confirmed;
-  bool published{false};
   int observation_count;
-  double last_seen;
+  rclcpp::Time last_seen;
   double time_since_update{0.0};
   DetectionAdapter last_detection;
 
@@ -95,10 +116,15 @@ private:
   Eigen::Matrix3d m_covariance;
   Eigen::Matrix3d m_measurement_noise;
   double m_process_noise_std;
+  double m_bbox_size_alpha;
   int m_confirmation_threshold;
 
   std::unordered_map<std::string, int> m_class_history;
   std::unordered_map<std::string, int> m_class_id_map;
+  std::optional<std::string> m_decided_label;
+  std::set<std::string> m_decided_over;
+
+  void refreshClassName();
 
   std::deque<sensor_msgs::msg::Image> m_crops;
   size_t m_max_crops;

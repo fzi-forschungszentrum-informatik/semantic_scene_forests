@@ -35,7 +35,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_components/register_node_macro.hpp>
 #include <semantic_scene_forests_object_msgs/msg/managed_object_array.hpp>
-#include <semantic_scene_forests_object_msgs/msg/object_candidate.hpp>
+#include <semantic_scene_forests_object_msgs/msg/object_candidate_array.hpp>
 #include <semantic_scene_forests_object_msgs/srv/block_object.hpp>
 #include <semantic_scene_forests_object_msgs/srv/edit_object.hpp>
 #include <semantic_scene_forests_object_msgs/srv/get_object_visuals.hpp>
@@ -54,8 +54,8 @@ public:
   explicit ObjectManagerNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
 
 private:
-  void onObjectCandidate(
-    const semantic_scene_forests_object_msgs::msg::ObjectCandidate::ConstSharedPtr& candidate);
+  void onObjectSnapshot(
+    const semantic_scene_forests_object_msgs::msg::ObjectCandidateArray::ConstSharedPtr& snapshot);
 
   void onGetObjects(
     const semantic_scene_forests_object_msgs::srv::GetObjects::Request::SharedPtr& request,
@@ -86,8 +86,8 @@ private:
   std::shared_ptr<object_manager::ParamListener> m_param_listener;
   object_manager::Params m_params;
 
-  rclcpp::Subscription<semantic_scene_forests_object_msgs::msg::ObjectCandidate>::SharedPtr
-    m_candidate_sub;
+  rclcpp::Subscription<semantic_scene_forests_object_msgs::msg::ObjectCandidateArray>::SharedPtr
+    m_snapshot_sub;
   rclcpp::Publisher<semantic_scene_forests_object_msgs::msg::ManagedObjectArray>::SharedPtr
     m_managed_pub;
 
@@ -105,7 +105,7 @@ private:
   diagnostic_updater::Updater m_diagnostic_updater;
   double m_min_freq{0.1};
   double m_max_freq{1000.0};
-  std::unique_ptr<diagnostic_updater::HeaderlessTopicDiagnostic> m_candidate_freq;
+  std::unique_ptr<diagnostic_updater::HeaderlessTopicDiagnostic> m_snapshot_freq;
 };
 
 } // namespace semantic_scene_forests_object_manager

@@ -28,19 +28,24 @@
 
 #include "semantic_scene_forests_object_tracker/object_tracker_component.hpp"
 
-#include "tracker_geometry.hpp"
-
-#include <algorithm>
-#include <cmath>
-#include <functional>
-#include <limits>
+#include <chrono>
 #include <set>
 #include <stdexcept>
 #include <utility>
 
+#include <tf2/exceptions.hpp>
+
+#include "arbiter_worker.hpp"
+#include "camera_tracker.hpp"
+#include "global_tracker.hpp"
+#include "tracker_geometry.hpp"
+
 namespace semantic_scene_forests_object_tracker {
 
 namespace {
+
+// Tracklet camera of add_observations sightings; camera names are user-chosen identifiers.
+const std::string MANUAL_SOURCE = "<manual>";
 
 // message_filters >= 7 (Kilted onwards) takes an rclcpp::QoS; message_filters 6 (Jazzy) only
 // accepts an rmw_qos_profile_t. Select the available overload at compile time so the package
@@ -49,32 +54,39 @@ template <typename TSubscriber, typename TNode>
 void subscribeWithQoS(TSubscriber& subscriber,
                       TNode* node,
                       const std::string& topic,
-                      const rclcpp::QoS& qos)
+                      const rclcpp::QoS& qos,
+                      const rclcpp::SubscriptionOptions& options)
 {
-  if constexpr (requires { subscriber.subscribe(node, topic, qos); })
+  if constexpr (requires { subscriber.subscribe(node, topic, qos, options); })
   {
-    subscriber.subscribe(node, topic, qos);
+    subscriber.subscribe(node, topic, qos, options);
   }
   else
   {
-    subscriber.subscribe(node, topic, qos.get_rmw_qos_profile());
+    subscriber.subscribe(node, topic, qos.get_rmw_qos_profile(), options);
   }
 }
 
 } // namespace
 
-ObjectTrackerComponent::CameraInput::CameraInput(ObjectTrackerComponent& owner, std::string name)
+ObjectTrackerComponent::CameraInput::CameraInput(ObjectTrackerComponent& owner,
+                                                 std::string name,
+                                                 int rotation)
   : owner(owner)
   , name(std::move(name))
+  , group(owner.create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive))
+  , tracker(std::make_unique<CameraTracker>(this->name, rotation, owner.get_logger()))
 {
 }
+
+ObjectTrackerComponent::CameraInput::~CameraInput() = default;
 
 void ObjectTrackerComponent::CameraInput::onSynchronized(
   const vision_msgs::msg::Detection2DArray::ConstSharedPtr& det2d_msg,
   const vision_msgs::msg::Detection3DArray::ConstSharedPtr& det3d_msg,
   const sensor_msgs::msg::Image::ConstSharedPtr& img_msg)
 {
-  owner.syncedCallbackVision(*this, det2d_msg, det3d_msg, img_msg);
+  owner.onCameraFrame(*this, *det2d_msg, *det3d_msg, *img_msg);
 }
 
 ObjectTrackerComponent::ObjectTrackerComponent(const rclcpp::NodeOptions& options)
@@ -85,25 +97,44 @@ ObjectTrackerComponent::ObjectTrackerComponent(const rclcpp::NodeOptions& option
 {
   m_param_listener = std::make_shared<object_tracker::ParamListener>(
     this->get_node_parameters_interface(), this->get_logger());
-  m_params = m_param_listener->get_params();
+  const auto PARAMS = m_param_listener->get_params();
+  m_world_frame     = PARAMS.world_frame;
+  if (PARAMS.snapshot_rate_hz <= 0.0)
+  {
+    throw std::invalid_argument("snapshot_rate_hz must be > 0 (it drives the global cycle)");
+  }
 
   m_diagnostic_updater.setHardwareID("object_tracker");
   m_diagnostic_updater.add("Health", this, &ObjectTrackerComponent::onHealthDiagnostic);
 
-  m_world_frame = m_params.world_frame;
+  m_global = std::make_unique<GlobalTracker>(this->get_logger().get_child("global"));
+  if (PARAMS.arbiter.enabled)
+  {
+    // Throws for an unknown provider, an invalid extra_body or a missing key.
+    auto decide       = makeDecisionClient(PARAMS.arbiter);
+    const auto FORMAT = parseDecisionProvider(PARAMS.arbiter.provider);
+    if (!FORMAT)
+    {
+      throw std::invalid_argument("arbiter.provider: " + PARAMS.arbiter.provider);
+    }
+    m_arbiter = std::make_unique<ArbiterWorker>(std::move(decide), *FORMAT, PARAMS.arbiter.model);
+    RCLCPP_INFO(this->get_logger(),
+                "Identity arbiter on: provider %s, model %s",
+                PARAMS.arbiter.provider.c_str(),
+                PARAMS.arbiter.model.c_str());
+  }
 
-  auto sensor_qos = rclcpp::SensorDataQoS();
-
+  const auto SENSOR_QOS = rclcpp::SensorDataQoS();
   std::set<std::string> input_topics;
-  for (const auto& name : m_params.camera_names)
+  for (const auto& name : PARAMS.camera_names)
   {
     if (name.empty())
     {
       throw std::invalid_argument("Camera names must not be empty");
     }
-    const auto& topics = m_params.cameras.camera_names_map.at(name);
+    const auto& config = PARAMS.cameras.camera_names_map.at(name);
     for (const auto& topic :
-         {topics.detections_2d_topic, topics.detections_3d_topic, topics.image_topic})
+         {config.detections_2d_topic, config.detections_3d_topic, config.image_topic})
     {
       const auto RESOLVED = this->get_node_topics_interface()->resolve_topic_name(topic);
       if (!input_topics.insert(RESOLVED).second)
@@ -112,14 +143,19 @@ ObjectTrackerComponent::ObjectTrackerComponent(const rclcpp::NodeOptions& option
       }
     }
 
-    auto camera = std::make_unique<CameraInput>(*this, name);
-    // Default subscriptions share the node's mutually exclusive callback group.
-    subscribeWithQoS(camera->det2d_sub, this, topics.detections_2d_topic, sensor_qos);
-    subscribeWithQoS(camera->det3d_sub, this, topics.detections_3d_topic, sensor_qos);
-    subscribeWithQoS(camera->img_sub, this, topics.image_topic, sensor_qos);
+    auto camera = std::make_unique<CameraInput>(*this, name, config.image_rotation);
+    rclcpp::SubscriptionOptions sub_options;
+    sub_options.callback_group = camera->group; // One thread at a time per camera.
+    subscribeWithQoS(camera->det2d_sub, this, config.detections_2d_topic, SENSOR_QOS, sub_options);
+    subscribeWithQoS(camera->det3d_sub, this, config.detections_3d_topic, SENSOR_QOS, sub_options);
+    subscribeWithQoS(camera->img_sub, this, config.image_topic, SENSOR_QOS, sub_options);
+    // Exact stamps only: detections carry their image's stamp. The queue must hold the images
+    // that arrive while the detector is still working on a frame.
     camera->synchronizer = std::make_unique<SynchronizerVision>(
-      SyncPolicyVision(20), camera->det2d_sub, camera->det3d_sub, camera->img_sub);
-    camera->synchronizer->setMaxIntervalDuration(rclcpp::Duration::from_seconds(0.05));
+      SyncPolicyVision(static_cast<uint32_t>(PARAMS.sync_queue_size)),
+      camera->det2d_sub,
+      camera->det3d_sub,
+      camera->img_sub);
     // Concrete member callbacks also work with the Jazzy message_filters Signal9 adapter.
     camera->synchronizer->registerCallback(&CameraInput::onSynchronized, camera.get());
     camera->frequency = std::make_unique<diagnostic_updater::HeaderlessTopicDiagnostic>(
@@ -129,10 +165,25 @@ ObjectTrackerComponent::ObjectTrackerComponent(const rclcpp::NodeOptions& option
     m_cameras.push_back(std::move(camera));
   }
 
-  auto pub_qos = rclcpp::QoS(1000).reliable().transient_local();
+  auto pub_qos = rclcpp::QoS(1).reliable().transient_local();
   m_candidates_pub =
-    this->create_publisher<semantic_scene_forests_object_msgs::msg::ObjectCandidate>(
-      "object_candidates", pub_qos);
+    this->create_publisher<semantic_scene_forests_object_msgs::msg::ObjectCandidateArray>(
+      "object_candidate_snapshots", pub_qos);
+  publishSnapshot();
+  m_global_group = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+  m_global_timer = this->create_wall_timer(
+    std::chrono::duration<double>(1.0 / PARAMS.snapshot_rate_hz),
+    [this] { onGlobalCycle(); },
+    m_global_group);
+  // Same group as the cycle: requests and the cycle never run at the same time.
+  m_add_observations_srv = this->create_service<AddObservations>(
+    "add_observations",
+    [this](const std::shared_ptr<rmw_request_id_t> header,
+           const std::shared_ptr<AddObservations::Request> request) {
+      onAddObservations(header, request);
+    },
+    rclcpp::ServicesQoS(),
+    m_global_group);
 
   RCLCPP_INFO(this->get_logger(),
               "ObjectTrackerComponent started with %zu cameras. World frame: %s",
@@ -140,528 +191,293 @@ ObjectTrackerComponent::ObjectTrackerComponent(const rclcpp::NodeOptions& option
               m_world_frame.c_str());
 }
 
-bool ObjectTrackerComponent::has3dBbox(const vision_msgs::msg::Detection3D& det)
-{
-  const auto& b = det.bbox;
-  return b.center.position.x != 0.0 || b.center.position.y != 0.0 || b.center.position.z != 0.0 ||
-         b.size.x != 0.0 || b.size.y != 0.0 || b.size.z != 0.0;
-}
+ObjectTrackerComponent::~ObjectTrackerComponent() = default;
 
-std::map<std::string, CombinedDetection>
-ObjectTrackerComponent::associateById(const vision_msgs::msg::Detection2DArray& det2d_msg,
-                                      const vision_msgs::msg::Detection3DArray& det3d_msg)
-{
-  std::map<std::string, CombinedDetection> combined;
-
-  for (const auto& det2d : det2d_msg.detections)
-  {
-    if (!det2d.id.empty())
-    {
-      combined[det2d.id].det2d = &det2d;
-    }
-  }
-
-  for (const auto& det3d : det3d_msg.detections)
-  {
-    if (!det3d.id.empty() && combined.contains(det3d.id))
-    {
-      combined[det3d.id].det3d = &det3d;
-    }
-  }
-
-  return combined;
-}
-
-void ObjectTrackerComponent::mergeOverlappingTracks()
-{
-  double threshold = m_params.merge_iou_threshold;
-  std::set<size_t> removed;
-
-  for (size_t i = 0; i < m_tracked_objects.size(); ++i)
-  {
-    auto& tracked_object = m_tracked_objects[i];
-
-    if (removed.contains(i) || !tracked_object->confirmed)
-    {
-      continue;
-    }
-
-    for (size_t j = i + 1; j < m_tracked_objects.size(); ++j)
-    {
-      auto& other_tracked_object = m_tracked_objects[j];
-      if (removed.contains(j) || !other_tracked_object->confirmed)
-      {
-        continue;
-      }
-
-      // TODO: Implement better name matching for similar but not equal names.
-      if (tracked_object->class_name != other_tracked_object->class_name)
-      {
-        continue;
-      }
-
-      // The manager cannot retire an ID that has already been published.
-      if (tracked_object->published && other_tracked_object->published)
-      {
-        continue;
-      }
-
-      if (TrackedObject::bbox3dOverlap(*tracked_object, *other_tracked_object) > threshold)
-      {
-        if (tracked_object->published ||
-            (!other_tracked_object->published &&
-             tracked_object->track_id < other_tracked_object->track_id))
-        {
-          tracked_object->mergeFrom(*other_tracked_object);
-          removed.insert(j);
-        }
-        else
-        {
-          other_tracked_object->mergeFrom(*tracked_object);
-          removed.insert(i);
-          break;
-        }
-      }
-    }
-  }
-
-  if (!removed.empty())
-  {
-    std::vector<std::unique_ptr<TrackedObject>> kept;
-    kept.reserve(m_tracked_objects.size() - removed.size());
-    for (size_t i = 0; i < m_tracked_objects.size(); ++i)
-    {
-      if (!removed.contains(i))
-      {
-        kept.push_back(std::move(m_tracked_objects[i]));
-      }
-    }
-    m_tracked_objects = std::move(kept);
-  }
-}
-
-std::optional<sensor_msgs::msg::Image> ObjectTrackerComponent::cropImagePatch(
-  const cv::Mat& image, const vision_msgs::msg::BoundingBox2D& bbox, int padding)
-{
-  double cx = bbox.center.position.x;
-  double cy = bbox.center.position.y;
-  double w  = bbox.size_x;
-  double h  = bbox.size_y;
-
-  int x1 = std::max(0, static_cast<int>(std::round(cx - (w / 2.0))) - padding);
-  int y1 = std::max(0, static_cast<int>(std::round(cy - (h / 2.0))) - padding);
-  int x2 = std::min(image.cols, static_cast<int>(std::round(cx + (w / 2.0))) + padding);
-  int y2 = std::min(image.rows, static_cast<int>(std::round(cy + (h / 2.0))) + padding);
-
-  if (x2 <= x1 || y2 <= y1)
-  {
-    RCLCPP_WARN(this->get_logger(), "Empty crop region for bbox at (%.1f, %.1f)", cx, cy);
-    m_crop_errors.increment("Empty crop region");
-    return std::nullopt;
-  }
-
-  cv::Mat roi      = image(cv::Rect(x1, y1, x2 - x1, y2 - y1)).clone();
-  auto img_msg_ptr = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", roi).toImageMsg();
-  return *img_msg_ptr;
-}
-
-void ObjectTrackerComponent::syncedCallbackVision(
-  CameraInput& camera,
-  const vision_msgs::msg::Detection2DArray::ConstSharedPtr& det2d_msg,
-  const vision_msgs::msg::Detection3DArray::ConstSharedPtr& det3d_msg,
-  const sensor_msgs::msg::Image::ConstSharedPtr& img_msg)
+void ObjectTrackerComponent::onCameraFrame(CameraInput& camera,
+                                           const vision_msgs::msg::Detection2DArray& det2d_msg,
+                                           const vision_msgs::msg::Detection3DArray& det3d_msg,
+                                           const sensor_msgs::msg::Image& img_msg)
 {
   camera.frequency->tick();
+  const auto PARAMS = m_param_listener->get_params();
 
-  m_params = m_param_listener->get_params();
-
-  double current_time = static_cast<double>(det2d_msg->header.stamp.sec) +
-                        (static_cast<double>(det2d_msg->header.stamp.nanosec) / 1e9);
-
-  // shortcut: source clocks must be monotonic; restart with the manager after replay time resets.
-  if (camera.last_update_time && current_time <= *camera.last_update_time)
-  {
-    ++camera.rejected_timestamps;
-    return;
-  }
-  camera.last_update_time = current_time;
-
-  const double TRACKING_TIME = std::max(m_last_update_time.value_or(current_time), current_time);
-  const double DT            = TRACKING_TIME - m_last_update_time.value_or(TRACKING_TIME);
-
-  const auto& whitelist = m_params.class_whitelist;
-  bool use_whitelist    = !whitelist.empty();
-
-  auto combined_detections = associateById(*det2d_msg, *det3d_msg);
-
-  struct TransformedDetection
-  {
-    const vision_msgs::msg::Detection2D* det2d;
-    vision_msgs::msg::Detection3D det3d;
-  };
-
-  std::vector<TransformedDetection> transformed_detections;
-  transformed_detections.reserve(combined_detections.size());
-  std::optional<geometry_msgs::msg::TransformStamped> world_transform;
-
-  for (auto& [id, combined] : combined_detections)
-  {
-    if (!combined.det2d || !combined.det3d)
-    {
-      continue;
-    }
-
-    if (combined.det2d->results.empty() || combined.det3d->results.empty())
-    {
-      continue;
-    }
-
-    double score = combined.det2d->results[0].hypothesis.score;
-    if (score < m_params.confidence_threshold)
-    {
-      continue;
-    }
-
-    if (use_whitelist && std::ranges::find(whitelist, combined.className()) == whitelist.end())
-    {
-      continue;
-    }
-
-    if (!has3dBbox(*combined.det3d))
-    {
-      continue;
-    }
-
-    TransformedDetection trans_det;
-    trans_det.det2d = combined.det2d;
-    trans_det.det3d = *combined.det3d;
-
+  std::string tf_error;
+  const auto LOOKUP = [&]() -> std::optional<geometry_msgs::msg::TransformStamped> {
     try
     {
-      if (!world_transform)
-      {
-        world_transform = m_tf_buffer.lookupTransform(m_world_frame,
-                                                      det3d_msg->header.frame_id,
-                                                      det3d_msg->header.stamp,
-                                                      rclcpp::Duration::from_seconds(0.1));
-      }
-
-      // Whole-box world transform; invalid geometry is skipped with a warning.
-      auto world_bbox = detail::transformBoundingBoxToFrame(combined.det3d->bbox, *world_transform);
-      if (!world_bbox)
-      {
-        RCLCPP_WARN(this->get_logger(),
-                    "Non-finite or degenerate bbox geometry - skipping detection ID: %s",
-                    combined.id().c_str());
-        continue;
-      }
-
-      trans_det.det3d.bbox            = *world_bbox;
-      trans_det.det3d.header.frame_id = m_world_frame;
+      return m_tf_buffer.lookupTransform(m_world_frame,
+                                         det3d_msg.header.frame_id,
+                                         det3d_msg.header.stamp,
+                                         rclcpp::Duration::from_seconds(0.1));
     }
     catch (const tf2::TransformException& ex)
     {
+      tf_error = ex.what();
       RCLCPP_WARN(this->get_logger(),
-                  "Camera '%s': cannot transform from '%s' to '%s': %s - skipping batch",
+                  "Camera '%s': cannot transform from '%s' to '%s': %s - skipping frame",
                   camera.name.c_str(),
-                  det3d_msg->header.frame_id.c_str(),
+                  det3d_msg.header.frame_id.c_str(),
                   m_world_frame.c_str(),
                   ex.what());
-      camera.tf_errors.increment(ex.what());
+      return std::nullopt;
+    }
+  };
+  const auto REJECTED = m_rejected_labels.load();
+  const auto RESULT =
+    camera.tracker->process(det2d_msg, det3d_msg, img_msg, LOOKUP, PARAMS, *REJECTED);
+  auto tracklets = camera.tracker->tracklets();
+
+  const std::scoped_lock LOCK{camera.mutex};
+  switch (RESULT)
+  {
+    case CameraTracker::FrameResult::OUT_OF_ORDER:
+      ++camera.rejected_timestamps;
       return;
-    }
-
-    transformed_detections.push_back(std::move(trans_det));
-  }
-
-  std::vector<std::unique_ptr<CombinedDetection>> detections;
-  detections.reserve(transformed_detections.size());
-  for (auto& trans_det : transformed_detections)
-  {
-    auto combined   = std::make_unique<CombinedDetection>();
-    combined->det2d = trans_det.det2d;
-    combined->det3d = &trans_det.det3d;
-    detections.push_back(std::move(combined));
-  }
-
-  cv_bridge::CvImageConstPtr cv_image;
-  try
-  {
-    cv_image = cv_bridge::toCvCopy(*img_msg, "bgr8");
-  }
-  catch (const cv_bridge::Exception& e)
-  {
-    RCLCPP_ERROR(this->get_logger(), "cv_bridge exception: %s", e.what());
-    return;
-  }
-
-  for (auto& obj : m_tracked_objects)
-  {
-    obj->predict(DT);
-  }
-
-  std::vector<int> det_to_track(detections.size(), -1);
-  std::set<size_t> obj_matched;
-
-  // Stage 1: Confirmed tracks (relaxed gate)
-  for (size_t d = 0; d < detections.size(); ++d)
-  {
-    if (det_to_track[d] >= 0)
-    {
-      continue;
-    }
-    const auto& det = *detections[d];
-
-    double best_dist = std::numeric_limits<double>::max();
-    int best_idx     = -1;
-
-    for (size_t o = 0; o < m_tracked_objects.size(); ++o)
-    {
-      auto& obj = m_tracked_objects[o];
-      if (!obj->confirmed || obj_matched.contains(o))
-      {
-        continue;
-      }
-      if (det.className() != obj->class_name)
-      {
-        continue;
-      }
-
-      DetectionAdapter adapter;
-      adapter.class_name = det.className();
-      adapter.class_id   = 0;
-      adapter.score      = det.score();
-      adapter.bbox3d     = det.bbox3D();
-      adapter.bbox2d     = det.bbox2D();
-      adapter.frame_id   = m_world_frame;
-
-      double dist = obj->mahalanobisDistance(adapter);
-      if (dist < m_params.gate_threshold_confirmed && dist < best_dist)
-      {
-        best_dist = dist;
-        best_idx  = static_cast<int>(o);
-      }
-    }
-
-    if (best_idx >= 0)
-    {
-      DetectionAdapter adapter;
-      adapter.class_name = detections[d]->className();
-      adapter.class_id   = 0;
-      adapter.score      = detections[d]->score();
-      adapter.bbox3d     = detections[d]->bbox3D();
-      adapter.bbox2d     = detections[d]->bbox2D();
-      adapter.frame_id   = m_world_frame;
-
-      m_tracked_objects[best_idx]->update(adapter, current_time);
-      det_to_track[d] = best_idx;
-      obj_matched.insert(best_idx);
-    }
-  }
-
-  // Stage 2: Unconfirmed tracks (strict gate)
-  for (size_t d = 0; d < detections.size(); ++d)
-  {
-    if (det_to_track[d] >= 0)
-    {
-      continue;
-    }
-    const auto& det = *detections[d];
-
-    double best_dist = std::numeric_limits<double>::max();
-    int best_idx     = -1;
-
-    for (size_t o = 0; o < m_tracked_objects.size(); ++o)
-    {
-      auto& obj = m_tracked_objects[o];
-      if (obj->confirmed || obj_matched.contains(o))
-      {
-        continue;
-      }
-      if (det.className() != obj->class_name)
-      {
-        continue;
-      }
-
-      DetectionAdapter adapter;
-      adapter.class_name = det.className();
-      adapter.class_id   = 0;
-      adapter.score      = det.score();
-      adapter.bbox3d     = det.bbox3D();
-      adapter.bbox2d     = det.bbox2D();
-      adapter.frame_id   = m_world_frame;
-
-      double dist = obj->mahalanobisDistance(adapter);
-      if (dist < m_params.gate_threshold_strict && dist < best_dist)
-      {
-        best_dist = dist;
-        best_idx  = static_cast<int>(o);
-      }
-    }
-
-    if (best_idx >= 0)
-    {
-      DetectionAdapter adapter;
-      adapter.class_name = detections[d]->className();
-      adapter.class_id   = 0;
-      adapter.score      = detections[d]->score();
-      adapter.bbox3d     = detections[d]->bbox3D();
-      adapter.bbox2d     = detections[d]->bbox2D();
-      adapter.frame_id   = m_world_frame;
-
-      m_tracked_objects[best_idx]->update(adapter, current_time);
-      det_to_track[d] = best_idx;
-      obj_matched.insert(best_idx);
-    }
-  }
-
-  // Create new tracks for unmatched detections
-  for (size_t d = 0; d < detections.size(); ++d)
-  {
-    if (det_to_track[d] >= 0)
-    {
-      continue;
-    }
-    if (static_cast<int>(m_tracked_objects.size()) >= m_params.max_trackable_objects)
-    {
+    case CameraTracker::FrameResult::BAD_IMAGE:
+      ++camera.bad_images;
+      return;
+    case CameraTracker::FrameResult::NO_TRANSFORM:
+      camera.tf_errors.increment(tf_error);
+      return;
+    case CameraTracker::FrameResult::ACCEPTED:
       break;
-    }
-
-    DetectionAdapter adapter;
-    adapter.class_name = detections[d]->className();
-    adapter.class_id   = 0;
-    adapter.score      = detections[d]->score();
-    adapter.bbox3d     = detections[d]->bbox3D();
-    adapter.bbox2d     = detections[d]->bbox2D();
-    adapter.frame_id   = m_world_frame;
-
-    m_tracked_objects.push_back(
-      std::make_unique<TrackedObject>(adapter,
-                                      current_time,
-                                      m_next_track_id,
-                                      m_params.measurement_noise_std,
-                                      m_params.process_noise_std,
-                                      m_params.confirmation_threshold,
-                                      static_cast<size_t>(m_params.max_crops_per_object)));
-    m_next_track_id++;
   }
+  camera.tracklets    = std::move(tracklets);
+  camera.local_tracks = camera.tracker->trackCount();
+  camera.crop_errors  = camera.tracker->cropErrors();
+}
 
-  // Crop images for matched confirmed tracks. This must run before
-  // mergeOverlappingTracks(): det_to_track stores indices into the
-  // pre-compaction m_tracked_objects vector, and TrackedObject::mergeFrom()
-  // carries the crops into the surviving track.
-  for (size_t d = 0; d < detections.size(); ++d)
+void ObjectTrackerComponent::onAddObservations(
+  const std::shared_ptr<rmw_request_id_t>& header,
+  const std::shared_ptr<AddObservations::Request>& request)
+{
+  PendingObservations pending;
+  pending.header = header;
+  for (const auto& observation : request->observations)
   {
-    int obj_idx = det_to_track[d];
-    if (obj_idx < 0)
+    const auto& detection = observation.detection;
+    rclcpp::Time stamp{0, 0, RCL_ROS_TIME};
+    std::string error;
+    std::optional<vision_msgs::msg::BoundingBox3D> box;
+    if (observation.class_name.empty())
     {
-      continue;
+      error = "empty class_name";
     }
-
-    auto& obj = m_tracked_objects[obj_idx];
-    if (!obj->confirmed)
+    else if (detection.header.frame_id.empty())
     {
-      continue;
+      error = "empty detection frame";
     }
-
-    auto crop = cropImagePatch(cv_image->image, detections[d]->bbox2D(), m_params.crop_padding);
-    if (crop)
+    else if (detection.header.stamp.sec < 0)
     {
-      crop->header = img_msg->header;
-      obj->addCrop(*crop);
+      error = "negative detection timestamp";
     }
-  }
-
-  mergeOverlappingTracks();
-
-  {
-    size_t confirmed_count   = 0;
-    size_t unconfirmed_count = 0;
-    for (const auto& obj : m_tracked_objects)
+    else if (m_global->rejectedLabels().contains(observation.class_name))
     {
-      if (obj->confirmed)
+      error = "label '" + observation.class_name + "' was rejected for this session";
+    }
+    else
+    {
+      stamp = detection.header.stamp.sec == 0 && detection.header.stamp.nanosec == 0
+                ? this->now()
+                : rclcpp::Time(detection.header.stamp, RCL_ROS_TIME);
+      try
       {
-        ++confirmed_count;
+        const auto TRANSFORM = m_tf_buffer.lookupTransform(
+          m_world_frame, detection.header.frame_id, stamp, rclcpp::Duration::from_seconds(0.1));
+        box = detail::transformBoundingBoxToFrame(detection.bbox, TRANSFORM);
+        if (!box)
+        {
+          error = "non-finite geometry, nonpositive size or invalid orientation";
+        }
       }
-      else
+      catch (const tf2::TransformException& ex)
       {
-        ++unconfirmed_count;
+        error = std::string("no transform to ") + m_world_frame + ": " + ex.what();
       }
     }
-    RCLCPP_DEBUG(this->get_logger(),
-                 "Tracks: %zu confirmed, %zu unconfirmed (%zu total) | "
-                 "detections this frame: %zu",
-                 confirmed_count,
-                 unconfirmed_count,
-                 m_tracked_objects.size(),
-                 detections.size());
-  }
-
-  // Publish all confirmed tracks
-  for (const auto& obj : m_tracked_objects)
-  {
-    if (!obj->confirmed)
+    if (!error.empty())
     {
+      RCLCPP_WARN(this->get_logger(),
+                  "add_observations: rejecting '%s': %s",
+                  observation.class_name.c_str(),
+                  error.c_str());
+      pending.local_ids.emplace_back(std::nullopt);
+      pending.errors.push_back(std::move(error));
       continue;
     }
+    const auto& center = box->center.position;
+    pending.tracklets.push_back(Tracklet{
+      .camera     = MANUAL_SOURCE,
+      .local_id   = m_manual_next_id,
+      .last_seen  = stamp,
+      .position   = {center.x, center.y, center.z},
+      .size       = {box->size.x, box->size.y, box->size.z},
+      .class_name = observation.class_name,
+      .score      = 1.0,
+      .crops =
+        std::make_shared<const std::vector<sensor_msgs::msg::Image>>(observation.image_crops)});
+    pending.local_ids.emplace_back(m_manual_next_id++);
+    pending.errors.emplace_back();
+  }
+  m_manual_pending.push_back(std::move(pending));
+}
 
+void ObjectTrackerComponent::answerObservations(uint64_t first_new_id)
+{
+  std::erase_if(m_manual_pending, [&](PendingObservations& pending) {
+    if (!pending.first_new_id)
+    {
+      pending.first_new_id = first_new_id; // this cycle fused them
+    }
+    std::vector<std::optional<uint64_t>> ids;
+    for (const auto& local_id : pending.local_ids)
+    {
+      ids.push_back(local_id ? m_global->linkedTrack(MANUAL_SOURCE, *local_id) : std::nullopt);
+      if (ids.back() && m_global->isHeld(*ids.back()))
+      {
+        return false; // label check still running; ask again next cycle
+      }
+    }
+    AddObservations::Response response;
+    response.success = true;
+    size_t fused     = 0;
+    for (size_t i = 0; i < ids.size(); ++i)
+    {
+      const auto& tracks = m_global->tracks();
+      const auto TRACK =
+        ids[i] ? std::ranges::find_if(
+                   tracks, [id = *ids[i]](const auto& track) { return track->track_id == id; })
+               : tracks.end();
+      if (TRACK == tracks.end())
+      {
+        const auto& error = !pending.errors[i].empty() ? pending.errors[i]
+                            : m_arbiter                ? "rejected by the tracker's label check"
+                                                       : "rejected by the global tracker";
+        response.success  = false;
+        response.message += "observation " + std::to_string(i) + ": " + error + "; ";
+        response.object_ids.push_back(0);
+        response.class_names.emplace_back();
+        response.created.push_back(false);
+        continue;
+      }
+      ++fused;
+      response.object_ids.push_back(static_cast<int64_t>(*ids[i]));
+      response.class_names.push_back((*TRACK)->class_name);
+      response.created.push_back(*ids[i] >= *pending.first_new_id);
+    }
+    response.message += "fused " + std::to_string(fused) + " of " +
+                        std::to_string(pending.local_ids.size()) + " observations";
+    m_add_observations_srv->send_response(*pending.header, response);
+    return true;
+  });
+}
+
+void ObjectTrackerComponent::onGlobalCycle()
+{
+  const auto PARAMS = m_param_listener->get_params();
+  std::vector<Tracklet> tracklets;
+  for (const auto& camera : m_cameras)
+  {
+    const std::scoped_lock LOCK{camera->mutex};
+    tracklets.insert(tracklets.end(), camera->tracklets.begin(), camera->tracklets.end());
+  }
+  for (const auto& pending : m_manual_pending)
+  {
+    // Reposted until answered; an unchanged stamp is not applied twice.
+    tracklets.insert(tracklets.end(), pending.tracklets.begin(), pending.tracklets.end());
+  }
+  const auto FIRST_NEW_ID = m_global->nextId();
+  const auto RESULTS      = m_arbiter ? m_arbiter->drainResults() : std::vector<ArbiterResult>{};
+  auto requests           = m_global->cycle(tracklets, RESULTS, PARAMS, m_arbiter != nullptr);
+  if (m_global->rejectedLabels().size() != m_rejected_labels.load()->size()) // only grows
+  {
+    m_rejected_labels.store(
+      std::make_shared<const std::set<std::string>>(m_global->rejectedLabels()));
+  }
+  for (auto& request : requests)
+  {
+    m_arbiter->enqueue(std::move(request));
+  }
+  publishSnapshot();
+  answerObservations(FIRST_NEW_ID); // after the snapshot, so answered objects are already out
+
+  const auto STATS = m_global->stats(PARAMS);
+  const std::scoped_lock LOCK{m_stats_mutex};
+  m_global_tracks       = STATS.tracks;
+  m_stale_tracks        = STATS.stale;
+  m_links               = STATS.links;
+  m_decisions           = STATS.decisions;
+  m_merges              = STATS.merges;
+  m_replacements        = STATS.replacements;
+  m_held_tracks         = STATS.held;
+  m_label_rejections    = STATS.label_rejections;
+  m_decision_errors     = STATS.decision_errors;
+  m_last_decision_error = STATS.last_error;
+  m_arbiter_pending     = m_arbiter ? m_arbiter->pending() : 0;
+}
+
+void ObjectTrackerComponent::publishSnapshot()
+{
+  // unique_ptr lets intra-process delivery move the snapshot (crops included) without a copy.
+  auto snapshot_ptr =
+    std::make_unique<semantic_scene_forests_object_msgs::msg::ObjectCandidateArray>();
+  auto& snapshot           = *snapshot_ptr;
+  snapshot.header.stamp    = this->now();
+  snapshot.header.frame_id = m_world_frame;
+  for (const auto& track : m_global->tracks())
+  {
+    if (m_global->isHeld(*track))
+    {
+      continue; // Waiting for its label check.
+    }
     semantic_scene_forests_object_msgs::msg::ObjectCandidate candidate;
-    candidate.header       = det2d_msg->header;
-    candidate.header.stamp = rclcpp::Time(static_cast<int64_t>(std::llround(obj->last_seen * 1e9)));
-    candidate.header.frame_id           = m_world_frame;
-    candidate.id                        = obj->track_id;
-    candidate.class_name                = obj->class_name;
-    candidate.detection                 = obj->toDetection3D();
-    candidate.detection.header          = candidate.header;
-    candidate.detection.header.frame_id = m_world_frame;
-    candidate.image_crops               = obj->getCrops();
-    m_candidates_pub->publish(candidate);
-    obj->published = true;
+    candidate.header      = snapshot.header;
+    candidate.id          = static_cast<int64_t>(track->track_id);
+    candidate.class_name  = track->class_name;
+    candidate.detection   = track->toDetection3D();
+    candidate.last_seen   = candidate.detection.header.stamp;
+    candidate.image_crops = track->getCrops();
+    snapshot.objects.push_back(std::move(candidate));
   }
-
-  // Prune unconfirmed tracks not observed within the timeout window.
-  double timeout = m_params.unconfirmed_track_timeout;
-  m_tracked_objects.erase(std::remove_if(m_tracked_objects.begin(),
-                                         m_tracked_objects.end(),
-                                         [timeout](const std::unique_ptr<TrackedObject>& obj) {
-                                           return !obj->confirmed &&
-                                                  obj->time_since_update > timeout;
-                                         }),
-                          m_tracked_objects.end());
-
-  m_last_update_time = TRACKING_TIME;
+  m_candidates_pub->publish(std::move(snapshot_ptr));
 }
 
 void ObjectTrackerComponent::onHealthDiagnostic(diagnostic_updater::DiagnosticStatusWrapper& stat)
 {
-  size_t confirmed = 0;
-  for (const auto& obj : m_tracked_objects)
-  {
-    if (obj->confirmed)
-    {
-      ++confirmed;
-    }
-  }
-
-  stat.add("Total tracks", m_tracked_objects.size());
-  stat.add("Confirmed tracks", confirmed);
   size_t tf_errors = 0;
   for (const auto& camera : m_cameras)
   {
-    camera->tf_errors.report(stat, "TF (" + camera->name + ")");
+    const std::scoped_lock LOCK{camera->mutex};
+    stat.add("Local tracks (" + camera->name + ")", camera->local_tracks);
     stat.add("Rejected timestamps (" + camera->name + ")", camera->rejected_timestamps);
+    stat.add("Bad images (" + camera->name + ")", camera->bad_images);
+    stat.add("Crop errors (" + camera->name + ")", camera->crop_errors);
+    camera->tf_errors.report(stat, "TF (" + camera->name + ")");
     tf_errors += camera->tf_errors.count();
   }
-  m_crop_errors.report(stat, "Crop");
-
-  if (tf_errors > 0 || m_crop_errors.count() > 0)
+  const std::scoped_lock LOCK{m_stats_mutex};
+  stat.add("Global tracks", m_global_tracks);
+  stat.add("Stale tracks", m_stale_tracks);
+  stat.add("Tracklet links", m_links);
+  stat.add("Identity merges", m_merges);
+  stat.add("Identity replacements", m_replacements);
+  if (m_arbiter)
   {
-    stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN, "TF/crop errors encountered");
+    stat.add("Identity decisions", m_decisions);
+    stat.add("Tracks held for label check", m_held_tracks);
+    stat.add("Label rejections", m_label_rejections);
+    stat.add("Identity decision errors", m_decision_errors);
+    stat.add("Identity decision last error", m_last_decision_error);
+    stat.add("Arbiter queue", m_arbiter_pending);
+  }
+  if (tf_errors > 0 || m_decision_errors > 0)
+  {
+    stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN, "TF or decision errors encountered");
   }
   else
   {
     stat.summary(diagnostic_msgs::msg::DiagnosticStatus::OK,
-                 "Tracking " + std::to_string(confirmed) + " confirmed objects");
+                 "Tracking " + std::to_string(m_global_tracks) + " global objects");
   }
 }
 

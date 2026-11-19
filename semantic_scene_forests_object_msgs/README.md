@@ -16,6 +16,7 @@ ROS 2 interface package for tracked objects, managed objects, and object-managem
 
 ## Services
 
+- `srv/AddObservations.srv`: register sightings from a non-camera source with the tracker
 - `srv/GetObjects.srv`: return the current managed object list
 - `srv/GetObjectVisuals.srv`: fetch visuals for one or more object IDs
 - `srv/BlockObject.srv`: suppress an object by ID

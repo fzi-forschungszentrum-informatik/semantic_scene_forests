@@ -85,6 +85,17 @@ SceneGraphQueryNode::SceneGraphQueryNode(const rclcpp::NodeOptions& options)
 {
   m_param_listener = std::make_shared<ParamListener>(get_node_parameters_interface());
   m_params         = m_param_listener->get_params();
+  // oai-api silently ignores a non-object extra body, so reject typos at startup.
+  if (!m_params.extra_body.empty())
+  {
+    m_extra_body = nlohmann::json::parse(m_params.extra_body, nullptr, false);
+    if (!m_extra_body.is_object())
+    {
+      throw std::invalid_argument(
+        "extra_body must be a JSON object (double quotes, lowercase true/false): " +
+        m_params.extra_body);
+    }
+  }
 
   m_diagnostic_updater.setHardwareID("semantic_scene_forests_query");
   m_diagnostic_updater.add("Connectivity", this, &SceneGraphQueryNode::onConnectivityDiagnostic);
@@ -229,8 +240,7 @@ void SceneGraphQueryNode::onManagedObjects(const ManagedObjectArray::SharedPtr& 
 {
   m_objects_freq->tick();
   // Complete managed-object arrays are authoritative. Blocked legacy rows are
-  // not active. The membership epoch changes only when the active id set
-  // changes, so in-flight query results can be checked for staleness.
+  // not active.
   std::unordered_map<int64_t, ManagedObject> next;
   for (const auto& obj : msg->objects)
   {
@@ -240,22 +250,6 @@ void SceneGraphQueryNode::onManagedObjects(const ManagedObjectArray::SharedPtr& 
     }
   }
   const std::scoped_lock LOCK{m_objects_mutex};
-  bool changed = next.size() != m_cached_objects.size();
-  if (!changed)
-  {
-    for (const auto& [id, obj] : next)
-    {
-      if (!m_cached_objects.contains(id))
-      {
-        changed = true;
-        break;
-      }
-    }
-  }
-  if (changed)
-  {
-    ++m_objects_epoch;
-  }
   m_cached_objects   = std::move(next);
   m_objects_received = true;
 }
@@ -271,7 +265,6 @@ SceneGraphQueryNode::snapshotGraph() const
   SceneGraphMsg msg;
   std::unordered_set<int64_t> active_ids;
   bool received{false};
-  std::uint64_t epoch{0};
   {
     const std::scoped_lock LOCK{m_objects_mutex, m_graph_mutex};
     if (!m_last_graph)
@@ -280,7 +273,6 @@ SceneGraphQueryNode::snapshotGraph() const
     }
     msg      = *m_last_graph;
     received = m_objects_received;
-    epoch    = m_objects_epoch;
     active_ids.reserve(m_cached_objects.size());
     for (const auto& [id, obj] : m_cached_objects)
     {
@@ -313,8 +305,7 @@ SceneGraphQueryNode::snapshotGraph() const
   {
     object_ids.insert(node.id);
   }
-  return SceneSnapshot{
-    .graph = std::move(*graph), .object_ids = std::move(object_ids), .epoch = epoch};
+  return SceneSnapshot{.graph = std::move(*graph), .object_ids = std::move(object_ids)};
 }
 
 std::optional<ObjectInfo> SceneGraphQueryNode::lookupObject(int64_t id) const
@@ -390,9 +381,10 @@ std::expected<std::string, std::string> SceneGraphQueryNode::inspectObjectVisual
   }
 
   auto client    = makeClient();
-  auto response2 = client.complete(
-    {oai::MessageBuilder::system().text("You are a precise vision assistant.").build().value(),
-     std::move(*user_msg)});
+  auto response2 = client.chat(
+    {.messages = {
+       oai::MessageBuilder::system().text("You are a precise vision assistant.").build().value(),
+       std::move(*user_msg)}});
   if (!response2)
   {
     m_llm_errors.increment(response2.error().message);
@@ -400,7 +392,7 @@ std::expected<std::string, std::string> SceneGraphQueryNode::inspectObjectVisual
                                        response2.error().http_status,
                                        response2.error().message)};
   }
-  return response2->choice.content.value_or("");
+  return response2->text();
 }
 
 std::string SceneGraphQueryNode::renderSystemPrompt(const std::string& template_key) const
@@ -465,8 +457,14 @@ oai::OpenAIClient SceneGraphQueryNode::makeClient() const
     .baseUrl(m_params.server_url)
     .apiKey(m_params.api_key)
     .model(m_params.model)
+    // OpenRouter app attribution: the referer URL is the app identity, the title its name.
+    .header("HTTP-Referer",
+            "https://github.com/fzi-forschungszentrum-informatik/semantic_scene_forests/tree/main/"
+            "semantic_scene_forests_query")
+    .header("X-OpenRouter-Title", "semantic_scene_forests_query")
     .temperature(static_cast<float>(m_params.temperature))
     .maxTokens(m_params.max_tokens)
+    .extraBody(m_extra_body)
     .connectTimeout(CONNECT_TIMEOUT)
     .requestTimeout(REQUEST_TIMEOUT)
     .build();
@@ -515,8 +513,7 @@ SceneGraphQueryNode::runAgent(const std::string& system_prompt_key,
   RCLCPP_INFO(get_logger(), "[agent] final answer: %s", answer->c_str());
   return AgentOutcome{.text                = std::move(*answer),
                       .expanded            = session.expandedNodes(),
-                      .snapshot_object_ids = std::move(snapshot->object_ids),
-                      .membership_epoch    = snapshot->epoch};
+                      .snapshot_object_ids = std::move(snapshot->object_ids)};
 }
 
 void SceneGraphQueryNode::guardedTerminal(const std::function<void()>& terminal)
@@ -730,17 +727,12 @@ SceneGraphQueryNode::validateFindObjectAnswer(const AgentOutcome& outcome) const
   }
   const bool FOUND = FOUND_FIELD->get<bool>();
 
-  // Receipt + epoch gate for BOTH positive and negative answers: any result
-  // computed against outdated membership is stale and must not terminalize.
+  // Objects come and go while the agent runs; only the selected id is re-checked below.
   {
     const std::scoped_lock LOCK{m_objects_mutex};
     if (!m_objects_received)
     {
       return std::unexpected{"no authoritative managed-object state received yet"};
-    }
-    if (m_objects_epoch != outcome.membership_epoch)
-    {
-      return std::unexpected{"object membership changed during the query (stale result)"};
     }
   }
 
@@ -759,8 +751,7 @@ SceneGraphQueryNode::validateFindObjectAnswer(const AgentOutcome& outcome) const
 
   if (!FOUND)
   {
-    // A genuine negative on unchanged membership is a completed, unsuccessful
-    // lookup.
+    // A genuine negative is a completed, unsuccessful lookup.
     return result;
   }
 
@@ -913,23 +904,10 @@ void SceneGraphQueryNode::executePromptLLM(const std::shared_ptr<PromptLLMGoal>&
       auto outcome = runAgent("prompt_llm/system_prompt", GOAL->query, ON_EXPAND, SHOULD_STOP);
       if (outcome)
       {
-        // Reject free-form answers computed against outdated membership.
-        std::uint64_t epoch_now = 0;
-        {
-          const std::scoped_lock LOCK{m_objects_mutex};
-          epoch_now = m_objects_epoch;
-        }
-        if (epoch_now == outcome->membership_epoch)
-        {
-          result->success  = true;
-          result->message  = "ok";
-          result->response = outcome->text;
-          completion       = Completion::SUCCEED;
-        }
-        else
-        {
-          abort_reason = "object membership changed during the query (stale result)";
-        }
+        result->success  = true;
+        result->message  = "ok";
+        result->response = outcome->text;
+        completion       = Completion::SUCCEED;
       }
       else
       {

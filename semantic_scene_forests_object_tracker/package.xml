@@ -57,6 +57,8 @@
   <depend>diagnostic_msgs</depend>
   <depend>diagnostic_updater</depend>
   <depend>eigen</depend>
+  <depend>oai_api</depend>
+  <depend>nlohmann-json-dev</depend>
 
   <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>semantic_scene_forests_object_manager</test_depend>

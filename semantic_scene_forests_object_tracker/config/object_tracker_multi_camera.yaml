@@ -47,6 +47,6 @@ object_tracker:
     process_noise_std: 0.05
     confirmation_threshold: 3
     unconfirmed_track_timeout: 30.0
-    merge_iou_threshold: 0.6
+    merge_overlap_threshold: 0.5
     crop_padding: 10
     max_crops_per_object: 5

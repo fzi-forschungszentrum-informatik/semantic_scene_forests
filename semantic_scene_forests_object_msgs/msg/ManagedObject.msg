@@ -20,3 +20,6 @@ uint8 source
 
 # Timestamp of last modification
 builtin_interfaces/Time last_updated
+
+# Timestamp of the latest accepted 3D observation; not advanced by manual edits or publication
+builtin_interfaces/Time last_seen

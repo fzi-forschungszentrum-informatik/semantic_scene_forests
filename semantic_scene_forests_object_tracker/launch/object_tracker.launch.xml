@@ -41,8 +41,8 @@
          description="Topic name for 3D detections"/>
     <arg name="camera_image_topic" default="camera/image"
          description="Topic name for camera images"/>
-    <arg name="object_candidates_topic" default="object_candidates"
-         description="Topic name for tracked object candidates output"/>
+    <arg name="object_candidate_snapshots_topic" default="object_candidate_snapshots"
+         description="Topic name for authoritative tracked object snapshots"/>
     <arg name="scene_graph_frame" default="map"
          description="TF Frame for the scene graph."/>
     <arg name="use_sim_time" default="true"
@@ -57,7 +57,7 @@
             <remap from="detections_2d" to="$(var detections_2d_topic)"/>
             <remap from="detections_3d" to="$(var detections_3d_topic)"/>
             <remap from="camera/image" to="$(var camera_image_topic)"/>
-            <remap from="object_candidates" to="$(var object_candidates_topic)"/>
+            <remap from="object_candidate_snapshots" to="$(var object_candidate_snapshots_topic)"/>
             <param from="$(var config_file)"/>
             <param name="world_frame" value="$(var scene_graph_frame)"/>
             <param name="use_sim_time" value="$(var use_sim_time)"/>

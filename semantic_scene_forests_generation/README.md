@@ -22,7 +22,15 @@ The graph is published at 1 Hz with reliable, transient-local QoS.
 
 ## Update Behavior
 
-- Only one `/update_scene_graph` goal runs at a time.
+- Each new managed object joins a queue that a background worker describes with the Phase 1 tasks,
+  one object at a time. A failed object is logged and counted in diagnostics, and is only retried
+  by a manual Phase 1.
+- Every `phase2_interval_seconds` (default 120) the worker runs Phase 2 over concepts it has not
+  processed yet, and skips the LLM if there are none. A failed run retries at the next tick.
+- `/update_scene_graph` is the manual rerun: Phase 1 redescribes all objects and Phase 2 reprocesses
+  all concepts. The worker pauses after its current step while a goal runs, and only one goal runs
+  at a time.
+- `/add_scene_context` reports busy while an update step is in flight.
 - Tasks run against a private graph snapshot. The live graph is locked only while a snapshot is
   taken or a successful update is committed.
 - LLM connection, LLM request, and object-visuals request timeouts are configurable through
@@ -36,8 +44,8 @@ The graph is published at 1 Hz with reliable, transient-local QoS.
   objects, their incident edges, and concepts no longer reachable from any retained object are
   removed, while concepts shared with retained objects and their transitive ancestors survive.
   An empty managed array empties the graph.
-- In-flight updates are rejected if object membership changes during inference; paid LLM
-  work is not retried automatically.
+- Updates keep running while objects come and go: each commit drops objects that were removed
+  meanwhile, and Phase 1 skips objects that are gone before their turn.
 
 ## Exported Components
 

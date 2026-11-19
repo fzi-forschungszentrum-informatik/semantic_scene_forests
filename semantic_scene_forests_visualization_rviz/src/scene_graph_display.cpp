@@ -31,6 +31,7 @@
 #include <algorithm>
 #include <functional>
 #include <map>
+#include <optional>
 #include <string>
 
 #include <QMenu>
@@ -60,6 +61,35 @@
 #include "semantic_scene_forests_visualization_rviz/scene_graph_object_selection_handler.hpp"
 
 namespace semantic_scene_forests_visualization_rviz {
+
+namespace {
+
+// Seconds since the object was last observed, measured with RViz's ROS clock (sim time when
+// use_sim_time is set); nullopt for unset or future stamps.
+std::optional<double> ageSeconds(const semantic_scene_forests_object_msgs::msg::ManagedObject& obj,
+                                 const rclcpp::Time& now)
+{
+  const rclcpp::Time LAST_SEEN(obj.last_seen, now.get_clock_type());
+  if (LAST_SEEN.nanoseconds() == 0 || LAST_SEEN > now)
+  {
+    return std::nullopt;
+  }
+  return (now - LAST_SEEN).seconds();
+}
+
+// "chair (12s)": label plus seconds since the object was last observed.
+std::string labelWithAge(const std::string& class_name, std::optional<double> age)
+{
+  if (!age)
+  {
+    return class_name;
+  }
+  return class_name + " (" + std::to_string(static_cast<int64_t>(*age)) + "s)";
+}
+
+constexpr float STALE_ALPHA = 0.25F;
+
+} // namespace
 
 SceneGraphDisplay::SceneGraphDisplay() = default;
 
@@ -123,12 +153,12 @@ void SceneGraphDisplay::onInitialize()
   auto* visualization_property = new rviz_common::properties::Property(
     "Visualization", QVariant(), "Visualization settings for the scene graph", this);
 
-  m_show_labels_property =
-    new rviz_common::properties::BoolProperty("Show Labels",
-                                              true,
-                                              "Show class name labels on object nodes",
-                                              visualization_property,
-                                              SLOT(updateLabels()));
+  m_show_labels_property = new rviz_common::properties::BoolProperty(
+    "Show Labels",
+    true,
+    "Show class name labels (with seconds since last seen) on object nodes",
+    visualization_property,
+    SLOT(updateLabels()));
 
   m_object_color_property =
     new rviz_common::properties::ColorProperty("Object Color",
@@ -140,6 +170,14 @@ void SceneGraphDisplay::onInitialize()
   m_object_scale_property = new rviz_common::properties::FloatProperty(
     "Object Scale", 1.0F, "Scale multiplier for object bounding boxes", visualization_property);
   m_object_scale_property->setMin(0.01F);
+
+  m_stale_after_property = new rviz_common::properties::FloatProperty(
+    "Stale After",
+    60.0F,
+    "Seconds since last seen after which an object is drawn transparent (match the tracker's "
+    "stale_timeout)",
+    visualization_property);
+  m_stale_after_property->setMin(0.0F);
 
   m_control_widget = createControlWidget();
   setAssociatedWidget(m_control_widget);
@@ -281,9 +319,11 @@ void SceneGraphDisplay::updateObjectNodes(
     return;
   }
 
-  const auto COLOR       = m_object_color_property->getOgreColor();
-  const float SCALE      = m_object_scale_property->getFloat();
-  const bool SHOW_LABELS = m_show_labels_property->getBool();
+  const auto COLOR         = m_object_color_property->getOgreColor();
+  const float SCALE        = m_object_scale_property->getFloat();
+  const bool SHOW_LABELS   = m_show_labels_property->getBool();
+  const double STALE_AFTER = m_stale_after_property->getFloat();
+  const rclcpp::Time NOW   = ros_node->now();
 
   RCLCPP_DEBUG(ros_node->get_logger(), "Processing %zu object nodes", objects.size());
 
@@ -362,7 +402,13 @@ void SceneGraphDisplay::updateObjectNodes(
       rviz_rendering::Shape::Cube, scene_manager_, m_object_nodes_node);
     shape->setPosition(WORLD_POS);
     shape->setScale(BBOX_SCALE);
-    shape->setColor(COLOR);
+    const auto AGE    = ageSeconds(obj, NOW);
+    auto object_color = COLOR;
+    if (AGE && *AGE > STALE_AFTER)
+    {
+      object_color.a = STALE_ALPHA;
+    }
+    shape->setColor(object_color);
     m_object_shapes[obj.id] = std::move(shape);
 
     // Register selection handler so right-click can identify this object
@@ -389,7 +435,8 @@ void SceneGraphDisplay::updateObjectNodes(
       const float Z_OFFSET        = static_cast<float>(sz.z) * SCALE / 2.0F + 0.15F;
       label_node->setPosition(WORLD_POS + Ogre::Vector3(0.0F, 0.0F, Z_OFFSET));
 
-      auto* text = new rviz_rendering::MovableText(obj.class_name, "Liberation Sans", 0.2F, COLOR);
+      auto* text = new rviz_rendering::MovableText(
+        labelWithAge(obj.class_name, AGE), "Liberation Sans", 0.2F, object_color);
       text->setTextAlignment(rviz_rendering::MovableText::H_CENTER,
                              rviz_rendering::MovableText::V_ABOVE);
       text->showOnTop(true);

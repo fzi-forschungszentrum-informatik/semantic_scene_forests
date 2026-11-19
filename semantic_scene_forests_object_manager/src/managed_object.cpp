@@ -28,6 +28,8 @@
 
 #include "semantic_scene_forests_object_manager/managed_object.hpp"
 
+#include <utility>
+
 namespace semantic_scene_forests_object_manager {
 
 ManagedObject ManagedObject::fromCandidate(
@@ -42,7 +44,44 @@ ManagedObject ManagedObject::fromCandidate(
   obj.is_blocked   = false;
   obj.source       = 0;
   obj.last_updated = now;
+  obj.last_seen    = candidate.last_seen;
   return obj;
+}
+
+void ManagedObject::updateFromCandidate(
+  const semantic_scene_forests_object_msgs::msg::ObjectCandidate& candidate,
+  const rclcpp::Time& now)
+{
+  const auto& next_class = class_overridden ? class_name : candidate.class_name;
+  auto next_detection    = candidate.detection;
+  if (class_overridden)
+  {
+    for (auto& result : next_detection.results)
+    {
+      result.hypothesis.class_id = class_name;
+    }
+  }
+  if (pose_overridden)
+  {
+    // Keep the explicit operator pose, including orientation. Dimensions remain
+    // the tracker's world-AABB sizes; this edit does not reproject that geometry.
+    next_detection.bbox.center = detection.bbox.center;
+  }
+
+  // Candidate headers describe publication, not a managed-state modification.
+  // Detection headers and last_seen retain the actual observation metadata.
+  if (class_name != next_class || detection != next_detection || last_seen != candidate.last_seen ||
+      (!crops_curated && image_crops != candidate.image_crops))
+  {
+    class_name = next_class;
+    detection  = std::move(next_detection);
+    last_seen  = candidate.last_seen;
+    if (!crops_curated)
+    {
+      image_crops = candidate.image_crops;
+    }
+    last_updated = now;
+  }
 }
 
 semantic_scene_forests_object_msgs::msg::ManagedObject
@@ -55,6 +94,7 @@ ManagedObject::toMessage(const std::string& frame_id) const
   msg.is_blocked      = is_blocked;
   msg.source          = source;
   msg.last_updated    = last_updated;
+  msg.last_seen       = last_seen;
   msg.header.stamp    = last_updated;
   msg.header.frame_id = frame_id;
   return msg;

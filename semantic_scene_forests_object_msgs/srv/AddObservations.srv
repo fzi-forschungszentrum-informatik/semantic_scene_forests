@@ -1,0 +1,20 @@
+# Register object sightings from a source other than the tracker's cameras, e.g. an agent's
+# camera search. The tracker transforms each into its world frame and fuses it in the next
+# global cycle like a camera tracklet: it joins a clearly overlapping track of similar size and
+# accepted label, or starts a new global track (label-checked like any other when the arbiter
+# is on). Global tracks outlive the sighting. The response waits until every observation is
+# decided: fused and published, or rejected. With the arbiter that includes the label check of
+# a new track, which may take several cycles; a merge meanwhile reports the surviving track.
+#
+# Per observation: class_name, detection.header (frame and stamp; a zero stamp means now) and
+# detection.bbox (center, orientation and positive size in that frame) are required;
+# image_crops are optional. id, header and last_seen are ignored. The class whitelist and
+# confidence threshold do not apply; labels the arbiter rejected for the session do.
+ObjectCandidate[] observations
+---
+bool success       # false if any observation was rejected
+string message
+# One entry per observation, in request order.
+int64[] object_ids    # global tracker ID, already in the published snapshot; 0 = rejected
+string[] class_names  # the track's label as published; empty if rejected
+bool[] created        # true: started a new global track; false: joined an existing one
