@@ -105,8 +105,8 @@ The hooks check formatting and file hygiene; use `colcon build` to verify compil
 - `delete_object` removes a node and its edges. The tracker stops writing that track until it
   retires, and never recreates the node. A corrected position comes in through `add_observations`
   or `add_object`; there is no pose override.
-- `last_seen` is the latest accepted 3D observation time; `last_updated` describes state
-  modification. Manual edits do not advance `last_seen`.
+- `last_seen` is the latest accepted 3D observation time; `last_updated` is the observation
+  time of the most recent pose/bounding-box change. Label edits and crop updates change neither.
 - Brief occlusion can retain an ID; a nearby, similarly sized object may replace a stale one,
   even across classes. See [tracker semantics and tuning](semantic_scene_forests_object_tracker/README.md).
 - The graph lives in memory: restart the manager for a new session, including recording

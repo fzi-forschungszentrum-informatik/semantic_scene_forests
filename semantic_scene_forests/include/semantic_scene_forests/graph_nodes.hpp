@@ -84,7 +84,7 @@ struct ObjectNode
   std::string frame_id{}; //!< Frame of bbox.
   uint8_t source{SOURCE_CAMERA};
   builtin_interfaces::msg::Time last_seen{};
-  builtin_interfaces::msg::Time last_updated{};
+  builtin_interfaces::msg::Time last_updated{}; //!< Observation time of the last bbox change.
   std::vector<CropPtr> crops{};
   std::map<std::string, WorkerState> workers{};
 

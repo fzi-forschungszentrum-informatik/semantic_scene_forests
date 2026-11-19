@@ -35,5 +35,7 @@ vision_msgs/BoundingBox3D bbox
 
 # Provenance, filled by the scene graph manager.
 uint8 source
+# Observation time of the most recent pose/bounding-box change, not label or crop changes.
 builtin_interfaces/Time last_updated
+# Latest accepted 3D observation time, including sightings that leave the bbox unchanged.
 builtin_interfaces/Time last_seen
