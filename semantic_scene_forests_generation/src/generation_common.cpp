@@ -78,30 +78,11 @@ oai::OpenAIClient makeClient(const LlmSettings& settings)
 
 void markRunResults(fzi::semantic_scene_forests::SceneGraph& graph,
                     const std::string& worker,
-                    const std::vector<int64_t>& input_ids,
-                    const std::unordered_set<int64_t>& existing_ids)
+                    const std::vector<int64_t>& input_ids)
 {
-  std::vector<int64_t> pending = input_ids;
-  std::unordered_set<int64_t> seen;
-  while (!pending.empty())
+  for (const int64_t ID : input_ids)
   {
-    const int64_t ID = pending.back();
-    pending.pop_back();
-    if (!seen.insert(ID).second)
-    {
-      continue;
-    }
     std::ignore = graph.markProcessed(ID, worker);
-    if (const auto OUT = graph.outgoingEdges(ID); OUT)
-    {
-      for (const auto& [target, edge] : *OUT)
-      {
-        if (!existing_ids.contains(target))
-        {
-          pending.push_back(target);
-        }
-      }
-    }
   }
 }
 

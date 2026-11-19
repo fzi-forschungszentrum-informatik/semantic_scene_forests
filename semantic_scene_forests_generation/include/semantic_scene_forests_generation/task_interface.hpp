@@ -50,7 +50,9 @@
 namespace semantic_scene_forests_generation {
 
 using TemplateMap = std::unordered_map<std::string, std::shared_ptr<minja::TemplateNode>>;
-using TaskResult  = std::expected<void, std::string>;
+//! A returned error is malformed model output: warn and continue with the next task.
+//! Technical failures (requests, configuration, execution) throw and abort the current run.
+using TaskResult = std::expected<void, std::string>;
 
 // ---------------------------------------------------------------------------
 // IObjectTask — Phase 1 plugin base class

@@ -79,7 +79,7 @@ private:
 
   void runBackground(const std::stop_token& stop);
   //! Runs the tasks on the unprocessed concepts (all concepts if !only_unprocessed), then marks
-  //! them. Throws on failure, leaving the concepts unprocessed.
+  //! them. Technical failures throw, leaving the concepts unprocessed; malformed output is skipped.
   Outcome generate(bool only_unprocessed, const std::function<bool()>& should_stop);
   //! The ids of the concepts to process.
   [[nodiscard]] std::vector<int64_t> planInput(bool only_unprocessed) const;

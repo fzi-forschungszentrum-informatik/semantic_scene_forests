@@ -87,8 +87,11 @@ Jinja2 templates live in `resources/{instance,meta}/*.j2`. At runtime they are l
   commit. Waiting is bounded by the per-call timeouts.
 - **Plan, then per item**: a worker plans its items (`unprocessedBy`). For each item it reads the
   current context with short locked getter calls, calls the LLM with no lock held, and applies
-  each result through atomic SceneGraph methods. A rejected or invalid call is logged and skipped;
+  each result through atomic SceneGraph methods. A rejected or invalid graph write is logged and skipped;
   a dependent step runs only if its predecessor succeeded. An object deleted meanwhile is skipped.
+- **Completion and failures**: mark only input nodes, leaving new concepts pending. Return
+  `TaskResult` errors for malformed model output so remaining tasks continue; throw technical
+  failures to abort the run, keep failed inputs pending, and retry at the next background tick.
 
 ## Build
 

@@ -68,6 +68,40 @@ TEST(ObjectAttributionWorkerTest, LoadsWithNoTasksAndServesAction)
   EXPECT_EQ(stopped.wait_for(2s), std::future_status::ready);
 }
 
+TEST(ObjectAttributionWorkerTest, TechnicalFailureAbortsAndLeavesInputsPending)
+{
+  auto node =
+    std::make_shared<rclcpp::Node>("attribution_failure_test",
+                                   rclcpp::NodeOptions().parameter_overrides({
+                                     {"object_attribution.server_url", "http://127.0.0.1:9"},
+                                     {"object_attribution.tasks", std::vector<std::string>{}},
+                                     {"object_attribution.poll_interval_seconds", 60.0},
+                                   }));
+  auto graph = std::make_shared<fzi::semantic_scene_forests::SceneGraph>();
+  ASSERT_TRUE(graph->addObject({.id = graph->allocateId(), .class_name = "cup"}));
+  ASSERT_TRUE(graph->addObject({.id = graph->allocateId(), .class_name = "bottle"}));
+  diagnostic_updater::Updater diagnostics(node);
+  ObjectAttributionWorker worker;
+  worker.initialize(*node, graph, "object_attribution", diagnostics);
+  worker.start();
+
+  auto client = rclcpp_action::create_client<RunWorker>(node, "attribute_objects");
+  ASSERT_TRUE(client->wait_for_action_server(5s));
+  auto accepted = client->async_send_goal(RunWorker::Goal{});
+  ASSERT_EQ(rclcpp::spin_until_future_complete(node, accepted, 5s),
+            rclcpp::FutureReturnCode::SUCCESS);
+  const auto& goal = accepted.get();
+  ASSERT_NE(goal, nullptr);
+  auto finished = client->async_get_result(goal);
+  ASSERT_EQ(rclcpp::spin_until_future_complete(node, finished, 5s),
+            rclcpp::FutureReturnCode::SUCCESS);
+  const auto& result = finished.get();
+  EXPECT_EQ(result.code, rclcpp_action::ResultCode::ABORTED);
+  EXPECT_FALSE(result.result->success);
+  EXPECT_NE(result.result->message.find("setup request failed"), std::string::npos);
+  EXPECT_EQ(graph->unprocessedBy("object_attribution").size(), 2U);
+}
+
 } // namespace
 
 int main(int argc, char** argv)

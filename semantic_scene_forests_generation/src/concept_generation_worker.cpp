@@ -167,12 +167,6 @@ ConceptGenerationWorker::generate(bool only_unprocessed, const std::function<boo
   {
     return Outcome::SKIPPED;
   }
-  // Concepts that exist before the run; the ones it creates count as processed afterwards.
-  std::unordered_set<int64_t> existing_ids;
-  for (const auto& concept_node : m_graph->getConceptNodes())
-  {
-    existing_ids.insert(concept_node.id);
-  }
   // The input as the tasks see it: current names, concepts deleted meanwhile dropped.
   const auto READ_INPUT = [&] {
     std::vector<ConceptNode> input;
@@ -247,7 +241,7 @@ ConceptGenerationWorker::generate(bool only_unprocessed, const std::function<boo
     }
     if (auto task_result = task->execute(client, history, READ_INPUT(), m_graph); !task_result)
     {
-      throw std::runtime_error("task failed: " + task_result.error());
+      RCLCPP_WARN(m_logger, "Skipping malformed task output: %s", task_result.error().c_str());
     }
   }
   if (should_stop())
@@ -255,7 +249,7 @@ ConceptGenerationWorker::generate(bool only_unprocessed, const std::function<boo
     return Outcome::STOPPED;
   }
 
-  markRunResults(*m_graph, m_name, INPUT_IDS, existing_ids);
+  markRunResults(*m_graph, m_name, INPUT_IDS);
   RCLCPP_INFO(m_logger, "Processed %zu concepts", CONCEPTS.size());
   m_stats.succeeded();
   return Outcome::GENERATED;

@@ -35,6 +35,7 @@
 #include <expected>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -206,17 +207,16 @@ parseAllowedConceptId(std::string_view value, const std::unordered_set<int64_t>&
 }
 
 // Send a user prompt, append the response to history, and return the response
-// content. The caller receives the request error so a failed task cannot be
-// reported as a successful scene-graph update.
-inline std::expected<std::string, std::string> chatTurn(oai::OpenAIClient& client,
-                                                        std::vector<oai::Message>& history,
-                                                        const std::string& user_text,
-                                                        const rclcpp::Logger& logger)
+// content. Technical failures throw; only parsing the returned content is recoverable.
+inline std::string chatTurn(oai::OpenAIClient& client,
+                            std::vector<oai::Message>& history,
+                            const std::string& user_text,
+                            const rclcpp::Logger& logger)
 {
   auto user_message = oai::MessageBuilder::user().text(user_text).build();
   if (!user_message)
   {
-    return std::unexpected("failed to build LLM request: " + user_message.error());
+    throw std::runtime_error("failed to build LLM request: " + user_message.error());
   }
   history.push_back(std::move(*user_message));
 
@@ -229,24 +229,23 @@ inline std::expected<std::string, std::string> chatTurn(oai::OpenAIClient& clien
                   "LLM request failed (%d): %s",
                   response.error().http_status,
                   response.error().message.c_str());
-      history.pop_back();
-      return std::unexpected("LLM request failed: " + response.error().message);
+      throw std::runtime_error("LLM request failed: " + response.error().message);
     }
 
     std::string content    = response->text();
     auto assistant_message = oai::MessageBuilder::assistant().text(content).build();
     if (!assistant_message)
     {
-      history.pop_back();
-      return std::unexpected("failed to build LLM response message: " + assistant_message.error());
+      throw std::runtime_error("failed to build LLM response message: " +
+                               assistant_message.error());
     }
     history.push_back(std::move(*assistant_message));
     return content;
   }
-  catch (const std::exception& e)
+  catch (...)
   {
     history.pop_back();
-    return std::unexpected("LLM request threw an exception: " + std::string(e.what()));
+    throw;
   }
 }
 
@@ -262,67 +261,50 @@ inline TaskResult runObjectAttributeTask(
   std::string_view relation,
   std::string_view category)
 {
-  try
+  const auto PROMPT_TEMPLATE     = templates.find("instance/single_attribute");
+  const auto FORMATTING_TEMPLATE = templates.find("instance/formatting");
+  if (PROMPT_TEMPLATE == templates.end() || FORMATTING_TEMPLATE == templates.end())
   {
-    const auto PROMPT_TEMPLATE     = templates.find("instance/single_attribute");
-    const auto FORMATTING_TEMPLATE = templates.find("instance/formatting");
-    if (PROMPT_TEMPLATE == templates.end() || FORMATTING_TEMPLATE == templates.end())
-    {
-      return std::unexpected("required object attribute template is missing");
-    }
+    throw std::runtime_error("required object attribute template is missing");
+  }
 
-    auto prompt_context = minja::Value::object();
-    prompt_context.set("attribute", minja::Value(std::string{attribute}));
-    const auto CONTEXT       = minja::Context::make(std::move(prompt_context));
-    const std::string PROMPT = PROMPT_TEMPLATE->second->render(CONTEXT);
+  auto prompt_context = minja::Value::object();
+  prompt_context.set("attribute", minja::Value(std::string{attribute}));
+  const auto CONTEXT       = minja::Context::make(std::move(prompt_context));
+  const std::string PROMPT = PROMPT_TEMPLATE->second->render(CONTEXT);
 
-    const auto APPLY_RESPONSE = [&](const std::string& raw) -> TaskResult {
-      auto parsed = parseJsonObject(raw);
-      if (!parsed)
-      {
-        return std::unexpected(parsed.error());
-      }
-      const auto VALUES = parsed->find(std::string{attribute});
-      if (VALUES == parsed->end() || !VALUES->is_array())
-      {
-        return std::unexpected("LLM response is missing the expected '" + std::string(attribute) +
-                               "' array");
-      }
-      return applyLabels(
-        *graph, logger, object_id, std::string{relation}, std::string{category}, *VALUES);
-    };
+  const auto APPLY_RESPONSE = [&](const std::string& raw) -> TaskResult {
+    auto parsed = parseJsonObject(raw);
+    if (!parsed)
+    {
+      return std::unexpected(parsed.error());
+    }
+    const auto VALUES = parsed->find(std::string{attribute});
+    if (VALUES == parsed->end() || !VALUES->is_array())
+    {
+      return std::unexpected("LLM response is missing the expected '" + std::string(attribute) +
+                             "' array");
+    }
+    return applyLabels(
+      *graph, logger, object_id, std::string{relation}, std::string{category}, *VALUES);
+  };
 
-    auto response = chatTurn(client, history, PROMPT, logger);
-    if (!response)
-    {
-      return std::unexpected(response.error());
-    }
-    if (APPLY_RESPONSE(*response))
-    {
-      return {};
-    }
-    // Nothing was written for a malformed response, so ask once for the right format.
-    auto formatting_context = minja::Value::object();
-    formatting_context.set("response", minja::Value(*response));
-    formatting_context.set("attribute", minja::Value(std::string{attribute}));
-    const auto FORMATTING_MINJA_CONTEXT = minja::Context::make(std::move(formatting_context));
-    const std::string FORMATTING_PROMPT =
-      FORMATTING_TEMPLATE->second->render(FORMATTING_MINJA_CONTEXT);
-    auto retry = chatTurn(client, history, FORMATTING_PROMPT, logger);
-    if (!retry)
-    {
-      return std::unexpected(retry.error());
-    }
-    if (auto retry_result = APPLY_RESPONSE(*retry); !retry_result)
-    {
-      return std::unexpected("invalid LLM response after formatting retry: " +
-                             retry_result.error());
-    }
+  auto response = chatTurn(client, history, PROMPT, logger);
+  if (APPLY_RESPONSE(response))
+  {
     return {};
   }
-  catch (const std::exception& e)
+  // Nothing was written for a malformed response, so ask once for the right format.
+  auto formatting_context = minja::Value::object();
+  formatting_context.set("response", minja::Value(response));
+  formatting_context.set("attribute", minja::Value(std::string{attribute}));
+  const auto FORMATTING_MINJA_CONTEXT = minja::Context::make(std::move(formatting_context));
+  const std::string FORMATTING_PROMPT =
+    FORMATTING_TEMPLATE->second->render(FORMATTING_MINJA_CONTEXT);
+  auto retry = chatTurn(client, history, FORMATTING_PROMPT, logger);
+  if (auto retry_result = APPLY_RESPONSE(retry); !retry_result)
   {
-    return std::unexpected("object attribute task failed: " + std::string(e.what()));
+    return std::unexpected("invalid LLM response after formatting retry: " + retry_result.error());
   }
   return {};
 }

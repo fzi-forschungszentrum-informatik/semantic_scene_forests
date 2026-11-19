@@ -30,8 +30,9 @@
 
 #include <algorithm>
 #include <memory>
+#include <stdexcept>
 #include <string>
-#include <unordered_set>
+#include <tuple>
 
 #include <rclcpp/rclcpp.hpp>
 #include <semantic_scene_forests/scene_graph.hpp>
@@ -119,29 +120,56 @@ TEST(ApplyLabelsTest, RerunKeepsExistingEdgesAndRejectsNonArray)
     applyLabels(graph, rclcpp::get_logger("test"), OBJECT, "has_color", "color", json("red")));
 }
 
-TEST(MarkRunResultsTest, MarksInputAndItsNewConceptsButNotOthersWriters)
+TEST(MarkRunResultsTest, MarksOnlyInputNotNewAncestorsOrOtherWriters)
 {
   SceneGraph graph;
   const auto OBJECT = addObject(graph);
   const auto INPUT  = graph.addConceptEdge(OBJECT, "has_color", "red");
   ASSERT_TRUE(INPUT);
-  const std::unordered_set<int64_t> EXISTING{INPUT->id};
-  // The run categorizes "red", and another writer adds "plastic" meanwhile.
+  // The run categorizes "red", and another writer links a new concept from the same input.
   ASSERT_TRUE(applyLabels(
     graph, rclcpp::get_logger("test"), INPUT->id, "is_type_of", "category", json::array({"warm"})));
-  const auto OTHER = graph.addConceptEdge(OBJECT, "has_material", "plastic");
+  const auto OTHER = graph.addConceptEdge(INPUT->id, "has_context", "external");
   ASSERT_TRUE(OTHER);
 
-  semantic_scene_forests_generation::markRunResults(graph, "gen", {INPUT->id}, EXISTING);
+  semantic_scene_forests_generation::markRunResults(graph, "gen", {INPUT->id});
 
   const auto PENDING    = graph.unprocessedBy("gen");
   const auto IS_PENDING = [&PENDING](int64_t id) {
     return std::ranges::find(PENDING, id) != PENDING.end();
   };
   EXPECT_FALSE(IS_PENDING(INPUT->id));
-  EXPECT_FALSE(IS_PENDING(graph.findConceptNodesByName("warm").front().id));
-  EXPECT_FALSE(IS_PENDING(graph.findConceptNodesByName("category").front().id));
+  EXPECT_TRUE(IS_PENDING(graph.findConceptNodesByName("warm").front().id));
+  EXPECT_TRUE(IS_PENDING(graph.findConceptNodesByName("category").front().id));
   EXPECT_TRUE(IS_PENDING(OTHER->id));
+}
+
+TEST(TaskFailureTest, ConnectionFailureThrowsAndRestoresHistory)
+{
+  semantic_scene_forests_generation::LlmSettings settings;
+  settings.server_url              = "http://127.0.0.1:9";
+  settings.model                   = "test";
+  settings.request_timeout_seconds = 1;
+  auto client                      = semantic_scene_forests_generation::makeClient(settings);
+  std::vector<oai::Message> history;
+  EXPECT_THROW(static_cast<void>(semantic_scene_forests_generation::chatTurn(
+                 client, history, "describe this object", rclcpp::get_logger("test"))),
+               std::runtime_error);
+  EXPECT_TRUE(history.empty());
+}
+
+TEST(TaskFailureTest, MissingTemplateIsTechnicalNotAFormattingWarning)
+{
+  semantic_scene_forests_generation::LlmSettings settings;
+  settings.server_url = "http://127.0.0.1:9";
+  settings.model      = "test";
+  auto client         = semantic_scene_forests_generation::makeClient(settings);
+  std::vector<oai::Message> history;
+  const auto GRAPH = std::make_shared<SceneGraph>();
+  EXPECT_THROW(
+    std::ignore = semantic_scene_forests_generation::runObjectAttributeTask(
+      client, history, 1, GRAPH, {}, rclcpp::get_logger("test"), "color", "has_color", "color"),
+    std::runtime_error);
 }
 
 } // namespace

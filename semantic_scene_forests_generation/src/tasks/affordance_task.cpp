@@ -48,71 +48,60 @@ AffordanceTask::execute(oai::OpenAIClient& client,
                         const std::vector<fzi::semantic_scene_forests::ConceptNode>& concepts,
                         const std::shared_ptr<fzi::semantic_scene_forests::SceneGraph>& graph)
 {
-  try
+  if (concepts.empty())
   {
-    if (concepts.empty())
-    {
-      return {};
-    }
-
-    const auto AFFORDANCE_TEMPLATE = m_templates->find("meta/affordance");
-    if (AFFORDANCE_TEMPLATE == m_templates->end())
-    {
-      return std::unexpected("required affordance template is missing");
-    }
-
-    std::unordered_set<int64_t> allowed_ids;
-    allowed_ids.reserve(concepts.size());
-    auto input_list = minja::Value::array();
-    for (const auto& concept_node : concepts)
-    {
-      allowed_ids.insert(concept_node.id);
-      auto item = minja::Value::object();
-      item.set("id", minja::Value(concept_node.id));
-      item.set("class_name", minja::Value(concept_node.concept_name));
-      input_list.push_back(item);
-    }
-    auto prompt_context = minja::Value::object();
-    prompt_context.set("input_list", input_list);
-    const auto CONTEXT       = minja::Context::make(std::move(prompt_context));
-    const std::string PROMPT = AFFORDANCE_TEMPLATE->second->render(CONTEXT);
-
-    auto content = chatTurn(client, history, PROMPT, m_logger);
-    if (!content)
-    {
-      return std::unexpected(content.error());
-    }
-    auto parsed = parseJsonObject(*content);
-    if (!parsed)
-    {
-      return std::unexpected(parsed.error());
-    }
-    if (parsed->size() > MAX_TASK_SOURCE_IDS)
-    {
-      return std::unexpected("LLM response contains too many concept ids");
-    }
-
-    for (const auto& [id_string, affordances] : parsed->items())
-    {
-      const auto SOURCE_ID = parseAllowedConceptId(id_string, allowed_ids);
-      if (!SOURCE_ID)
-      {
-        RCLCPP_WARN(m_logger, "Skipping '%s': %s", id_string.c_str(), SOURCE_ID.error().c_str());
-        continue;
-      }
-      if (auto applied =
-            applyLabels(*graph, m_logger, *SOURCE_ID, "has_affordance", "affordance", affordances);
-          !applied)
-      {
-        RCLCPP_WARN(m_logger, "Skipping '%s': %s", id_string.c_str(), applied.error().c_str());
-      }
-    }
     return {};
   }
-  catch (const std::exception& e)
+
+  const auto AFFORDANCE_TEMPLATE = m_templates->find("meta/affordance");
+  if (AFFORDANCE_TEMPLATE == m_templates->end())
   {
-    return std::unexpected("affordance task failed: " + std::string(e.what()));
+    throw std::runtime_error("required affordance template is missing");
   }
+
+  std::unordered_set<int64_t> allowed_ids;
+  allowed_ids.reserve(concepts.size());
+  auto input_list = minja::Value::array();
+  for (const auto& concept_node : concepts)
+  {
+    allowed_ids.insert(concept_node.id);
+    auto item = minja::Value::object();
+    item.set("id", minja::Value(concept_node.id));
+    item.set("class_name", minja::Value(concept_node.concept_name));
+    input_list.push_back(item);
+  }
+  auto prompt_context = minja::Value::object();
+  prompt_context.set("input_list", input_list);
+  const auto CONTEXT       = minja::Context::make(std::move(prompt_context));
+  const std::string PROMPT = AFFORDANCE_TEMPLATE->second->render(CONTEXT);
+
+  auto content = chatTurn(client, history, PROMPT, m_logger);
+  auto parsed  = parseJsonObject(content);
+  if (!parsed)
+  {
+    return std::unexpected(parsed.error());
+  }
+  if (parsed->size() > MAX_TASK_SOURCE_IDS)
+  {
+    return std::unexpected("LLM response contains too many concept ids");
+  }
+
+  for (const auto& [id_string, affordances] : parsed->items())
+  {
+    const auto SOURCE_ID = parseAllowedConceptId(id_string, allowed_ids);
+    if (!SOURCE_ID)
+    {
+      RCLCPP_WARN(m_logger, "Skipping '%s': %s", id_string.c_str(), SOURCE_ID.error().c_str());
+      continue;
+    }
+    if (auto applied =
+          applyLabels(*graph, m_logger, *SOURCE_ID, "has_affordance", "affordance", affordances);
+        !applied)
+    {
+      RCLCPP_WARN(m_logger, "Skipping '%s': %s", id_string.c_str(), applied.error().c_str());
+    }
+  }
+  return {};
 }
 
 } // namespace semantic_scene_forests_generation

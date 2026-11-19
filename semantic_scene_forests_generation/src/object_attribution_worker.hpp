@@ -75,7 +75,6 @@ private:
   enum class Outcome : std::uint8_t
   {
     DESCRIBED,
-    FAILED,
     SKIPPED, // the object was deleted meanwhile
     STOPPED
   };
@@ -85,9 +84,9 @@ private:
   std::optional<std::string>
   executeGoal(const std::shared_ptr<WorkerThreads::GoalHandle>& goal_handle,
               const std::function<bool()>& should_stop);
-  //! Describes and marks one object; a failed object is marked too, a stopped one is not.
+  //! Describes and marks one object; technical failures throw and leave it pending.
   Outcome describeObject(int64_t id, const std::function<bool()>& should_stop);
-  //! Reads the object, then runs the tasks on it. Throws on failure.
+  //! Reads the object, then runs its tasks; malformed output is skipped, technical failures throw.
   Outcome runTasks(int64_t id, const std::function<bool()>& should_stop);
   //! Ids of the object nodes the worker has not processed yet.
   [[nodiscard]] std::vector<int64_t> pendingObjects() const;

@@ -125,6 +125,10 @@ void ObjectAttributionWorker::runBackground(const std::stop_token& stop)
     {
       RCLCPP_ERROR(m_logger, "Background attribution failed: %s", e.what());
     }
+    catch (...)
+    {
+      RCLCPP_ERROR(m_logger, "Background attribution failed: unknown exception");
+    }
   }
 }
 
@@ -174,7 +178,7 @@ ObjectAttributionWorker::Outcome
 ObjectAttributionWorker::describeObject(int64_t id, const std::function<bool()>& should_stop)
 {
   const std::scoped_lock LOCK{m_describe_mutex};
-  Outcome outcome = Outcome::FAILED;
+  Outcome outcome{};
   try
   {
     outcome = runTasks(id, should_stop);
@@ -183,12 +187,14 @@ ObjectAttributionWorker::describeObject(int64_t id, const std::function<bool()>&
   {
     RCLCPP_WARN(m_logger, "Describing object %ld failed: %s", id, e.what());
     m_stats.failed("object " + std::to_string(id) + ": " + e.what());
+    throw;
   }
   catch (...)
   {
     // A pluginlib-loaded task can throw a type that is not a std::exception.
     RCLCPP_WARN(m_logger, "Describing object %ld failed: unknown exception", id);
     m_stats.failed("object " + std::to_string(id) + ": unknown exception");
+    throw;
   }
   if (outcome == Outcome::STOPPED || should_stop())
   {
@@ -199,7 +205,6 @@ ObjectAttributionWorker::describeObject(int64_t id, const std::function<bool()>&
     RCLCPP_INFO(m_logger, "Object %ld was deleted, skipped", id);
     return outcome;
   }
-  // Marked even on failure so an LLM outage cannot loop on paid calls; attribute_objects retries.
   if (const auto MARKED = m_graph->markProcessed(id, m_name); !MARKED)
   {
     RCLCPP_WARN(m_logger, "Marking object %ld failed: %s", id, MARKED.error().message.c_str());
@@ -306,7 +311,10 @@ ObjectAttributionWorker::runTasks(int64_t id, const std::function<bool()>& shoul
     }
     if (auto task_result = task->execute(client, history, id, crops, m_graph); !task_result)
     {
-      throw std::runtime_error("task failed: " + task_result.error());
+      RCLCPP_WARN(m_logger,
+                  "Skipping malformed task output for object %ld: %s",
+                  id,
+                  task_result.error().c_str());
     }
   }
   return Outcome::DESCRIBED;
