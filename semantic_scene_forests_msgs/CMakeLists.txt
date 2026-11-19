@@ -49,6 +49,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/AddEdge.srv"
   "srv/AddConcept.srv"
   "srv/GetConcept.srv"
+  "srv/SaveSceneGraph.srv"
   "action/RunWorker.action"
   DEPENDENCIES builtin_interfaces std_msgs vision_msgs sensor_msgs
 )

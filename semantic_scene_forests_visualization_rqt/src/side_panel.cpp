@@ -142,6 +142,10 @@ void SidePanel::buildLayout()
   button_row->addWidget(m_attribute_objects_button);
   button_row->addWidget(m_generate_concepts_button);
   action_layout->addLayout(button_row);
+  auto* save_button = new QPushButton{tr("Save Graph"), action_box};
+  save_button->setToolTip(tr("Save the graph to ~/.ros/scene_graphs/ on the manager's host"));
+  action_layout->addWidget(save_button);
+  connect(save_button, &QPushButton::clicked, this, &SidePanel::requestSaveGraph);
   m_progress_bar = new QProgressBar{action_box};
   m_progress_bar->setRange(0, 100);
   m_progress_bar->setValue(0);

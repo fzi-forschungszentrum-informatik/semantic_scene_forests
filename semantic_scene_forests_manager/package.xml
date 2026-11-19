@@ -51,6 +51,8 @@
   <depend>sensor_msgs</depend>
   <depend>generate_parameter_library</depend>
   <depend>diagnostic_updater</depend>
+  <depend>libzip-dev</depend>
+  <depend>nlohmann-json-dev</depend>
 
   <test_depend>ament_cmake_gtest</test_depend>
 

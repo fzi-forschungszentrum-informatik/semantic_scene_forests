@@ -48,6 +48,8 @@ find_package(Boost REQUIRED)
 find_package(fmt REQUIRED)
 find_package(semantic_scene_forests_msgs REQUIRED)
 find_package(semantic_scene_forests REQUIRED)
+find_package(nlohmann_json REQUIRED)
+find_package(libzip REQUIRED)
 
 # Header-only worker interface plus the shared dependencies, linked by the tracker and generation.
 add_library(worker_interface INTERFACE)
@@ -72,6 +74,7 @@ generate_parameter_library(scene_graph_manager_parameters
 
 add_library(scene_graph_manager_component SHARED
   src/scene_graph_manager_node.cpp
+  src/scene_graph_bundle.cpp
 )
 target_compile_features(scene_graph_manager_component PUBLIC cxx_std_20)
 target_link_libraries(scene_graph_manager_component
@@ -81,6 +84,10 @@ target_link_libraries(scene_graph_manager_component
     pluginlib::pluginlib
     rclcpp_components::component
     scene_graph_manager_parameters
+  PRIVATE
+    fmt::fmt
+    nlohmann_json::nlohmann_json
+    libzip::zip
 )
 rclcpp_components_register_node(scene_graph_manager_component
   PLUGIN "semantic_scene_forests_manager::SceneGraphManagerNode"
@@ -119,6 +126,11 @@ if(BUILD_TESTING)
     TIMEOUT 120)
   target_include_directories(test_scene_graph_manager_node PRIVATE src)
   target_link_libraries(test_scene_graph_manager_node scene_graph_manager_component)
+
+  ament_add_gtest(test_scene_graph_bundle test/test_scene_graph_bundle.cpp)
+  target_include_directories(test_scene_graph_bundle PRIVATE src)
+  target_link_libraries(test_scene_graph_bundle
+    scene_graph_manager_component nlohmann_json::nlohmann_json libzip::zip)
 endif()
 
 ament_export_targets(${PROJECT_NAME}Targets HAS_LIBRARY_TARGET)

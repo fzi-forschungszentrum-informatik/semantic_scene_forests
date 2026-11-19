@@ -30,6 +30,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
 #include <mutex>
 #include <ranges>
 #include <string>
@@ -38,6 +39,9 @@
 
 #include <cv_bridge/cv_bridge.hpp>
 #include <rclcpp_components/register_node_macro.hpp>
+#include <rcutils/env.h>
+
+#include "scene_graph_bundle.hpp"
 
 namespace semantic_scene_forests_manager {
 
@@ -47,6 +51,7 @@ using SceneGraphMsg    = semantic_scene_forests_msgs::msg::SceneGraph;
 using AddConcept       = semantic_scene_forests_msgs::srv::AddConcept;
 using GetConcept       = semantic_scene_forests_msgs::srv::GetConcept;
 using AddEdge          = semantic_scene_forests_msgs::srv::AddEdge;
+using SaveSceneGraph   = semantic_scene_forests_msgs::srv::SaveSceneGraph;
 using ObjectVisuals    = semantic_scene_forests_object_msgs::msg::ObjectVisuals;
 using GetObjects       = semantic_scene_forests_object_msgs::srv::GetObjects;
 using GetObjectVisuals = semantic_scene_forests_object_msgs::srv::GetObjectVisuals;
@@ -128,6 +133,35 @@ SceneGraphManagerNode::SceneGraphManagerNode(const rclcpp::NodeOptions& options)
     [this](const GetObjectVisuals::Request::SharedPtr& request,
            const GetObjectVisuals::Response::SharedPtr& response) {
       response->visuals = objectCrops(*m_graph, request->object_ids, get_logger());
+    },
+    rclcpp::ServicesQoS(),
+    m_read_group));
+
+  // TODO: a load_scene_graph counterpart needs the tracker to reset/seed its track->node-ID
+  // table first; loading under a running tracker could overwrite or delete the wrong nodes.
+  m_services.push_back(create_service<SaveSceneGraph>(
+    "save_scene_graph",
+    [this](const SaveSceneGraph::Request::SharedPtr& /*request*/,
+           const SaveSceneGraph::Response::SharedPtr& response) {
+      const char* home = rcutils_get_home_dir();
+      if (home == nullptr)
+      {
+        response->message = "Cannot determine the home directory";
+        RCLCPP_ERROR(get_logger(), "SaveSceneGraph: %s", response->message.c_str());
+        return;
+      }
+      const auto SAVED = saveSceneGraphBundle(
+        *m_graph, m_params.frame_id, std::filesystem::path{home} / ".ros" / "scene_graphs");
+      if (!SAVED)
+      {
+        response->message = SAVED.error();
+        RCLCPP_ERROR(get_logger(), "SaveSceneGraph: %s", response->message.c_str());
+        return;
+      }
+      response->success = true;
+      response->path    = SAVED->string();
+      response->message = "Saved to " + response->path;
+      RCLCPP_INFO(get_logger(), "SaveSceneGraph: %s", response->message.c_str());
     },
     rclcpp::ServicesQoS(),
     m_read_group));

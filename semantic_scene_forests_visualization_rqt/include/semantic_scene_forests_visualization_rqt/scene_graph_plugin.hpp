@@ -50,6 +50,7 @@
 
 #include <semantic_scene_forests_msgs/action/run_worker.hpp>
 #include <semantic_scene_forests_msgs/msg/scene_graph.hpp>
+#include <semantic_scene_forests_msgs/srv/save_scene_graph.hpp>
 #include <semantic_scene_forests_object_msgs/srv/get_object_visuals.hpp>
 #include <semantic_scene_forests_planning_msgs/action/find_object.hpp>
 #include <semantic_scene_forests_planning_msgs/action/prompt_llm.hpp>
@@ -91,6 +92,7 @@ signals:
   void actionFinished(bool success, QString message);
   void queryInspected(QVector<qint64> ids, QString status);
   void queryFinished(bool success, QString message, qint64 object_id);
+  void saveFinished(QString message);
 
 private slots:
   void onSceneGraphReceived();
@@ -126,6 +128,7 @@ private:
   rclcpp_action::Client<FindObject>::SharedPtr m_find_client;
   rclcpp::Client<semantic_scene_forests_object_msgs::srv::GetObjectVisuals>::SharedPtr
     m_visuals_client;
+  rclcpp::Client<semantic_scene_forests_msgs::srv::SaveSceneGraph>::SharedPtr m_save_client;
 
   // Active query goal handles for cancellation — set/cleared from ROS callbacks under m_mutex.
   rclcpp_action::ClientGoalHandle<PromptLLM>::SharedPtr m_prompt_goal;
@@ -153,6 +156,7 @@ private:
   bool m_active_query_is_find{false};
 
   void onSceneGraphMsg(const semantic_scene_forests_msgs::msg::SceneGraph::ConstSharedPtr& msg);
+  void requestSave();
   void sendActionGoal(const rclcpp_action::Client<RunWorker>::SharedPtr& client);
   void requestVisuals(int64_t object_id);
   void syncDisplayedGraphToLatest();

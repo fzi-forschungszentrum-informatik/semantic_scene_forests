@@ -70,6 +70,7 @@ signals:
   void viewModeChanged(ViewMode mode);
   void requestAttributeObjects();
   void requestGenerateConcepts();
+  void requestSaveGraph();
 
   // kind: 0 = PromptLLM, 1 = FindObject.
   void queryRequested(int kind, QString text);

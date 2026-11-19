@@ -34,6 +34,7 @@ operator-facing views.
 | `/add_concept` | `semantic_scene_forests_msgs/srv/AddConcept` | Create a new concept and connect it to a source node; fails if the label exists |
 | `/get_concept` | `semantic_scene_forests_msgs/srv/GetConcept` | Look up a concept id by label |
 | `/add_edge` | `semantic_scene_forests_msgs/srv/AddEdge` | Add a labeled edge between two existing nodes |
+| `/save_scene_graph` | `semantic_scene_forests_msgs/srv/SaveSceneGraph` | Save the graph as a `.sg` bundle under `~/.ros/scene_graphs/`; returns the `path` |
 | `/attribute_objects`, `/generate_concepts` | `semantic_scene_forests_msgs/action/RunWorker` | Manually rerun phase 1 or phase 2 |
 | `find_object` | `semantic_scene_forests_planning_msgs/action/FindObject` | Resolve an object from a natural-language description |
 | `prompt_llm` | `semantic_scene_forests_planning_msgs/action/PromptLLM` | General graph-aware LLM query |
@@ -50,6 +51,23 @@ at most 128 UTF-8 bytes, and free of control characters. `/add_edge` adds a labe
 between two existing nodes. No delete, rename, or replacement operation is exposed.
 
 The graph lives in memory: restarting the manager does not persist concepts or edges.
+
+### Saving with `save_scene_graph`
+
+`/save_scene_graph` (also the rqt "Save Graph" button) writes the current graph to
+`~/.ros/scene_graphs/scene_graph_<YYYYmmdd-HHMMSS-mmm>.sg` on the manager's host and returns the
+path. A `.sg` file is a zip:
+
+```
+scene_graph.json              # format_version, frame_id, objects, concepts, edges
+crops/<object_id>/<index>.jpg # the object's JPEG crops, referenced from scene_graph.json
+```
+
+Objects carry the fields of `ObjectNode` (class, frame, bbox, source, `last_seen`,
+`last_updated`) plus their crop files; concepts carry id and name; edges carry source, target
+and label. Worker state is not saved. There is no load yet: the tracker keeps its own
+track-to-node-ID table, so loading into a running stack could overwrite or delete the wrong
+nodes.
 
 ## Packages
 
@@ -110,7 +128,8 @@ The hooks check formatting and file hygiene; use `colcon build` to verify compil
 - Brief occlusion can retain an ID; a nearby, similarly sized object may replace a stale one,
   even across classes. See [tracker semantics and tuning](semantic_scene_forests_object_tracker/README.md).
 - The graph lives in memory: restart the manager for a new session, including recording
-  rewind/loop; do not mix observation time domains. There is no persistence.
+  rewind/loop; do not mix observation time domains. `/save_scene_graph` saves a snapshot; there
+  is no load.
 - Tests cover the SceneGraph, the manager node and each worker on the real in-memory graph. No
   full-stack test, dataset or hardware validation is included; the initial tuning values
   require calibration on recordings/hardware.

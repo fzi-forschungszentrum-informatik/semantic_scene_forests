@@ -66,6 +66,7 @@ constexpr const char* GENERATE_CONCEPTS_ACTION   = "generate_concepts";
 constexpr const char* PROMPT_LLM_ACTION          = "prompt_llm";
 constexpr const char* FIND_OBJECT_ACTION         = "find_object";
 constexpr const char* GET_OBJECT_VISUALS_SERVICE = "get_object_visuals";
+constexpr const char* SAVE_SCENE_GRAPH_SERVICE   = "save_scene_graph";
 constexpr int LEFT_PANEL_WIDTH                   = 260;
 constexpr int RIGHT_PANEL_WIDTH                  = 380;
 
@@ -114,6 +115,7 @@ void SceneGraphPlugin::initPlugin(qt_gui_cpp::PluginContext& context)
   connect(m_side_panel, &SidePanel::requestGenerateConcepts, this, [this]() {
     sendActionGoal(m_generate_concepts_client);
   });
+  connect(m_side_panel, &SidePanel::requestSaveGraph, this, &SceneGraphPlugin::requestSave);
   connect(m_side_panel, &SidePanel::queryRequested, this, &SceneGraphPlugin::onQueryRequested);
   connect(m_side_panel, &SidePanel::queryCancelRequested, this, &SceneGraphPlugin::onQueryCancel);
   connect(m_side_panel,
@@ -157,6 +159,12 @@ void SceneGraphPlugin::initPlugin(qt_gui_cpp::PluginContext& context)
           this,
           &SceneGraphPlugin::onQueryFinished,
           Qt::QueuedConnection);
+  connect(
+    this,
+    &SceneGraphPlugin::saveFinished,
+    this,
+    [this](const QString& message) { m_side_panel->setMessageStatus(message); },
+    Qt::QueuedConnection);
 
   // ROS plumbing on the node provided by RQT.
   const auto QOS    = rclcpp::QoS{1}.reliable().transient_local();
@@ -175,6 +183,8 @@ void SceneGraphPlugin::initPlugin(qt_gui_cpp::PluginContext& context)
   m_visuals_client =
     node_->create_client<semantic_scene_forests_object_msgs::srv::GetObjectVisuals>(
       GET_OBJECT_VISUALS_SERVICE);
+  m_save_client = node_->create_client<semantic_scene_forests_msgs::srv::SaveSceneGraph>(
+    SAVE_SCENE_GRAPH_SERVICE);
 
   m_side_panel->setViewMode(m_graph_view->viewMode());
 }
@@ -189,6 +199,7 @@ void SceneGraphPlugin::shutdownPlugin()
   m_prompt_goal.reset();
   m_find_goal.reset();
   m_visuals_client.reset();
+  m_save_client.reset();
 }
 
 void SceneGraphPlugin::saveSettings(qt_gui_cpp::Settings& /*plugin_settings*/,
@@ -374,6 +385,26 @@ void SceneGraphPlugin::requestVisuals(int64_t object_id)
         m_visuals_cache[object_id] = std::move(images);
       }
       emit visualsReceived(static_cast<qint64>(object_id));
+    });
+  // NOLINTEND(performance-unnecessary-value-param)
+}
+
+void SceneGraphPlugin::requestSave()
+{
+  if (m_save_client == nullptr || !m_save_client->service_is_ready())
+  {
+    m_side_panel->setMessageStatus(tr("Save service unavailable."));
+    return;
+  }
+  m_side_panel->setMessageStatus(tr("Saving scene graph..."));
+  // NOLINTBEGIN(performance-unnecessary-value-param): rclcpp deduces the callback from SharedFuture
+  m_save_client->async_send_request(
+    std::make_shared<semantic_scene_forests_msgs::srv::SaveSceneGraph::Request>(),
+    [this](rclcpp::Client<semantic_scene_forests_msgs::srv::SaveSceneGraph>::SharedFuture future) {
+      const auto& response = future.get();
+      emit saveFinished(response->success
+                          ? tr("Saved to %1").arg(QString::fromStdString(response->path))
+                          : tr("Save failed: %1").arg(QString::fromStdString(response->message)));
     });
   // NOLINTEND(performance-unnecessary-value-param)
 }

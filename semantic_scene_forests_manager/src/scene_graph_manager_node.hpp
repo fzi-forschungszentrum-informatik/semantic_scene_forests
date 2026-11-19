@@ -41,6 +41,7 @@
 #include <semantic_scene_forests_msgs/srv/add_concept.hpp>
 #include <semantic_scene_forests_msgs/srv/add_edge.hpp>
 #include <semantic_scene_forests_msgs/srv/get_concept.hpp>
+#include <semantic_scene_forests_msgs/srv/save_scene_graph.hpp>
 #include <semantic_scene_forests_object_msgs/srv/delete_object.hpp>
 #include <semantic_scene_forests_object_msgs/srv/edit_object.hpp>
 #include <semantic_scene_forests_object_msgs/srv/get_object_visuals.hpp>
