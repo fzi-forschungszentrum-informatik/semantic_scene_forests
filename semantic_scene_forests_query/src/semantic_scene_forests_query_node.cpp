@@ -40,7 +40,9 @@
 
 #include <fmt/format.h>
 
-#include <ament_index_cpp/get_package_share_path.hpp>
+// get_package_share_path() does not exist on Jazzy/Kilted; keep the directory API despite the
+// Lyrical deprecation warning.
+#include <ament_index_cpp/get_package_share_directory.hpp>
 
 #include <cv_bridge/cv_bridge.hpp>
 
@@ -108,7 +110,8 @@ SceneGraphQueryNode::SceneGraphQueryNode(const rclcpp::NodeOptions& options)
   else
   {
     prompt_dir =
-      ament_index_cpp::get_package_share_path("semantic_scene_forests_query") / "resources";
+      fs::path(ament_index_cpp::get_package_share_directory("semantic_scene_forests_query")) /
+      "resources";
   }
   loadTemplates(prompt_dir.string());
 

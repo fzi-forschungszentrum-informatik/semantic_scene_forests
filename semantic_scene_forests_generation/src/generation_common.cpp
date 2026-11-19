@@ -38,7 +38,9 @@
 #include <tuple>
 #include <utility>
 
-#include <ament_index_cpp/get_package_share_path.hpp>
+// get_package_share_path() does not exist on Jazzy/Kilted; keep the directory API despite the
+// Lyrical deprecation warning.
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <minja/minja.hpp>
 #include <nlohmann/json.hpp>
 #include <oai_api/builder.hpp>
@@ -88,16 +90,19 @@ void markRunResults(fzi::semantic_scene_forests::SceneGraph& graph,
 
 TemplateMap loadTemplates(const std::string& prompt_dir, const rclcpp::Logger& logger)
 {
-  const fs::path ROOT =
-    prompt_dir.empty()
-      ? ament_index_cpp::get_package_share_path("semantic_scene_forests_generation") / "resources"
-      : fs::path(prompt_dir);
-  RCLCPP_INFO(logger, "Root template dir: %s", ROOT.c_str());
+  fs::path root(prompt_dir);
+  if (prompt_dir.empty())
+  {
+    root =
+      fs::path(ament_index_cpp::get_package_share_directory("semantic_scene_forests_generation")) /
+      "resources";
+  }
+  RCLCPP_INFO(logger, "Root template dir: %s", root.c_str());
   const minja::Options OPTS{
     .trim_blocks = true, .lstrip_blocks = true, .keep_trailing_newline = false};
 
   TemplateMap templates;
-  for (const auto& entry : fs::recursive_directory_iterator(ROOT))
+  for (const auto& entry : fs::recursive_directory_iterator(root))
   {
     if (!entry.is_regular_file() || entry.path().extension() != ".j2")
     {
@@ -106,7 +111,7 @@ TemplateMap loadTemplates(const std::string& prompt_dir, const rclcpp::Logger& l
     // Key: relative path without extension, e.g. "instance/single_attribute"
     const std::string KEY = entry.path()
                               .lexically_normal()
-                              .lexically_relative(ROOT.lexically_normal())
+                              .lexically_relative(root.lexically_normal())
                               .replace_extension()
                               .string();
 
@@ -117,7 +122,7 @@ TemplateMap loadTemplates(const std::string& prompt_dir, const rclcpp::Logger& l
     templates[KEY] = minja::Parser::parse(CONTENT, OPTS);
     RCLCPP_INFO(logger, "Loaded template: %s", KEY.c_str());
   }
-  RCLCPP_INFO(logger, "Loaded %zu templates from %s", templates.size(), ROOT.c_str());
+  RCLCPP_INFO(logger, "Loaded %zu templates from %s", templates.size(), root.c_str());
   return templates;
 }
 
