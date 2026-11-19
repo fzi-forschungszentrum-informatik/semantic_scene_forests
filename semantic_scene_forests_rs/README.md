@@ -69,15 +69,16 @@ left the pre-existing workspace configuration unchanged.
 ## Graph operations
 
 ```rust
-use semantic_scene_forests_rs::{Detection3D, Image, SceneGraph};
+use semantic_scene_forests_rs::{ObjectNode, SceneGraph};
 
-let detection = Detection3D { id: "cup-1".into(), ..Default::default() };
-let mut image = Image::default();
-image.header.frame_id = "camera".into();
 let mut graph = SceneGraph::new();
-let cup = graph.add_object_node(
-    "cup", Some(&detection), [Some(&image), None, None, None, None],
-)?;
+let cup = graph.allocate_id();
+graph.add_object(&ObjectNode {
+    id: cup,
+    class_name: "cup".into(),
+    frame_id: "map".into(),
+    ..Default::default()
+})?;
 let on = graph.add_concept_node("on")?;
 graph.add_edge(cup, on, "relation")?;
 assert_eq!(graph.outgoing_edges(cup)?[0].0, on);
@@ -104,23 +105,24 @@ cargo run --manifest-path /path/to/semantic_scene_forests_rs/Cargo.toml \
 ```
 
 Graph operations use the C++ implementation and return `GraphError` with its
-original error kind and message. `add_object_node` accepts an optional generated
-`Detection3D` and exactly five optional `Image` references; class-only insertion
-uses `add_object_node("cup", None, [None; 5])`. Every detection field (including
-hypotheses, poses, covariance, and bounding box) and every image field is copied.
-`graph.object_nodes()` returns owned copies of objects and payloads, so modifying
-inputs or returned values does not mutate the stored graph. The graph does not
+original error kind and message. Objects are added with `allocate_id()` plus
+`add_object(&ObjectNode)`; `ObjectNode` carries `bbox` (`BoundingBox3D` in
+`frame_id`), `source`, `last_seen`, `last_updated`, JPEG `crops` (`Crop { stamp,
+jpeg }`) and the `workers` processed flags. Object and concept ids are positive and
+share one counter. `graph.object_nodes()` returns owned copies, so modifying inputs
+or returned values does not mutate the stored graph. The graph does not
 implement the `Clone`, `Send`, or `Sync` traits in this first version.
-Use `try_clone()` for a deep snapshot: it preserves class names, detections, and
-images by calling C++ `clone()`. It returns `Result` because the underlying C++
+Use `try_clone()` for a deep snapshot: it preserves all object fields including
+crops by calling C++ `clone()`. It returns `Result` because the underlying C++
 operation can fail; it does **not** copy through the lossy SG wire format.
 
 ## ROS message conversion
 
 `SceneGraph::from_msg(&message)`, `graph.to_msg()`, and
 `graph.update_from_msg(&message)` use generated Rust SG messages and delegate to
-the corresponding C++ methods. Object graph messages contain IDs only: class
-names, detections, and image visuals do not survive a message round trip. The
+the corresponding C++ methods. Object messages carry id, class name, bbox,
+frame, source and timestamps; crops and worker state do not survive a message
+round trip. The
 C++ graph also does not retain message headers.
 
 Updates edit the live graph in place. On an error, successful earlier changes

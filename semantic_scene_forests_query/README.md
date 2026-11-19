@@ -12,8 +12,7 @@ ROS 2 component that answers language queries against the current scene graph an
 
 | Kind | Name | Type |
 |---|---|---|
-| Subscribe | `/scene_graph` | `semantic_scene_forests_msgs/msg/SceneGraph` |
-| Subscribe | `managed_objects` | `semantic_scene_forests_object_msgs/msg/ManagedObjectArray` |
+| Subscribe | `/scene_graph` | `semantic_scene_forests_msgs/msg/SceneGraph` (object nodes carry class name, bbox and frame) |
 | Action server | `find_object` | `semantic_scene_forests_planning_msgs/action/FindObject` |
 | Action server | `prompt_llm` | `semantic_scene_forests_planning_msgs/action/PromptLLM` |
 | Service client | `get_object_visuals` | `semantic_scene_forests_object_msgs/srv/GetObjectVisuals` |

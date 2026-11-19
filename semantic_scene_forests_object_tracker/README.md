@@ -1,28 +1,30 @@
 # semantic_scene_forests_object_tracker
 
-Tracking package that converts detections into persistent object candidates for the rest of the stack.
+Tracking package that converts detections into persistent objects in the shared scene graph of the `scene_graph_manager`.
 
 ## Task
 
 - Synchronize 2D detections, 3D detections, and camera images.
 - Maintain object tracks over time.
-- Publish complete `ObjectCandidateArray` snapshots with geometry and bounded image crops.
+- Write every global track as an object node (box, `last_seen`, bounded JPEG crops) to the scene graph each global cycle. The tracker keeps all track state; class votes after creation never touch the graph, and a node removed by `delete_object` is not recreated by camera sightings; an `add_observations` sighting of it (or a merge with a live track) brings it back under the same ID.
 
-## Exported Components
+## Exported Worker Plugin
 
-- `semantic_scene_forests_object_tracker::ObjectTrackerComponent`
+- `semantic_scene_forests_object_tracker::TrackerWorker`, loaded by
+  `semantic_scene_forests_manager::SceneGraphManagerNode`. Its parameters live under the worker's
+  configured name (`tracker.*` in `semantic_scene_forests_launch/config/scene_graph_manager.yaml`).
 
 ## Runtime Interface
 
-### ObjectTrackerComponent
+### TrackerWorker (topics and services on the manager node)
 
 | Kind | Name | Type |
 |---|---|---|
 | Subscribe | `detections_2d` | `vision_msgs/msg/Detection2DArray` |
 | Subscribe | `detections_3d` | `vision_msgs/msg/Detection3DArray` |
 | Subscribe | `camera/image` | `sensor_msgs/msg/Image` |
-| Publish | `object_candidate_snapshots` | `semantic_scene_forests_object_msgs/msg/ObjectCandidateArray` |
 | Service | `add_observations` | `semantic_scene_forests_object_msgs/srv/AddObservations` |
+| Service | `add_object` | `semantic_scene_forests_object_msgs/srv/AddObject` |
 
 The tracker has one input triple per configured camera: `detections_2d`, `detections_3d` and
 `camera/image`. The three messages of a frame must carry the **identical** stamp (exact-time
@@ -44,7 +46,7 @@ its pose and crops), or it starts a new global track, held for the arbiter's lab
 the arbiter is on. The response waits until every observation of the request is decided:
 until then its tracklets are reposted each cycle (an unchanged stamp is not applied twice),
 so their links follow merges and end when a label check removes the track. It is sent after
-the snapshot of the deciding cycle, with one global ID (0 = rejected), the published class
+the graph write of the deciding cycle, with one global ID (0 = rejected), the published class
 name and a `created` flag per observation. Global tracks are never timed out, so a manual
 track stays after its tracklet ends. `class_whitelist` and
 `confidence_threshold` do not apply; labels rejected for the session do. The service shares
@@ -56,15 +58,10 @@ the global callback group, so requests never race the cycle.
 `cameras.<name>` entry with `detections_2d_topic`, `detections_3d_topic`, `image_topic` and
 `image_rotation` (0/90/180/270 degrees clockwise). The rotation is applied to the image and the
 2D boxes before cropping, so crops come out upright; 3D boxes are TF geometry and unaffected.
-The shipped single-camera configuration uses the `default` camera and the logical topics
-`detections_2d`, `detections_3d`, and `camera/image`, so the existing launch remaps continue to
-work.
-
-The two-camera example is
-`config/object_tracker_multi_camera.yaml`. It uses explicit absolute topics
-for `front` and `rear`; the legacy single-camera remap arguments do not replace
-these explicit camera topics. Camera inputs are read at startup and are not
-hot-reloaded.
+The parameter defaults define one `default` camera with the logical topics `detections_2d`,
+`detections_3d`, and `camera/image`. The shipped stack configuration
+(`semantic_scene_forests_launch/config/scene_graph_manager.yaml`) lists explicit absolute topics
+per camera. Camera inputs are read at startup and are not hot-reloaded.
 
 ### Object identity and coordinate requirements
 
@@ -75,21 +72,22 @@ A moving object that changes world position beyond the geometric gate needs moti
 appearance evidence that this tracker does not provide.
 
 All cameras must use a common clock, compatible class labels, and valid TF from
-each detection frame to `world_frame`. Configure the manager with the same
-frame. Crops retain their source image headers and are bounded by the shared
-`max_crops_per_object` limit. Complete snapshots reconcile retired IDs in the manager;
-restart the tracker and manager together when resetting the tracker ID allocator.
+each detection frame to `world_frame`. The manager's `frame_id` must name the same frame (the
+combined launch sets both from `scene_graph_frame`). Crops retain their source image headers and
+are bounded by the shared `max_crops_per_object` limit. Crops are stored as JPEG (`crop_jpeg_quality`); the graph takes a newer crop only if it is at
+least `crop_replace_min_interval_seconds` newer than the node's newest one. Crops given at creation (`add_object`) are stored as-is up to the limit; later crops follow that interval rule. Global track IDs are
+scene graph node IDs; the graph lives in memory, so restarting the manager starts a new ID space.
 
-Snapshots use reliable, transient-local, depth-1 QoS, including an initial empty snapshot.
-They are published by the global cycle at `snapshot_rate_hz` (default 5 Hz, must be > 0) and
-contain every global track with its crops. The combined launch enables intra-process comms so
-the snapshot moves to the manager without serialization.
+`add_object` starts a manual track that is confirmed at once (no confirmation count, no label
+check) and returns its ID; the node appears through the normal write and the track is then
+updated, merged and retired like any other.
+
+The global cycle runs at `snapshot_rate_hz` (default 5 Hz, must be > 0) and writes every changed global
+track to the scene graph (one atomic graph call per change).
 
 TODO: if the container still drops input, the six raw camera image streams arriving over
 zenoh are the next suspect; co-locate the tracker with the detector nodes or use compressed
 images.
-One tracker owns this topic. Override it using `object_candidate_snapshots_topic` in the
-tracker, manager or combined launch; the old per-candidate topic/argument is retired.
 
 ## Architecture and identity semantics
 
@@ -98,13 +96,12 @@ tracker, manager or combined launch; the old per-candidate topic/argument is ret
  ExactTime(2D, 3D, image)                                     collect all mailboxes
  CameraTracker: rotate, filter, TF,                           GlobalTracker: link / merge /
  dedup, predict, associate, crops  ─► mailbox (tracklets) ─►  reactivate / replace / arbiter
-                                                              publish snapshot
+                                                              write to graph
                                      ArbiterWorker thread ◄─► request / result queues
 ```
 
 - **Per camera** (`CameraTracker`): a frame is accepted only if its stamp is newer than the
-  camera's last accepted frame (restart tracker and manager together before rewinding a
-  recording). Detections below `confidence_threshold`, outside `class_whitelist` or without a 3D
+  camera's last accepted frame (restart the manager before rewinding a recording). Detections below `confidence_threshold`, outside `class_whitelist` or without a 3D
   box are dropped; boxes are transformed to `world_frame`; same-frame duplicates (similar size,
   overlap >= `merge_overlap_threshold`) keep the highest score. Association is class-agnostic:
   confirmed tracks first (gate `gate_threshold_confirmed`), then tentative ones
@@ -126,7 +123,7 @@ tracker, manager or combined launch; the old per-candidate topic/argument is ret
   - a global track is **stale** after `stale_timeout` (60 s) unseen. A similar track at its pose
     reactivates it (via the rules above); a differently sized track covering at least
     `replacement_overlap_threshold` of it **replaces** it.
-- **Label check** (arbiter only): a new global track is held back from the snapshot until the
+- **Label check** (arbiter only): a new global track is held back from the graph until the
   arbiter answers two yes/no questions in one call: "do the crops show a <label>?" and "is
   <label> a physical object rather than a room or area category (kitchen, office, hallway)?".
   If both reach `arbiter.label_probability`, the label is confirmed (it sticks until a new label
@@ -140,8 +137,8 @@ tracker, manager or combined launch; the old per-candidate topic/argument is ret
   without a new request; otherwise the pair is recorded as distinct and never merged (a stale
   one is replaced). Each pair is asked once. `arbiter.provider` selects `openai`, `openrouter`,
   `ollama` or `vllm` (`vllm serve vllm-sr/d3-nano`, `http://localhost:8000/v1`); `server_url`
-  and `model` must match it. An empty `api_key` falls back to `OPENAI_API_KEY` /
-  `OPENROUTER_API_KEY` (Ollama and vLLM need none).
+  and `model` must match it. `api_key` is required for `openai` and `openrouter` (Ollama and vLLM
+  need none).
 
 ## Initial tuning (not calibrated)
 
@@ -166,19 +163,11 @@ parameter machinery. The world-frame box transform algorithm remains unchanged.
 `test_bbox_transform.cpp`, `test_tracked_object.cpp`, `test_image_rotation.cpp`,
 `test_camera_tracker.cpp` and `test_global_tracker.cpp` cover the
 plain classes with synthetic inputs (no ROS threads, no HTTP). `test_multi_camera_tracker.cpp`
-covers exact sync, camera handover, delayed observations, snapshot retirement and manager
-integration. Generation and query nodes are not launched. No dataset
+covers exact sync, camera handover and delayed observations through the worker on the real
+in-memory SceneGraph. Generation and query are not run. No dataset
 or hardware calibration is implied.
 
 ## Entry Points
 
-- Launch file: `launch/object_tracker.launch.xml`
-- Default config: `config/object_tracker.yaml`
-- Multi-camera example: `config/object_tracker_multi_camera.yaml`
-
-Run the standalone tracker with a custom configuration using:
-
-```bash
-ros2 launch semantic_scene_forests_object_tracker object_tracker.launch.xml \
-  config_file:=/path/to/object_tracker_multi_camera.yaml
-```
+The tracker runs only as a manager worker; start it with
+`ros2 launch semantic_scene_forests_launch scene_graph_combined.launch.xml`.

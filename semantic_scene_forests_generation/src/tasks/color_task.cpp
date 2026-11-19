@@ -44,7 +44,7 @@ TaskResult ColorTask::execute(oai::OpenAIClient& client,
                               std::vector<oai::Message>& history,
                               int64_t object_id,
                               const std::vector<cv::Mat>& /*crops*/,
-                              fzi::semantic_scene_forests::SceneGraph& graph)
+                              const std::shared_ptr<fzi::semantic_scene_forests::SceneGraph>& graph)
 {
   return runObjectAttributeTask(
     client, history, object_id, graph, *m_templates, m_logger, "color", "has_color", "color");

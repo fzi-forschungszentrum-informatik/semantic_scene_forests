@@ -30,6 +30,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 
@@ -62,28 +63,32 @@ QPixmap bgra8ToPixmap(const sensor_msgs::msg::Image& img, int w, int h, int step
   return QPixmap::fromImage(qi.copy());
 }
 
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters): fixed parameter order
 QPixmap mono16ToPixmap(const sensor_msgs::msg::Image& img, int w, int h, int step)
 {
   std::uint16_t min_val = std::numeric_limits<std::uint16_t>::max();
   std::uint16_t max_val = 0;
   for (int row = 0; row < h; ++row)
   {
-    const auto* row_ptr = reinterpret_cast<const std::uint16_t*>(img.data.data() + (row * step));
+    const auto* row_ptr = reinterpret_cast<const std::uint16_t*>(
+      img.data.data() + (static_cast<ptrdiff_t>(row * step)));
     for (int col = 0; col < w; ++col)
     {
       min_val = std::min(min_val, row_ptr[col]);
       max_val = std::max(max_val, row_ptr[col]);
     }
   }
-  const float range = (max_val > min_val) ? static_cast<float>(max_val - min_val) : 1.0F;
+  const float RANGE = (max_val > min_val) ? static_cast<float>(max_val - min_val) : 1.0F;
   QImage qi{w, h, QImage::Format_Grayscale8};
   for (int row = 0; row < h; ++row)
   {
-    const auto* row_ptr = reinterpret_cast<const std::uint16_t*>(img.data.data() + (row * step));
-    auto* dst           = qi.scanLine(row);
+    const auto* row_ptr = reinterpret_cast<const std::uint16_t*>(
+      img.data.data() + (static_cast<ptrdiff_t>(row * step)));
+    auto* dst = qi.scanLine(row);
     for (int col = 0; col < w; ++col)
     {
-      dst[col] = static_cast<std::uint8_t>((row_ptr[col] - min_val) / range * 255.0F);
+      dst[col] =
+        static_cast<std::uint8_t>(static_cast<float>(row_ptr[col] - min_val) / RANGE * 255.0F);
     }
   }
   return QPixmap::fromImage(qi);
@@ -98,41 +103,41 @@ QPixmap imageMsgToPixmap(const sensor_msgs::msg::Image& img)
     return makePlaceholder();
   }
 
-  const auto w    = static_cast<int>(img.width);
-  const auto h    = static_cast<int>(img.height);
-  const auto step = static_cast<int>(img.step);
+  const auto W    = static_cast<int>(img.width);
+  const auto H    = static_cast<int>(img.height);
+  const auto STEP = static_cast<int>(img.step);
 
   if (img.encoding == "rgb8")
   {
-    QImage qi{img.data.data(), w, h, step, QImage::Format_RGB888};
+    QImage qi{img.data.data(), W, H, STEP, QImage::Format_RGB888};
     return QPixmap::fromImage(qi.copy());
   }
 
   if (img.encoding == "bgr8")
   {
-    QImage qi{img.data.data(), w, h, step, QImage::Format_BGR888};
+    QImage qi{img.data.data(), W, H, STEP, QImage::Format_BGR888};
     return QPixmap::fromImage(qi.copy());
   }
 
   if (img.encoding == "rgba8")
   {
-    return rgba8ToPixmap(img, w, h, step);
+    return rgba8ToPixmap(img, W, H, STEP);
   }
 
   if (img.encoding == "bgra8")
   {
-    return bgra8ToPixmap(img, w, h, step);
+    return bgra8ToPixmap(img, W, H, STEP);
   }
 
   if (img.encoding == "mono8")
   {
-    QImage qi{img.data.data(), w, h, step, QImage::Format_Grayscale8};
+    QImage qi{img.data.data(), W, H, STEP, QImage::Format_Grayscale8};
     return QPixmap::fromImage(qi.copy());
   }
 
   if (img.encoding == "mono16")
   {
-    return mono16ToPixmap(img, w, h, step);
+    return mono16ToPixmap(img, W, H, STEP);
   }
 
   return makePlaceholder();

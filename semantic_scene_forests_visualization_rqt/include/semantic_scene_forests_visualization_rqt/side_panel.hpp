@@ -68,8 +68,8 @@ public:
 
 signals:
   void viewModeChanged(ViewMode mode);
-  void requestPhase1();
-  void requestPhase2();
+  void requestAttributeObjects();
+  void requestGenerateConcepts();
 
   // kind: 0 = PromptLLM, 1 = FindObject.
   void queryRequested(int kind, QString text);
@@ -93,8 +93,8 @@ private:
   QCheckBox* m_show_inspected;
   bool m_query_running{false};
 
-  QPushButton* m_phase1_button;
-  QPushButton* m_phase2_button;
+  QPushButton* m_attribute_objects_button;
+  QPushButton* m_generate_concepts_button;
   QProgressBar* m_progress_bar;
   QLabel* m_progress_status;
 

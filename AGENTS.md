@@ -34,14 +34,14 @@ When editing C/C++ files:
 When creating git commits:
 
 1. **ALWAYS sign commits with GPG** - Never commit without a signature. EVER.
-2. Include the following co-author trailer:
+2. End the commit message with a co-author trailer naming the Claude model that wrote the commit:
 
-Co-authored-by: LLM-FZI <llm@fzi.de>
+Co-Authored-By: Claude <Model> <noreply@anthropic.com>
 
 ### Format Requirements
-- Place the co-author line **after** the commit message body
+- Place the trailer **after** the commit message body
 - Separate it from the message body with a **blank line**
-- Use the exact format: `Co-authored-by: <Name> <email>`
+- Use one trailer line only
 
 ### Example Commit Message
 
@@ -49,7 +49,7 @@ feat: add new authentication module
 
 Implemented OAuth2 flow with refresh token support.
 
-Co-authored-by: LLM-FZI <llm@fzi.de>
+Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>
 
 ## Graphify Usage
 

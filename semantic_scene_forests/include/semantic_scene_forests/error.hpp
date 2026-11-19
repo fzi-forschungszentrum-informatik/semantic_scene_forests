@@ -31,6 +31,7 @@
 #include <cstdint>
 #include <fmt/format.h>
 #include <string>
+#include <string_view>
 
 enum class SceneGraphErrorKind : std::uint8_t
 {
@@ -41,6 +42,7 @@ enum class SceneGraphErrorKind : std::uint8_t
   EDGE_ALREADY_EXISTS,
   CYCLE,
   GRAPH_EDITING_FAILED,
+  INVALID_LABEL,
 };
 
 struct SceneGraphError
@@ -81,6 +83,11 @@ struct SceneGraphError
     return {.kind    = SceneGraphErrorKind::EDGE_ALREADY_EXISTS,
             .message = fmt::format("Edge from {} to {} already exists!", from, to)};
   }
+  static SceneGraphError conceptAlreadyExists(int64_t id, std::string_view label)
+  {
+    return {.kind    = SceneGraphErrorKind::NODE_ALREADY_EXISTS,
+            .message = fmt::format("Concept '{}' already exists with id {}", label, id)};
+  }
   static SceneGraphError cycle(int64_t from, int64_t to)
   {
     return {.kind    = SceneGraphErrorKind::CYCLE,
@@ -90,5 +97,10 @@ struct SceneGraphError
   {
     return {.kind    = SceneGraphErrorKind::GRAPH_EDITING_FAILED,
             .message = fmt::format("Graph editing failed: {}", reason)};
+  }
+  static SceneGraphError invalidLabel(std::string_view reason)
+  {
+    return {.kind    = SceneGraphErrorKind::INVALID_LABEL,
+            .message = fmt::format("Invalid concept label: {}", reason)};
   }
 };

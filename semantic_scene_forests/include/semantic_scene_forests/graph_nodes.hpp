@@ -29,26 +29,38 @@
 #pragma once
 
 #include <compare>
+#include <cstdint>
+#include <map>
+#include <memory>
 #include <ostream>
-#include <sstream>
 #include <string>
 #include <variant>
 #include <vector>
 
 #include <fmt/ostream.h>
 
-#include <sensor_msgs/msg/image.hpp>
-#include <vision_msgs/msg/detection3_d.hpp>
+#include <builtin_interfaces/msg/time.hpp>
+#include <sensor_msgs/msg/compressed_image.hpp>
+#include <vision_msgs/msg/bounding_box3_d.hpp>
 
 namespace fzi::semantic_scene_forests {
 
-using ImageMsg       = sensor_msgs::msg::Image;
-using Detection3DMsg = vision_msgs::msg::Detection3D;
+//! A JPEG crop of an object, stamped in header.stamp. Shared, so node copies are cheap.
+using CropPtr = std::shared_ptr<const sensor_msgs::msg::CompressedImage>;
 
+//! Per-worker state on a node. Not published; new worker-only fields go here.
+struct WorkerState
+{
+  bool processed{false};
+};
+
+// NOLINTBEGIN(readability-redundant-member-init): the `{}` initializers are required, removing them
+// breaks the build
 struct ConceptNode
 {
-  int64_t id;
-  std::string concept_name;
+  int64_t id{0};
+  std::string concept_name{};
+  std::map<std::string, WorkerState> workers{};
 
   std::strong_ordering operator<=>(const ConceptNode& other) const { return id <=> other.id; }
   bool operator==(const ConceptNode& other) const { return id == other.id; }
@@ -62,14 +74,24 @@ inline std::ostream& operator<<(std::ostream& os, const ConceptNode& n)
 
 struct ObjectNode
 {
-  int64_t id;
-  std::string class_name;
-  vision_msgs::msg::Detection3D::SharedPtr detection;
-  std::array<sensor_msgs::msg::Image::SharedPtr, 5> visuals;
+  //! Values of `source`: the origin of the track (informational only).
+  static constexpr uint8_t SOURCE_CAMERA = 0;
+  static constexpr uint8_t SOURCE_MANUAL = 1;
+
+  int64_t id{0};
+  std::string class_name{};
+  vision_msgs::msg::BoundingBox3D bbox{};
+  std::string frame_id{}; //!< Frame of bbox.
+  uint8_t source{SOURCE_CAMERA};
+  builtin_interfaces::msg::Time last_seen{};
+  builtin_interfaces::msg::Time last_updated{}; //!< Observation time of the last bbox change.
+  std::vector<CropPtr> crops{};
+  std::map<std::string, WorkerState> workers{};
 
   std::strong_ordering operator<=>(const ObjectNode& other) const { return id <=> other.id; }
   bool operator==(const ObjectNode& other) const { return id == other.id; }
 };
+// NOLINTEND(readability-redundant-member-init)
 
 inline std::ostream& operator<<(std::ostream& os, const ObjectNode& n)
 {

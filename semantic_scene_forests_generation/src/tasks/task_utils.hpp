@@ -33,6 +33,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <memory>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -53,7 +56,7 @@ namespace semantic_scene_forests_generation {
 
 using json = nlohmann::json;
 
-inline constexpr std::size_t MAX_LLM_RESPONSE_BYTES = 64U * 1024U;
+inline constexpr std::size_t MAX_LLM_RESPONSE_BYTES = static_cast<std::size_t>(64U) * 1024U;
 inline constexpr std::size_t MAX_TASK_LABELS        = 16U;
 inline constexpr std::size_t MAX_TASK_SOURCE_IDS    = 128U;
 
@@ -61,25 +64,25 @@ inline constexpr std::size_t MAX_TASK_SOURCE_IDS    = 128U;
 // markdown code fences (```json ... ```) or bare JSON.
 inline std::string extractJson(const std::string& content)
 {
-  const auto fence_start = content.find("```");
-  if (fence_start != std::string::npos)
+  const auto FENCE_START = content.find("```");
+  if (FENCE_START != std::string::npos)
   {
-    const auto code_start = content.find('\n', fence_start);
-    if (code_start != std::string::npos)
+    const auto CODE_START = content.find('\n', FENCE_START);
+    if (CODE_START != std::string::npos)
     {
-      const auto fence_end = content.find("```", code_start);
-      if (fence_end != std::string::npos)
+      const auto FENCE_END = content.find("```", CODE_START);
+      if (FENCE_END != std::string::npos)
       {
-        return content.substr(code_start + 1, fence_end - code_start - 1);
+        return content.substr(CODE_START + 1, FENCE_END - CODE_START - 1);
       }
     }
   }
 
-  const auto start = content.find('{');
-  const auto end   = content.rfind('}');
-  if (start != std::string::npos && end != std::string::npos && end > start)
+  const auto START = content.find('{');
+  const auto END   = content.rfind('}');
+  if (START != std::string::npos && END != std::string::npos && END > START)
   {
-    return content.substr(start, end - start + 1);
+    return content.substr(START, END - START + 1);
   }
   return content;
 }
@@ -106,119 +109,85 @@ inline std::expected<json, std::string> parseJsonObject(const std::string& conte
   }
 }
 
-inline std::expected<std::string, std::string> validateConceptLabel(const json& value)
+//! Writes `source --relation--> label --is_type_of--> root` for every string in `labels`. Each
+//! step is its own atomic addConceptEdge: a rejected label (invalid, cycle, unknown source) is
+//! logged and skipped, and the is_type_of step runs only if its predecessor succeeded. An edge
+//! that already exists counts as success. Errors only if `labels` is not a bounded array, before
+//! anything is written.
+inline TaskResult
+applyLabels(fzi::semantic_scene_forests::SceneGraph& graph,
+            const rclcpp::Logger& logger,
+            int64_t source_id,
+            // NOLINTNEXTLINE(bugprone-easily-swappable-parameters): fixed parameter order
+            const std::string& relation,
+            const std::string& root,
+            const json& labels)
 {
-  if (!value.is_string())
+  if (!labels.is_array() || labels.size() > MAX_TASK_LABELS)
   {
-    return std::unexpected("concept labels must be strings");
+    return std::unexpected("label values must be an array with a bounded size");
   }
 
-  const std::string raw = value.get<std::string>();
-  const auto is_space   = [](unsigned char character) {
-    return character == ' ' || character == '\t';
-  };
-  const auto first = std::find_if_not(raw.begin(), raw.end(), is_space);
-  const auto last  = std::find_if_not(raw.rbegin(), raw.rend(), is_space).base();
-  if (first == raw.end())
-  {
-    return std::unexpected("concept labels must not be empty");
-  }
-
-  std::string label{first, last};
-  if (label.size() > 128U)
-  {
-    return std::unexpected("concept labels must not exceed 128 bytes");
-  }
-  if (std::any_of(label.begin(), label.end(), [](unsigned char character) {
-        return character < 0x20U || character == 0x7FU;
-      }))
-  {
-    return std::unexpected("concept labels must not contain control characters");
-  }
-  return label;
-}
-
-struct SceneContextAddition
-{
-  int64_t context_node_id;
-  bool created;
-};
-
-inline std::expected<SceneContextAddition, std::string> appendSceneContext(
-  fzi::semantic_scene_forests::SceneGraph& graph, int64_t node_id, const std::string& context)
-{
-  auto label = validateConceptLabel(context);
-  if (!label)
-  {
-    return std::unexpected(label.error());
-  }
-  auto outgoing = graph.outgoingEdges(node_id);
-  if (!outgoing)
-  {
-    return std::unexpected(outgoing.error().message);
-  }
-  for (const auto& [target_id, edge] : *outgoing)
-  {
-    if (edge.label != "has_context")
+  // Concept id of the target if the edge now exists, nullopt if it was rejected.
+  const auto LINK = [&](int64_t source,
+                        const std::string& edge_relation,
+                        const std::string& label) -> std::optional<int64_t> {
+    // Links `source` to an existing concept; an edge that is already there counts as success.
+    const auto ATTACH = [&](int64_t concept_id) -> std::expected<int64_t, SceneGraphError> {
+      const auto EDGE = graph.addEdge(source, concept_id, edge_relation);
+      if (EDGE || EDGE.error().kind == SceneGraphErrorKind::EDGE_ALREADY_EXISTS)
+      {
+        return concept_id;
+      }
+      return std::unexpected(EDGE.error());
+    };
+    std::expected<int64_t, SceneGraphError> result =
+      std::unexpected(SceneGraphError::graphEditingFailed("unreachable"));
+    if (const auto EXISTING = graph.findConcept(label))
     {
+      result = ATTACH(*EXISTING);
+    }
+    else if (const auto ADDED = graph.addConceptEdge(source, edge_relation, label); ADDED)
+    {
+      result = ADDED->id;
+    }
+    else if (const auto RACED = graph.findConcept(label);
+             RACED && ADDED.error().kind == SceneGraphErrorKind::NODE_ALREADY_EXISTS)
+    {
+      result = ATTACH(*RACED); // another writer created the concept meanwhile
+    }
+    else
+    {
+      result = std::unexpected(ADDED.error());
+    }
+    if (result)
+    {
+      return *result;
+    }
+    RCLCPP_WARN(logger,
+                "Skipping '%s' --%s--> '%s': %s",
+                std::to_string(source).c_str(),
+                edge_relation.c_str(),
+                label.c_str(),
+                result.error().message.c_str());
+    return std::nullopt;
+  };
+
+  for (const auto& value : labels)
+  {
+    if (!value.is_string() || value.get<std::string>() == root)
+    {
+      RCLCPP_WARN(
+        logger, "Skipping a label that is not a string or equals its root '%s'", root.c_str());
       continue;
     }
-    const auto TARGET = graph.findNode(target_id);
-    if (TARGET)
+    const auto LABEL_ID = LINK(source_id, relation, value.get<std::string>());
+    if (LABEL_ID)
     {
-      const auto* context_node = std::get_if<fzi::semantic_scene_forests::ConceptNode>(&*TARGET);
-      if (context_node && context_node->concept_name == *label)
-      {
-        return SceneContextAddition{.context_node_id = target_id, .created = false};
-      }
+      LINK(*LABEL_ID, "is_type_of", root);
     }
-  }
-  auto added = graph.addConceptNode(*label);
-  if (!added)
-  {
-    return std::unexpected(added.error().message);
-  }
-  if (auto edge = graph.addEdge(node_id, *added, "has_context"); !edge)
-  {
-    // Roll back only this request's new node, never pre-existing graph data.
-    if (auto rollback = graph.removeNode(*added); !rollback)
-    {
-      return std::unexpected(edge.error().message +
-                             "; rollback failed: " + rollback.error().message);
-    }
-    return std::unexpected(edge.error().message);
-  }
-  return SceneContextAddition{.context_node_id = *added, .created = true};
-}
-
-inline TaskResult addUniqueEdge(fzi::semantic_scene_forests::SceneGraph& graph,
-                                int64_t source_id,
-                                int64_t target_id,
-                                const std::string& label)
-{
-  const auto result = graph.addEdge(source_id, target_id, label);
-  if (!result && result.error().kind != SceneGraphErrorKind::EDGE_ALREADY_EXISTS)
-  {
-    return std::unexpected(result.error().message);
   }
   return {};
-}
-
-inline std::expected<int64_t, std::string>
-findOrCreateConcept(fzi::semantic_scene_forests::SceneGraph& graph, const std::string& label)
-{
-  const auto existing = graph.findConceptNodesByName(label);
-  if (!existing.empty())
-  {
-    return existing.front().id;
-  }
-
-  auto result = graph.addConceptNode(label);
-  if (!result)
-  {
-    return std::unexpected(result.error().message);
-  }
-  return *result;
 }
 
 inline std::expected<int64_t, std::string>
@@ -238,17 +207,16 @@ parseAllowedConceptId(std::string_view value, const std::unordered_set<int64_t>&
 }
 
 // Send a user prompt, append the response to history, and return the response
-// content. The caller receives the request error so a failed task cannot be
-// reported as a successful scene-graph update.
-inline std::expected<std::string, std::string> chatTurn(oai::OpenAIClient& client,
-                                                        std::vector<oai::Message>& history,
-                                                        const std::string& user_text,
-                                                        const rclcpp::Logger& logger)
+// content. Technical failures throw; only parsing the returned content is recoverable.
+inline std::string chatTurn(oai::OpenAIClient& client,
+                            std::vector<oai::Message>& history,
+                            const std::string& user_text,
+                            const rclcpp::Logger& logger)
 {
   auto user_message = oai::MessageBuilder::user().text(user_text).build();
   if (!user_message)
   {
-    return std::unexpected("failed to build LLM request: " + user_message.error());
+    throw std::runtime_error("failed to build LLM request: " + user_message.error());
   }
   history.push_back(std::move(*user_message));
 
@@ -261,145 +229,82 @@ inline std::expected<std::string, std::string> chatTurn(oai::OpenAIClient& clien
                   "LLM request failed (%d): %s",
                   response.error().http_status,
                   response.error().message.c_str());
-      history.pop_back();
-      return std::unexpected("LLM request failed: " + response.error().message);
+      throw std::runtime_error("LLM request failed: " + response.error().message);
     }
 
     std::string content    = response->text();
     auto assistant_message = oai::MessageBuilder::assistant().text(content).build();
     if (!assistant_message)
     {
-      history.pop_back();
-      return std::unexpected("failed to build LLM response message: " + assistant_message.error());
+      throw std::runtime_error("failed to build LLM response message: " +
+                               assistant_message.error());
     }
     history.push_back(std::move(*assistant_message));
     return content;
   }
-  catch (const std::exception& e)
+  catch (...)
   {
     history.pop_back();
-    return std::unexpected("LLM request threw an exception: " + std::string(e.what()));
+    throw;
   }
 }
 
-inline TaskResult runObjectAttributeTask(oai::OpenAIClient& client,
-                                         std::vector<oai::Message>& history,
-                                         int64_t object_id,
-                                         fzi::semantic_scene_forests::SceneGraph& graph,
-                                         const TemplateMap& templates,
-                                         const rclcpp::Logger& logger,
-                                         std::string_view attribute,
-                                         std::string_view relation,
-                                         std::string_view category)
+inline TaskResult runObjectAttributeTask(
+  oai::OpenAIClient& client,
+  std::vector<oai::Message>& history,
+  int64_t object_id,
+  const std::shared_ptr<fzi::semantic_scene_forests::SceneGraph>& graph,
+  const TemplateMap& templates,
+  const rclcpp::Logger& logger,
+  // NOLINTNEXTLINE(bugprone-easily-swappable-parameters): fixed parameter order
+  std::string_view attribute,
+  std::string_view relation,
+  std::string_view category)
 {
-  try
+  const auto PROMPT_TEMPLATE     = templates.find("instance/single_attribute");
+  const auto FORMATTING_TEMPLATE = templates.find("instance/formatting");
+  if (PROMPT_TEMPLATE == templates.end() || FORMATTING_TEMPLATE == templates.end())
   {
-    const auto prompt_template     = templates.find("instance/single_attribute");
-    const auto formatting_template = templates.find("instance/formatting");
-    if (prompt_template == templates.end() || formatting_template == templates.end())
-    {
-      return std::unexpected("required object attribute template is missing");
-    }
-
-    auto prompt_context = minja::Value::object();
-    prompt_context.set("attribute", minja::Value(std::string{attribute}));
-    const auto context       = minja::Context::make(std::move(prompt_context));
-    const std::string prompt = prompt_template->second->render(context);
-
-    const auto apply_response = [&](const std::string& raw) -> TaskResult {
-      auto parsed = parseJsonObject(raw);
-      if (!parsed)
-      {
-        return std::unexpected(parsed.error());
-      }
-
-      const auto values = parsed->find(std::string{attribute});
-      if (values == parsed->end() || !values->is_array())
-      {
-        return std::unexpected("LLM response is missing the expected '" + std::string(attribute) +
-                               "' array");
-      }
-      if (values->size() > MAX_TASK_LABELS)
-      {
-        return std::unexpected("LLM response contains too many attribute labels");
-      }
-
-      for (const auto& value : *values)
-      {
-        auto label = validateConceptLabel(value);
-        if (!label)
-        {
-          return std::unexpected(label.error());
-        }
-        if (*label == category)
-        {
-          return std::unexpected("attribute values must not equal their category");
-        }
-
-        auto concept_id = findOrCreateConcept(graph, *label);
-        if (!concept_id)
-        {
-          return std::unexpected(concept_id.error());
-        }
-        if (auto edge_result = addUniqueEdge(graph, object_id, *concept_id, std::string{relation});
-            !edge_result)
-        {
-          return edge_result;
-        }
-
-        auto category_id = findOrCreateConcept(graph, std::string{category});
-        if (!category_id)
-        {
-          return std::unexpected(category_id.error());
-        }
-        if (auto edge_result = addUniqueEdge(graph, *concept_id, *category_id, "is_type_of");
-            !edge_result)
-        {
-          return edge_result;
-        }
-      }
-      return {};
-    };
-
-    auto response = chatTurn(client, history, prompt, logger);
-    if (!response)
-    {
-      return std::unexpected(response.error());
-    }
-    auto graph_before_response = graph.clone();
-    if (!graph_before_response)
-    {
-      return std::unexpected(graph_before_response.error().message);
-    }
-    if (auto apply_result = apply_response(*response); apply_result)
-    {
-      return {};
-    }
-    else
-    {
-      // Discard any valid prefix from the malformed response before retrying.
-      graph.swap(**graph_before_response);
-      auto formatting_context = minja::Value::object();
-      formatting_context.set("response", minja::Value(*response));
-      formatting_context.set("attribute", minja::Value(std::string{attribute}));
-      const auto formatting_minja_context = minja::Context::make(std::move(formatting_context));
-      const std::string formatting_prompt =
-        formatting_template->second->render(formatting_minja_context);
-      auto retry = chatTurn(client, history, formatting_prompt, logger);
-      if (!retry)
-      {
-        return std::unexpected(retry.error());
-      }
-      if (auto retry_result = apply_response(*retry); !retry_result)
-      {
-        return std::unexpected("invalid LLM response after formatting retry: " +
-                               retry_result.error());
-      }
-    }
+    throw std::runtime_error("required object attribute template is missing");
   }
-  catch (const std::exception& e)
+
+  auto prompt_context = minja::Value::object();
+  prompt_context.set("attribute", minja::Value(std::string{attribute}));
+  const auto CONTEXT       = minja::Context::make(std::move(prompt_context));
+  const std::string PROMPT = PROMPT_TEMPLATE->second->render(CONTEXT);
+
+  const auto APPLY_RESPONSE = [&](const std::string& raw) -> TaskResult {
+    auto parsed = parseJsonObject(raw);
+    if (!parsed)
+    {
+      return std::unexpected(parsed.error());
+    }
+    const auto VALUES = parsed->find(std::string{attribute});
+    if (VALUES == parsed->end() || !VALUES->is_array())
+    {
+      return std::unexpected("LLM response is missing the expected '" + std::string(attribute) +
+                             "' array");
+    }
+    return applyLabels(
+      *graph, logger, object_id, std::string{relation}, std::string{category}, *VALUES);
+  };
+
+  auto response = chatTurn(client, history, PROMPT, logger);
+  if (APPLY_RESPONSE(response))
   {
-    return std::unexpected("object attribute task failed: " + std::string(e.what()));
+    return {};
+  }
+  // Nothing was written for a malformed response, so ask once for the right format.
+  auto formatting_context = minja::Value::object();
+  formatting_context.set("response", minja::Value(response));
+  formatting_context.set("attribute", minja::Value(std::string{attribute}));
+  const auto FORMATTING_MINJA_CONTEXT = minja::Context::make(std::move(formatting_context));
+  const std::string FORMATTING_PROMPT =
+    FORMATTING_TEMPLATE->second->render(FORMATTING_MINJA_CONTEXT);
+  auto retry = chatTurn(client, history, FORMATTING_PROMPT, logger);
+  if (auto retry_result = APPLY_RESPONSE(retry); !retry_result)
+  {
+    return std::unexpected("invalid LLM response after formatting retry: " + retry_result.error());
   }
   return {};
 }

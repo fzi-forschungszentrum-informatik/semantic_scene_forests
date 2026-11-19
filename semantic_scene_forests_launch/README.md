@@ -4,61 +4,43 @@ Launch package for running the integrated semantic scene forests stack.
 
 ## Task
 
-- Start the tracker, object manager, graph generation, and query components in one container.
+- Start the `scene_graph_manager` (tracker, object attribution, concept generation and pruning
+  workers) and the query node in one container.
 - Provide shared parameter files and diagnostic aggregation setup.
 
 ## Main Entry Points
 
 - Launch file: `launch/scene_graph_combined.launch.xml`
-- Helper script: `scripts/launch_semantic_scene_forests.sh`
+- Helper script: `scripts/launch_semantic_scene_forests.sh` (catmux: zenoh router plus the
+  combined launch)
 
 ## Launch Surface
 
 Key launch arguments exposed by `scene_graph_combined.launch.xml`:
 
-- `scene_graph_frame`
+- `scene_graph_frame` (sets the manager's `frame_id` and `tracker.world_frame`)
 - `config_dir`
-- `camera_image_topic`
-- `detections_2d_topic`
-- `detections_3d_topic`
 - `enable_diagnostics`
 - `use_sim_time`
 
 ## Managed Components
 
-- `semantic_scene_forests_object_tracker::ObjectTrackerComponent`
-- `semantic_scene_forests_object_manager::ObjectManagerNode`
-- `semantic_scene_forests_generation::SceneGraphGenerationNode`
-- `semantic_scene_forests_query::SceneGraphQueryNode`
+- `semantic_scene_forests_manager::SceneGraphManagerNode` (`config/scene_graph_manager.yaml`)
+- `semantic_scene_forests_query::SceneGraphQueryNode` (`config/semantic_scene_forests_query.yaml`)
 - `diagnostic_aggregator/aggregator_node` (optional)
 
-## Multi-camera tracker configuration
+## Configuration
 
-The default `config/object_tracker.yaml` defines one `default` camera with the
-logical topics `detections_2d`, `detections_3d`, and `camera/image`. The
-standalone tracker launch and the manager launch keep their existing remap
-arguments for these names. Use those remaps for a single camera; a multi-camera
-configuration selects each input directly in its `cameras.<name>` entries.
+`config/scene_graph_manager.yaml` lists the workers to load (`workers`, `worker_types.<name>`)
+and their parameters under each worker's name (`tracker.*`, `object_attribution.*`,
+`concept_generation.*`, `pruning.*`). Camera and detection topics are set per camera under
+`tracker.camera_names` / `tracker.cameras.<name>`; there are no topic remap arguments.
 
-The tracker package includes a complete two-camera example at
-`config/object_tracker_multi_camera.yaml`. To use it with the combined stack,
-copy it into a configuration directory as `object_tracker.yaml`, keep the
-other stack configuration files in that directory, and launch with:
+Configuration comes from ROS parameters only, never from environment variables. Keep API keys
+out of the committed file: put them in a local copy of the config directory and pass it with
+`config_dir`. The tracker arbiter refuses to start without `tracker.arbiter.api_key` when enabled
+with `openai` or `openrouter`.
 
-```bash
-ros2 launch semantic_scene_forests_launch scene_graph_combined.launch.xml \
-  config_dir:=/path/to/config_dir
-```
-
-The manager launch can run the tracker with the same file directly:
-
-```bash
-ros2 launch semantic_scene_forests_object_manager object_manager.launch.xml \
-  enable_tracker:=true \
-  tracker_config_file:=/path/to/object_tracker_multi_camera.yaml
-```
-
-The combined launch's `scene_graph_frame` is applied to both the tracker and
-manager, so it must be the calibrated common frame for every camera. All camera
-streams must share a compatible clock and class labels. Inputs are startup-only;
-restart the tracker and manager together when resetting tracker IDs.
+`scene_graph_frame` must be the calibrated common frame for every camera. All camera streams
+must share a compatible clock and class labels. Inputs are startup-only; restart the manager
+to reset object IDs.

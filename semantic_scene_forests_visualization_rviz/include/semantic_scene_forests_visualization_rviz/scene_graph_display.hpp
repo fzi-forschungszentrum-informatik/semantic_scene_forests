@@ -26,8 +26,8 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 
-#ifndef SEMANTIC_SCENE_FORESTS_VISUALIZATION_RVIZ__SCENE_GRAPH_DISPLAY_HPP_
-#define SEMANTIC_SCENE_FORESTS_VISUALIZATION_RVIZ__SCENE_GRAPH_DISPLAY_HPP_
+#ifndef SEMANTIC_SCENE_FORESTS_VISUALIZATION_RVIZ_SCENE_GRAPH_DISPLAY_HPP_
+#define SEMANTIC_SCENE_FORESTS_VISUALIZATION_RVIZ_SCENE_GRAPH_DISPLAY_HPP_
 
 #include <map>
 #include <memory>
@@ -56,15 +56,14 @@
 #include "rviz_common/properties/bool_property.hpp"
 #include "rviz_common/properties/color_property.hpp"
 #include "rviz_common/properties/float_property.hpp"
-#include "rviz_common/properties/qos_profile_property.hpp"
 #include "rviz_common/properties/ros_topic_property.hpp"
 #include "rviz_rendering/objects/movable_text.hpp"
 #include "rviz_rendering/objects/shape.hpp"
-#include "semantic_scene_forests_msgs/action/update_scene_graph.hpp"
+#include "semantic_scene_forests_msgs/action/run_worker.hpp"
 #include "semantic_scene_forests_msgs/msg/scene_graph.hpp"
-#include "semantic_scene_forests_object_msgs/msg/managed_object_array.hpp"
-#include "semantic_scene_forests_object_msgs/srv/block_object.hpp"
+#include "semantic_scene_forests_object_msgs/srv/delete_object.hpp"
 #include "semantic_scene_forests_object_msgs/srv/get_object_visuals.hpp"
+#include <semantic_scene_forests/scene_graph.hpp>
 
 namespace Ogre {
 class SceneNode;
@@ -77,14 +76,15 @@ class SceneGraphDisplay : public rviz_common::Display
   Q_OBJECT
 
 public:
-  using UpdateSceneGraph = semantic_scene_forests_msgs::action::UpdateSceneGraph;
-  using GoalHandle       = rclcpp_action::ClientGoalHandle<UpdateSceneGraph>;
+  using RunWorker  = semantic_scene_forests_msgs::action::RunWorker;
+  using GoalHandle = rclcpp_action::ClientGoalHandle<RunWorker>;
 
   SceneGraphDisplay();
   ~SceneGraphDisplay() override;
 
   void onInitialize() override;
   void reset() override;
+  void fixedFrameChanged() override;
 
 private:
   // Nested type used by showImageDialog — must be declared before method signatures
@@ -96,27 +96,25 @@ private:
   };
 
   void clearVisuals();
-  void updateObjectNodes(
-    const std::vector<semantic_scene_forests_object_msgs::msg::ManagedObject>& objects);
+  void updateObjectNodes(const std::vector<fzi::semantic_scene_forests::ObjectNode>& objects);
   bool eventFilter(QObject* obj, QEvent* event) override;
   bool handleContextMenu(const QPoint& pos);
   void showImageDialog(int64_t object_id, const ObjectVisual& visual);
-  void blockObject(int64_t object_id);
+  void deleteObject(int64_t object_id);
 
-  void sendGoal(uint8_t phase);
+  void sendGoal(const rclcpp_action::Client<RunWorker>::SharedPtr& client, const QString& name);
   void handleGoalResponse(const GoalHandle::SharedPtr& goal_handle);
   void handleFeedback(const GoalHandle::SharedPtr& goal_handle,
-                      const std::shared_ptr<const UpdateSceneGraph::Feedback>& feedback);
+                      const std::shared_ptr<const RunWorker::Feedback>& feedback);
   void handleResult(const GoalHandle::WrappedResult& result);
   void resetActionState();
   QWidget* createControlWidget();
 
-  void
-  onManagedObjects(semantic_scene_forests_object_msgs::msg::ManagedObjectArray::ConstSharedPtr msg);
-  void onSceneGraph(semantic_scene_forests_msgs::msg::SceneGraph::ConstSharedPtr msg);
+  void onSceneGraph(const semantic_scene_forests_msgs::msg::SceneGraph::ConstSharedPtr& msg);
   void requestObjectVisuals(int64_t object_id);
   void onObjectVisualsResponse(
-    rclcpp::Client<semantic_scene_forests_object_msgs::srv::GetObjectVisuals>::SharedFuture result);
+    const rclcpp::Client<semantic_scene_forests_object_msgs::srv::GetObjectVisuals>::SharedFuture&
+      result);
 
   // Scene nodes (raw pointers — owned by Ogre scene manager)
   Ogre::SceneNode* m_scene_graph_node{nullptr};
@@ -125,6 +123,11 @@ private:
 
   // Visual storage (unique_ptr for RAII on Shape)
   std::map<int64_t, std::unique_ptr<rviz_rendering::Shape>> m_object_shapes;
+  //! Last received objects, re-rendered while some were skipped for missing TF.
+  std::vector<fzi::semantic_scene_forests::ObjectNode> m_last_objects;
+  bool m_render_incomplete{false};
+  //! Retries skipped objects; a QTimer because Display::update() differs between rviz distros.
+  QTimer* m_retry_timer{nullptr};
 
   // Labels: raw pointers — MovableText (Ogre::SimpleRenderable) requires manual cleanup
   struct LabelVisual
@@ -147,27 +150,22 @@ private:
   rviz_common::properties::FloatProperty* m_object_scale_property{nullptr};
   rviz_common::properties::BoolProperty* m_show_labels_property{nullptr};
   rviz_common::properties::FloatProperty* m_stale_after_property{nullptr};
-  rviz_common::properties::RosTopicProperty* m_managed_objects_topic_property{nullptr};
-  rviz_common::properties::QosProfileProperty* m_qos_profile_property{nullptr};
-  rclcpp::QoS m_qos_profile{5};
-
   rviz_common::properties::RosTopicProperty* m_scene_graph_topic_property{nullptr};
-  rviz_common::properties::QosProfileProperty* m_scene_graph_qos_profile_property{nullptr};
-  rclcpp::QoS m_scene_graph_qos_profile{5};
+  // Fixed, not a property: scene_graph is latched and published only on change, so a volatile
+  // subscription (e.g. restored from an old .rviz) would miss an unchanged graph entirely.
+  // NOLINTNEXTLINE(readability-identifier-naming): deliberately const; naming rule clashes
+  const rclcpp::QoS m_scene_graph_qos_profile{rclcpp::QoS(1).reliable().transient_local()};
 
-  // Action client
-  rclcpp_action::Client<UpdateSceneGraph>::SharedPtr m_action_client;
+  // Worker action clients
+  rclcpp_action::Client<RunWorker>::SharedPtr m_attribute_objects_client;
+  rclcpp_action::Client<RunWorker>::SharedPtr m_generate_concepts_client;
 
-  // Service client for blocking objects
-  rclcpp::Client<semantic_scene_forests_object_msgs::srv::BlockObject>::SharedPtr
-    m_block_object_client;
+  // Service client for deleting objects
+  rclcpp::Client<semantic_scene_forests_object_msgs::srv::DeleteObject>::SharedPtr
+    m_delete_object_client;
 
   // ROS node abstraction for topic property initialization
   rviz_common::ros_integration::RosNodeAbstractionIface::WeakPtr m_rviz_ros_node;
-
-  // Managed objects subscription
-  rclcpp::Subscription<semantic_scene_forests_object_msgs::msg::ManagedObjectArray>::SharedPtr
-    m_managed_objects_sub;
 
   // Scene graph subscription
   rclcpp::Subscription<semantic_scene_forests_msgs::msg::SceneGraph>::SharedPtr m_scene_graph_sub;
@@ -178,8 +176,8 @@ private:
 
   // Associated widget (QPointer for safe access after destruction)
   QPointer<QWidget> m_control_widget;
-  QPointer<QPushButton> m_phase1_button;
-  QPointer<QPushButton> m_phase2_button;
+  QPointer<QPushButton> m_attribute_objects_button;
+  QPointer<QPushButton> m_generate_concepts_button;
   QPointer<QLabel> m_node_count_label;
   QPointer<QLabel> m_scene_graph_info_label;
   QPointer<QProgressBar> m_progress_bar;
@@ -187,16 +185,17 @@ private:
   bool m_action_in_progress{false};
 
 
-  void sendPhase1Goal();
-  void sendPhase2Goal();
+  void sendAttributeObjectsGoal();
+  void sendGenerateConceptsGoal();
 
+  // NOLINTNEXTLINE(readability-redundant-access-specifiers): Q_SLOTS section for moc
 private Q_SLOTS:
+  void retryIncompleteRender();
   void updateObjectColor();
   void updateLabels();
-  void updateManagedObjectsTopic();
   void updateSceneGraphTopic();
 };
 
 } // namespace semantic_scene_forests_visualization_rviz
 
-#endif // SEMANTIC_SCENE_FORESTS_VISUALIZATION_RVIZ__SCENE_GRAPH_DISPLAY_HPP_
+#endif // SEMANTIC_SCENE_FORESTS_VISUALIZATION_RVIZ_SCENE_GRAPH_DISPLAY_HPP_

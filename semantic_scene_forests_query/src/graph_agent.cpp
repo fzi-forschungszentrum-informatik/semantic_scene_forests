@@ -63,6 +63,7 @@ std::expected<int64_t, std::string> parseId(std::string_view args)
 }
 
 // Extract an optional string field; returns "" when absent.
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters): fixed parameter order
 std::string parseOptionalString(std::string_view args, std::string_view key)
 {
   const json PARSED = json::parse(args, nullptr, /*allow_exceptions=*/false);
@@ -81,13 +82,11 @@ std::string parseOptionalString(std::string_view args, std::string_view key)
 } // namespace
 
 GraphAgentSession::GraphAgentSession(std::unique_ptr<fzi::semantic_scene_forests::SceneGraph> graph,
-                                     ObjectLookup object_lookup,
                                      VisualInspector inspect,
                                      ExpandCallback on_expand,
                                      StopCheck should_stop,
                                      LogCallback on_log)
   : m_graph(std::move(graph))
-  , m_object_lookup(std::move(object_lookup))
   , m_inspect(std::move(inspect))
   , m_on_expand(std::move(on_expand))
   , m_should_stop(std::move(should_stop))
@@ -150,7 +149,7 @@ std::optional<std::string> GraphAgentSession::nodeName(int64_t id) const
     return std::nullopt;
   }
   return std::visit(
-    [this](const auto& n) -> std::string {
+    [](const auto& n) -> std::string {
       using T = std::decay_t<decltype(n)>;
       if constexpr (std::is_same_v<T, fzi::semantic_scene_forests::ConceptNode>)
       {
@@ -158,15 +157,7 @@ std::optional<std::string> GraphAgentSession::nodeName(int64_t id) const
       }
       else
       {
-        // Object class names live in the object manager, not the scene graph.
-        if (m_object_lookup)
-        {
-          if (const auto INFO = m_object_lookup(n.id))
-          {
-            return INFO->class_name;
-          }
-        }
-        return {};
+        return n.class_name;
       }
     },
     *NODE);
@@ -181,16 +172,8 @@ std::expected<std::string, std::string> GraphAgentSession::toolListObjects()
   json out  = json::array();
   for (const auto& obj : m_graph->getObjectNodes())
   {
-    std::string class_name;
-    if (m_object_lookup)
-    {
-      if (const auto INFO = m_object_lookup(obj.id))
-      {
-        class_name = INFO->class_name;
-      }
-    }
     grew |= recordExpanded(obj.id);
-    out.push_back({{"id", obj.id}, {"class_name", class_name}});
+    out.push_back({{"id", obj.id}, {"class_name", obj.class_name}});
   }
   if (grew && m_on_expand)
   {
@@ -311,24 +294,18 @@ std::expected<std::string, std::string> GraphAgentSession::toolGetObjectInfo(std
   }
   markExpanded(*ID);
 
-  // Object metadata comes from the object manager. When it is unavailable we
-  // return a well-formed answer (rather than an error) so the model treats it as
-  // a known fact and does not keep retrying the same lookup.
-  const std::optional<ObjectInfo> INFO = m_object_lookup ? m_object_lookup(*ID) : std::nullopt;
-  if (!INFO)
+  const auto NODE = m_graph->findNode(*ID);
+  const auto* obj = NODE ? std::get_if<fzi::semantic_scene_forests::ObjectNode>(&*NODE) : nullptr;
+  if (!obj)
   {
-    const json OUT = {{"id", *ID},
-                      {"class_name", nullptr},
-                      {"note",
-                       "no object-manager metadata available for this object; its class "
-                       "and pose are unknown"}};
-    return OUT.dump();
+    return std::unexpected{"node " + std::to_string(*ID) + " is not an object"};
   }
-
+  const auto& c  = obj->bbox.center.position;
+  const auto& sz = obj->bbox.size;
   const json OUT = {{"id", *ID},
-                    {"class_name", INFO->class_name},
-                    {"position", {INFO->position_x, INFO->position_y, INFO->position_z}},
-                    {"size", {INFO->size_x, INFO->size_y, INFO->size_z}}};
+                    {"class_name", obj->class_name},
+                    {"position", {c.x, c.y, c.z}},
+                    {"size", {sz.x, sz.y, sz.z}}};
   return OUT.dump();
 }
 
@@ -370,7 +347,7 @@ oai::ToolRegistry GraphAgentSession::buildTools()
   registry.add(oai::FunctionTool::make(
     {.name = "list_objects",
      .description =
-       "BOTTOM entry point. List all object nodes with their object-manager class "
+       "BOTTOM entry point. List all object nodes with their scene-graph class "
        "names. Start here for bottom-up (object) search, then walk UP via get_parents.",
      .parameters_schema_json = R"({"type":"object","properties":{},"required":[]})"},
     [this](std::string_view args) {
@@ -423,7 +400,7 @@ oai::ToolRegistry GraphAgentSession::buildTools()
 
   registry.add(oai::FunctionTool::make(
     {.name        = "get_object_info",
-     .description = "Get object-manager metadata (class name, 3D position and size) for an object "
+     .description = "Get scene-graph object data (class name, 3D position and size) for an object "
                     "node.",
      .parameters_schema_json =
        R"({"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]})"},

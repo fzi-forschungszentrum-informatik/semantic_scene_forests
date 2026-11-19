@@ -35,7 +35,7 @@
   <version>1.0.0</version>
   <description>Message and service definitions for scene graph object management.</description>
   <maintainer email="oberacker@fzi.de">David Oberacker</maintainer>
-  <license>Proprietary</license>
+  <license>BSD-3-Clause</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
@@ -44,6 +44,7 @@
   <depend>vision_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
+  <depend>semantic_scene_forests_msgs</depend>
 
   <buildtool_depend>rosidl_default_generators</buildtool_depend>
   <exec_depend>rosidl_default_runtime</exec_depend>

@@ -42,143 +42,90 @@ void CategoryTask::initialize(rclcpp::Node* node, const TemplateMap& templates)
   m_templates = &templates;
 }
 
-TaskResult CategoryTask::execute(oai::OpenAIClient& client,
-                                 std::vector<oai::Message>& history,
-                                 const fzi::semantic_scene_forests::SceneGraph& current_graph,
-                                 fzi::semantic_scene_forests::SceneGraph& graph)
+TaskResult
+CategoryTask::execute(oai::OpenAIClient& client,
+                      std::vector<oai::Message>& history,
+                      const std::vector<fzi::semantic_scene_forests::ConceptNode>& concepts,
+                      const std::shared_ptr<fzi::semantic_scene_forests::SceneGraph>& graph)
 {
-  try
+  if (concepts.empty())
   {
-    const auto CONCEPTS = current_graph.getConceptNodes();
-    if (CONCEPTS.empty())
-    {
-      return {};
-    }
-
-    const auto category_template = m_templates->find("meta/category");
-    const auto followup_template = m_templates->find("meta/category_follow_up");
-    if (category_template == m_templates->end() || followup_template == m_templates->end())
-    {
-      return std::unexpected("required category template is missing");
-    }
-
-    std::unordered_set<int64_t> allowed_ids;
-    allowed_ids.reserve(CONCEPTS.size());
-    auto input_list = minja::Value::array();
-    for (const auto& concept_node : CONCEPTS)
-    {
-      allowed_ids.insert(concept_node.id);
-      auto item = minja::Value::object();
-      item.set("id", minja::Value(concept_node.id));
-      item.set("concept_name", minja::Value(concept_node.concept_name));
-      input_list.push_back(item);
-    }
-    auto prompt_context = minja::Value::object();
-    prompt_context.set("input_list", input_list);
-    const auto context       = minja::Context::make(std::move(prompt_context));
-    const std::string prompt = category_template->second->render(context);
-
-    const auto apply_response = [&](const std::string& raw) -> TaskResult {
-      auto parsed = parseJsonObject(raw);
-      if (!parsed)
-      {
-        return std::unexpected(parsed.error());
-      }
-      if (parsed->size() > MAX_TASK_SOURCE_IDS)
-      {
-        return std::unexpected("LLM response contains too many concept ids");
-      }
-
-      for (const auto& [id_string, categories] : parsed->items())
-      {
-        auto source_id = parseAllowedConceptId(id_string, allowed_ids);
-        if (!source_id)
-        {
-          return std::unexpected(source_id.error());
-        }
-        if (!categories.is_array() || categories.size() > MAX_TASK_LABELS)
-        {
-          return std::unexpected("category values must be an array with a bounded size");
-        }
-
-        for (const auto& value : categories)
-        {
-          auto category_label = validateConceptLabel(value);
-          if (!category_label)
-          {
-            return std::unexpected(category_label.error());
-          }
-          if (*category_label == "category")
-          {
-            return std::unexpected("categories must not contain the category root");
-          }
-
-          auto category_id = findOrCreateConcept(graph, *category_label);
-          if (!category_id)
-          {
-            return std::unexpected(category_id.error());
-          }
-          if (auto edge_result = addUniqueEdge(graph, *source_id, *category_id, "is_type_of");
-              !edge_result)
-          {
-            return edge_result;
-          }
-
-          auto root_id = findOrCreateConcept(graph, "category");
-          if (!root_id)
-          {
-            return std::unexpected(root_id.error());
-          }
-          if (auto edge_result = addUniqueEdge(graph, *category_id, *root_id, "is_type_of");
-              !edge_result)
-          {
-            return edge_result;
-          }
-        }
-      }
-      return {};
-    };
-
-    auto content = chatTurn(client, history, prompt, m_logger);
-    if (!content)
-    {
-      return std::unexpected(content.error());
-    }
-    auto graph_before_response = graph.clone();
-    if (!graph_before_response)
-    {
-      return std::unexpected(graph_before_response.error().message);
-    }
-    if (auto apply_result = apply_response(*content); apply_result)
-    {
-      return {};
-    }
-    graph.swap(**graph_before_response);
-
-    auto followup_context = minja::Value::object();
-    auto category_list    = minja::Value::array();
-    for (const auto& concept_node : CONCEPTS)
-    {
-      category_list.push_back(minja::Value(concept_node.concept_name));
-    }
-    followup_context.set("categories", category_list);
-    const auto followup_minja_context = minja::Context::make(std::move(followup_context));
-    const std::string followup        = followup_template->second->render(followup_minja_context);
-    auto retry                        = chatTurn(client, history, followup, m_logger);
-    if (!retry)
-    {
-      return std::unexpected(retry.error());
-    }
-    if (auto retry_result = apply_response(*retry); !retry_result)
-    {
-      return std::unexpected("invalid category response after follow-up: " + retry_result.error());
-    }
     return {};
   }
-  catch (const std::exception& e)
+
+  const auto CATEGORY_TEMPLATE = m_templates->find("meta/category");
+  const auto FOLLOWUP_TEMPLATE = m_templates->find("meta/category_follow_up");
+  if (CATEGORY_TEMPLATE == m_templates->end() || FOLLOWUP_TEMPLATE == m_templates->end())
   {
-    return std::unexpected("category task failed: " + std::string(e.what()));
+    throw std::runtime_error("required category template is missing");
   }
+
+  std::unordered_set<int64_t> allowed_ids;
+  allowed_ids.reserve(concepts.size());
+  auto input_list = minja::Value::array();
+  for (const auto& concept_node : concepts)
+  {
+    allowed_ids.insert(concept_node.id);
+    auto item = minja::Value::object();
+    item.set("id", minja::Value(concept_node.id));
+    item.set("concept_name", minja::Value(concept_node.concept_name));
+    input_list.push_back(item);
+  }
+  auto prompt_context = minja::Value::object();
+  prompt_context.set("input_list", input_list);
+  const auto CONTEXT       = minja::Context::make(std::move(prompt_context));
+  const std::string PROMPT = CATEGORY_TEMPLATE->second->render(CONTEXT);
+
+  const auto APPLY_RESPONSE = [&](const std::string& raw) -> TaskResult {
+    auto parsed = parseJsonObject(raw);
+    if (!parsed)
+    {
+      return std::unexpected(parsed.error());
+    }
+    if (parsed->size() > MAX_TASK_SOURCE_IDS)
+    {
+      return std::unexpected("LLM response contains too many concept ids");
+    }
+
+    for (const auto& [id_string, categories] : parsed->items())
+    {
+      const auto SOURCE_ID = parseAllowedConceptId(id_string, allowed_ids);
+      if (!SOURCE_ID)
+      {
+        RCLCPP_WARN(m_logger, "Skipping '%s': %s", id_string.c_str(), SOURCE_ID.error().c_str());
+        continue;
+      }
+      if (auto applied =
+            applyLabels(*graph, m_logger, *SOURCE_ID, "is_type_of", "category", categories);
+          !applied)
+      {
+        RCLCPP_WARN(m_logger, "Skipping '%s': %s", id_string.c_str(), applied.error().c_str());
+      }
+    }
+    return {};
+  };
+
+  auto content = chatTurn(client, history, PROMPT, m_logger);
+  if (APPLY_RESPONSE(content))
+  {
+    return {};
+  }
+
+  auto followup_context = minja::Value::object();
+  auto category_list    = minja::Value::array();
+  for (const auto& concept_node : concepts)
+  {
+    category_list.push_back(minja::Value(concept_node.concept_name));
+  }
+  followup_context.set("categories", category_list);
+  const auto FOLLOWUP_MINJA_CONTEXT = minja::Context::make(std::move(followup_context));
+  const std::string FOLLOWUP        = FOLLOWUP_TEMPLATE->second->render(FOLLOWUP_MINJA_CONTEXT);
+  auto retry                        = chatTurn(client, history, FOLLOWUP, m_logger);
+  if (auto retry_result = APPLY_RESPONSE(retry); !retry_result)
+  {
+    return std::unexpected("invalid category response after follow-up: " + retry_result.error());
+  }
+  return {};
 }
 
 } // namespace semantic_scene_forests_generation

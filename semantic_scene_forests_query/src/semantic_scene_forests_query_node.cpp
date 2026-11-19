@@ -28,6 +28,7 @@
 
 #include "semantic_scene_forests_query_node.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -39,6 +40,8 @@
 
 #include <fmt/format.h>
 
+// get_package_share_path() does not exist on Jazzy/Kilted; keep the directory API despite the
+// Lyrical deprecation warning.
 #include <ament_index_cpp/get_package_share_directory.hpp>
 
 #include <cv_bridge/cv_bridge.hpp>
@@ -56,11 +59,10 @@ namespace fs = std::filesystem;
 namespace {
 
 // Hardcoded ROS interface names (intentionally NOT parameters).
-constexpr const char* K_SCENE_GRAPH_TOPIC     = "scene_graph";
-constexpr const char* K_MANAGED_OBJECTS_TOPIC = "managed_objects";
-constexpr const char* K_GET_OBJECT_VISUALS    = "get_object_visuals";
-constexpr const char* K_FIND_OBJECT_ACTION    = "find_object";
-constexpr const char* K_PROMPT_LLM_ACTION     = "prompt_llm";
+constexpr const char* K_SCENE_GRAPH_TOPIC  = "scene_graph";
+constexpr const char* K_GET_OBJECT_VISUALS = "get_object_visuals";
+constexpr const char* K_FIND_OBJECT_ACTION = "find_object";
+constexpr const char* K_PROMPT_LLM_ACTION  = "prompt_llm";
 
 // Extract the first balanced {...} block from arbitrary model text (handles
 // fenced ```json blocks and surrounding prose). Returns the substring or "".
@@ -113,43 +115,30 @@ SceneGraphQueryNode::SceneGraphQueryNode(const rclcpp::NodeOptions& options)
   }
   loadTemplates(prompt_dir.string());
 
-  // Match the semantic_scene_forests_generation publisher so the latest graph is latched.
+  // Match the scene_graph_manager publisher so the latest graph is latched.
   const auto QOS = rclcpp::QoS(1).reliable().transient_local();
 
-  // NOLINTNEXTLINE(performance-unnecessary-value-param): rclcpp delivers SharedPtr by value.
   m_graph_sub = create_subscription<SceneGraphMsg>(
-    K_SCENE_GRAPH_TOPIC, QOS, [this](const SceneGraphMsg::SharedPtr msg) { onSceneGraph(msg); });
-
-  // NOLINTNEXTLINE(performance-unnecessary-value-param)
-  m_objects_sub = create_subscription<ManagedObjectArray>(
-    K_MANAGED_OBJECTS_TOPIC, QOS, [this](const ManagedObjectArray::SharedPtr msg) {
-      onManagedObjects(msg);
-    });
-
-  m_graph_freq = std::make_unique<diagnostic_updater::HeaderlessTopicDiagnostic>(
     K_SCENE_GRAPH_TOPIC,
-    m_diagnostic_updater,
-    diagnostic_updater::FrequencyStatusParam(&m_min_freq, &m_max_freq, 0.1, 5));
-  m_objects_freq = std::make_unique<diagnostic_updater::HeaderlessTopicDiagnostic>(
-    K_MANAGED_OBJECTS_TOPIC,
-    m_diagnostic_updater,
-    diagnostic_updater::FrequencyStatusParam(&m_min_freq, &m_max_freq, 0.1, 5));
+    QOS,
+    // NOLINTNEXTLINE(performance-unnecessary-value-param): rclcpp needs the SharedPtr by value
+    [this](const SceneGraphMsg::SharedPtr msg) { onSceneGraph(msg); });
 
   m_visuals_client = create_client<GetObjectVisuals>(K_GET_OBJECT_VISUALS);
 
   m_find_object_server = rclcpp_action::create_server<FindObjectAction>(
     this,
     K_FIND_OBJECT_ACTION,
-    [this](const auto& uuid, auto goal) { return handleFindObjectGoal(uuid, std::move(goal)); },
-    [this](auto goal_handle) { return handleFindObjectCancel(std::move(goal_handle)); },
-    [this](auto goal_handle) { handleFindObjectAccepted(std::move(goal_handle)); });
+    [this](const auto& uuid, const auto& goal) { return handleFindObjectGoal(uuid, goal); },
+    [](const auto& goal_handle) { return handleFindObjectCancel(goal_handle); },
+    [this](const auto& goal_handle) { handleFindObjectAccepted(goal_handle); });
 
   m_prompt_llm_server = rclcpp_action::create_server<PromptLLMAction>(
     this,
     K_PROMPT_LLM_ACTION,
-    [this](const auto& uuid, auto goal) { return handlePromptLLMGoal(uuid, std::move(goal)); },
-    [this](auto goal_handle) { return handlePromptLLMCancel(std::move(goal_handle)); },
-    [this](auto goal_handle) { handlePromptLLMAccepted(std::move(goal_handle)); });
+    [this](const auto& uuid, const auto& goal) { return handlePromptLLMGoal(uuid, goal); },
+    [](const auto& goal_handle) { return handlePromptLLMCancel(goal_handle); },
+    [this](const auto& goal_handle) { handlePromptLLMAccepted(goal_handle); });
 
   RCLCPP_INFO(get_logger(),
               "SceneGraphQueryNode started (model: %s, server: %s)",
@@ -231,27 +220,8 @@ void SceneGraphQueryNode::loadTemplates(const std::string& prompt_dir)
 
 void SceneGraphQueryNode::onSceneGraph(const SceneGraphMsg::SharedPtr& msg)
 {
-  m_graph_freq->tick();
   const std::scoped_lock LOCK{m_graph_mutex};
   m_last_graph = *msg;
-}
-
-void SceneGraphQueryNode::onManagedObjects(const ManagedObjectArray::SharedPtr& msg)
-{
-  m_objects_freq->tick();
-  // Complete managed-object arrays are authoritative. Blocked legacy rows are
-  // not active.
-  std::unordered_map<int64_t, ManagedObject> next;
-  for (const auto& obj : msg->objects)
-  {
-    if (!obj.is_blocked)
-    {
-      next[obj.id] = obj;
-    }
-  }
-  const std::scoped_lock LOCK{m_objects_mutex};
-  m_cached_objects   = std::move(next);
-  m_objects_received = true;
 }
 
 // ── Shared helpers ──────────────────────────────────────────────────────────--
@@ -259,31 +229,15 @@ void SceneGraphQueryNode::onManagedObjects(const ManagedObjectArray::SharedPtr& 
 std::expected<SceneGraphQueryNode::SceneSnapshot, std::string>
 SceneGraphQueryNode::snapshotGraph() const
 {
-  // Consistent capture: graph message and managed-object state are copied
-  // together under one scoped_lock, then the locks are released before any
-  // conversion, sanitization or IO below.
+  // Copy the message under the lock; conversion and IO run after release.
   SceneGraphMsg msg;
-  std::unordered_set<int64_t> active_ids;
-  bool received{false};
   {
-    const std::scoped_lock LOCK{m_objects_mutex, m_graph_mutex};
+    const std::scoped_lock LOCK{m_graph_mutex};
     if (!m_last_graph)
     {
       return std::unexpected{"no scene graph received yet"};
     }
-    msg      = *m_last_graph;
-    received = m_objects_received;
-    active_ids.reserve(m_cached_objects.size());
-    for (const auto& [id, obj] : m_cached_objects)
-    {
-      active_ids.insert(id);
-    }
-  }
-  // Queries require an authoritative managed-object snapshot: fail clearly
-  // until one arrives. A confirmed empty array is a valid empty scene.
-  if (!received)
-  {
-    return std::unexpected{"no authoritative managed-object state received yet"};
+    msg = *m_last_graph;
   }
 
   auto graph = fzi::semantic_scene_forests::SceneGraph::fromMsg(msg);
@@ -292,14 +246,6 @@ SceneGraphQueryNode::snapshotGraph() const
     return std::unexpected{
       fmt::format("failed to build graph snapshot: {}", graph.error().message)};
   }
-  // Drop objects (and concepts unreachable from the retained ones) that are
-  // no longer active, so removals take effect even for a latched graph.
-  if (auto retained = (*graph)->retainObjectNodes(active_ids); !retained)
-  {
-    return std::unexpected{
-      fmt::format("failed to sanitize graph snapshot: {}", retained.error().message)};
-  }
-
   std::unordered_set<int64_t> object_ids;
   for (const auto& node : (*graph)->getObjectNodes())
   {
@@ -308,23 +254,10 @@ SceneGraphQueryNode::snapshotGraph() const
   return SceneSnapshot{.graph = std::move(*graph), .object_ids = std::move(object_ids)};
 }
 
-std::optional<ObjectInfo> SceneGraphQueryNode::lookupObject(int64_t id) const
+bool SceneGraphQueryNode::hasObject(int64_t id) const
 {
-  const std::scoped_lock LOCK{m_objects_mutex};
-  const auto IT = m_cached_objects.find(id);
-  if (IT == m_cached_objects.end())
-  {
-    return std::nullopt;
-  }
-  const auto& OBJ  = IT->second;
-  const auto& BBOX = OBJ.detection.bbox;
-  return ObjectInfo{.class_name = OBJ.class_name,
-                    .position_x = BBOX.center.position.x,
-                    .position_y = BBOX.center.position.y,
-                    .position_z = BBOX.center.position.z,
-                    .size_x     = BBOX.size.x,
-                    .size_y     = BBOX.size.y,
-                    .size_z     = BBOX.size.z};
+  const std::scoped_lock LOCK{m_graph_mutex};
+  return m_last_graph && std::ranges::contains(m_last_graph->object_nodes, id, &ObjectNodeMsg::id);
 }
 
 std::expected<std::string, std::string> SceneGraphQueryNode::inspectObjectVisual(
@@ -413,14 +346,9 @@ SceneGraphQueryNode::renderObjectCatalog(const fzi::semantic_scene_forests::Scen
   auto objects = minja::Value::array();
   for (const auto& obj : graph.getObjectNodes())
   {
-    std::string class_name;
-    if (const auto INFO = lookupObject(obj.id))
-    {
-      class_name = INFO->class_name;
-    }
     auto entry = minja::Value::object();
     entry.set("id", minja::Value(obj.id));
-    entry.set("class_name", minja::Value(class_name));
+    entry.set("class_name", minja::Value(obj.class_name));
     objects.push_back(entry);
   }
 
@@ -436,12 +364,7 @@ SceneGraphQueryNode::renderObjectCatalog(const fzi::semantic_scene_forests::Scen
   std::string out = "Objects currently in the scene graph (id: class_name):\n";
   for (const auto& obj : graph.getObjectNodes())
   {
-    std::string class_name;
-    if (const auto INFO = lookupObject(obj.id))
-    {
-      class_name = INFO->class_name;
-    }
-    out += fmt::format("- {}: {}\n", obj.id, class_name);
+    out += fmt::format("- {}: {}\n", obj.id, obj.class_name);
   }
   return out;
 }
@@ -463,7 +386,7 @@ oai::OpenAIClient SceneGraphQueryNode::makeClient() const
             "semantic_scene_forests_query")
     .header("X-OpenRouter-Title", "semantic_scene_forests_query")
     .temperature(static_cast<float>(m_params.temperature))
-    .maxTokens(m_params.max_tokens)
+    .maxTokens(static_cast<int>(m_params.max_tokens))
     .extraBody(m_extra_body)
     .connectTimeout(CONNECT_TIMEOUT)
     .requestTimeout(REQUEST_TIMEOUT)
@@ -486,7 +409,6 @@ SceneGraphQueryNode::runAgent(const std::string& system_prompt_key,
 
   GraphAgentSession session(
     std::move(snapshot->graph),
-    [this](int64_t id) { return lookupObject(id); },
     [this, should_stop](int64_t id, std::string_view focus) {
       return inspectObjectVisual(id, focus, should_stop);
     },
@@ -496,7 +418,7 @@ SceneGraphQueryNode::runAgent(const std::string& system_prompt_key,
 
   auto agent = oai::AgentBuilder{}
                  .systemPrompt(renderSystemPrompt(system_prompt_key))
-                 .maxSteps(m_params.max_steps)
+                 .maxSteps(static_cast<int>(m_params.max_steps))
                  .client(makeClient())
                  .tools(session.buildTools())
                  .build();
@@ -539,7 +461,7 @@ void SceneGraphQueryNode::guardedTerminal(const std::function<void()>& terminal)
 
 rclcpp_action::GoalResponse
 SceneGraphQueryNode::handleFindObjectGoal(const rclcpp_action::GoalUUID& /*uuid*/,
-                                          std::shared_ptr<const FindObjectAction::Goal> goal)
+                                          const std::shared_ptr<const FindObjectAction::Goal>& goal)
 {
   if (goal->object_description.empty())
   {
@@ -728,14 +650,6 @@ SceneGraphQueryNode::validateFindObjectAnswer(const AgentOutcome& outcome) const
   const bool FOUND = FOUND_FIELD->get<bool>();
 
   // Objects come and go while the agent runs; only the selected id is re-checked below.
-  {
-    const std::scoped_lock LOCK{m_objects_mutex};
-    if (!m_objects_received)
-    {
-      return std::unexpected{"no authoritative managed-object state received yet"};
-    }
-  }
-
   auto result       = std::make_shared<FindObjectAction::Result>();
   result->object_id = -1;
   result->success   = false;
@@ -777,20 +691,17 @@ SceneGraphQueryNode::validateFindObjectAnswer(const AgentOutcome& outcome) const
   }
 
   // The selected id must have been an object in the captured snapshot and
-  // must still be active now (re-check under the objects mutex closes the
+  // must still be in the latest scene graph (re-check closes the
   // snapshot-to-validation window).
   if (!outcome.snapshot_object_ids.contains(object_id))
   {
     return std::unexpected{
       fmt::format("model reported object {} which is not in the scene snapshot", object_id)};
   }
+  if (!hasObject(object_id))
   {
-    const std::scoped_lock LOCK{m_objects_mutex};
-    if (!m_cached_objects.contains(object_id))
-    {
-      return std::unexpected{
-        fmt::format("model reported object {} which is no longer active", object_id)};
-    }
+    return std::unexpected{
+      fmt::format("model reported object {} which is no longer active", object_id)};
   }
 
   result->success   = true;
@@ -802,7 +713,7 @@ SceneGraphQueryNode::validateFindObjectAnswer(const AgentOutcome& outcome) const
 
 rclcpp_action::GoalResponse
 SceneGraphQueryNode::handlePromptLLMGoal(const rclcpp_action::GoalUUID& /*uuid*/,
-                                         std::shared_ptr<const PromptLLMAction::Goal> goal)
+                                         const std::shared_ptr<const PromptLLMAction::Goal>& goal)
 {
   if (goal->query.empty())
   {
@@ -960,22 +871,19 @@ void SceneGraphQueryNode::executePromptLLM(const std::shared_ptr<PromptLLMGoal>&
 void SceneGraphQueryNode::onConnectivityDiagnostic(
   diagnostic_updater::DiagnosticStatusWrapper& stat)
 {
-  const bool service_ready = m_visuals_client->service_is_ready();
+  const bool SERVICE_READY = m_visuals_client->service_is_ready();
 
   bool has_graph = false;
+  size_t objects = 0;
   {
     const std::scoped_lock LOCK{m_graph_mutex};
     has_graph = m_last_graph.has_value();
-  }
-  size_t cached = 0;
-  {
-    const std::scoped_lock LOCK{m_objects_mutex};
-    cached = m_cached_objects.size();
+    objects   = has_graph ? m_last_graph->object_nodes.size() : 0;
   }
 
   stat.add("Has scene graph", has_graph);
-  stat.add("Cached objects", cached);
-  stat.add("GetObjectVisuals ready", service_ready);
+  stat.add("Scene graph objects", objects);
+  stat.add("GetObjectVisuals ready", SERVICE_READY);
   m_llm_errors.report(stat, "LLM");
   m_service_errors.report(stat, "Service");
   m_action_errors.report(stat, "Action");
@@ -993,7 +901,7 @@ void SceneGraphQueryNode::onConnectivityDiagnostic(
     stat.summary(diagnostic_msgs::msg::DiagnosticStatus::ERROR,
                  "LLM endpoint unreachable: " + m_params.server_url);
   }
-  else if (!service_ready)
+  else if (!SERVICE_READY)
   {
     stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN,
                  "GetObjectVisuals service not available");

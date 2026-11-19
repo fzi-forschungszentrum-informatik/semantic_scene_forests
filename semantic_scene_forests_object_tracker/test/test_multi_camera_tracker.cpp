@@ -31,17 +31,21 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
+#include <variant>
 #include <vector>
 
+#include <cv_bridge/cv_bridge.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/image_encodings.hpp>
@@ -54,62 +58,81 @@
 #include <vision_msgs/msg/detection3_d_array.hpp>
 #include <vision_msgs/msg/object_hypothesis_with_pose.hpp>
 
-#include "semantic_scene_forests_object_manager/object_manager_node.hpp"
-#include "semantic_scene_forests_object_msgs/msg/object_candidate_array.hpp"
+#include "semantic_scene_forests/scene_graph.hpp"
+#include "semantic_scene_forests_object_msgs/msg/object_candidate.hpp"
+#include "semantic_scene_forests_object_msgs/srv/add_object.hpp"
 #include "semantic_scene_forests_object_msgs/srv/add_observations.hpp"
-#include "semantic_scene_forests_object_msgs/srv/get_object_visuals.hpp"
-#include "semantic_scene_forests_object_msgs/srv/get_objects.hpp"
-#include "semantic_scene_forests_object_tracker/object_tracker_component.hpp"
 #include "semantic_scene_forests_object_tracker/tracked_object.hpp"
+#include "semantic_scene_forests_object_tracker/tracker_worker.hpp"
 
 namespace {
 
 using namespace std::chrono_literals;
 
+using fzi::semantic_scene_forests::ObjectNode;
+using fzi::semantic_scene_forests::SceneGraph;
 using semantic_scene_forests_object_tracker::DetectionAdapter;
-using semantic_scene_forests_object_tracker::ObjectTrackerComponent;
 using semantic_scene_forests_object_tracker::TrackedObject;
-using ObjectCandidate      = semantic_scene_forests_object_msgs::msg::ObjectCandidate;
-using ObjectCandidateArray = semantic_scene_forests_object_msgs::msg::ObjectCandidateArray;
-using GetObjectVisuals     = semantic_scene_forests_object_msgs::srv::GetObjectVisuals;
-using GetObjects           = semantic_scene_forests_object_msgs::srv::GetObjects;
-using AddObservations      = semantic_scene_forests_object_msgs::srv::AddObservations;
+using semantic_scene_forests_object_tracker::TrackerWorker;
+using ObjectCandidate = semantic_scene_forests_object_msgs::msg::ObjectCandidate;
+using AddObservations = semantic_scene_forests_object_msgs::srv::AddObservations;
+using AddObject       = semantic_scene_forests_object_msgs::srv::AddObject;
+
+//! The object node with this id; throws (failing the test) if the graph has none.
+ObjectNode objectNode(const SceneGraph& graph, int64_t id)
+{
+  const auto NODE = graph.findNode(id);
+  if (!NODE || !std::holds_alternative<ObjectNode>(*NODE))
+  {
+    throw std::runtime_error("object node " + std::to_string(id) + " missing");
+  }
+  return std::get<ObjectNode>(*NODE);
+}
 
 rclcpp::NodeOptions twoCameraOptions()
 {
   rclcpp::NodeOptions options;
-  options.append_parameter_override("world_frame", "map");
-  options.append_parameter_override("snapshot_rate_hz", 100.0);
-  options.append_parameter_override("camera_names", std::vector<std::string>{"front", "rear"});
-  options.append_parameter_override("cameras.front.detections_2d_topic", "/front/detections_2d");
-  options.append_parameter_override("cameras.front.detections_3d_topic", "/front/detections_3d");
-  options.append_parameter_override("cameras.front.image_topic", "/front/image");
-  options.append_parameter_override("cameras.rear.detections_2d_topic", "/rear/detections_2d");
-  options.append_parameter_override("cameras.rear.detections_3d_topic", "/rear/detections_3d");
-  options.append_parameter_override("cameras.rear.image_topic", "/rear/image");
+  options.append_parameter_override("tracker.world_frame", "map");
+  options.append_parameter_override("tracker.snapshot_rate_hz", 100.0);
+  options.append_parameter_override("tracker.camera_names",
+                                    std::vector<std::string>{"front", "rear"});
+  options.append_parameter_override("tracker.cameras.front.detections_2d_topic",
+                                    "/front/detections_2d");
+  options.append_parameter_override("tracker.cameras.front.detections_3d_topic",
+                                    "/front/detections_3d");
+  options.append_parameter_override("tracker.cameras.front.image_topic", "/front/image");
+  options.append_parameter_override("tracker.cameras.rear.detections_2d_topic",
+                                    "/rear/detections_2d");
+  options.append_parameter_override("tracker.cameras.rear.detections_3d_topic",
+                                    "/rear/detections_3d");
+  options.append_parameter_override("tracker.cameras.rear.image_topic", "/rear/image");
   return options;
 }
 
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters): fixed parameter order
 rclcpp::NodeOptions commonTrackerOptions(int confirmation_threshold      = 3,
                                          double gate_threshold_strict    = 3.0,
                                          double gate_threshold_confirmed = 10.0,
-                                         double merge_overlap_threshold  = 0.6)
+                                         double merge_overlap_threshold  = 0.6,
+                                         double crop_interval            = 0.0)
 {
   auto options = twoCameraOptions();
-  options.append_parameter_override("confirmation_threshold", confirmation_threshold);
-  options.append_parameter_override("gate_threshold_strict", gate_threshold_strict);
-  options.append_parameter_override("gate_threshold_confirmed", gate_threshold_confirmed);
-  options.append_parameter_override("merge_overlap_threshold", merge_overlap_threshold);
+  options.append_parameter_override("tracker.crop_replace_min_interval_seconds", crop_interval);
+  options.append_parameter_override("tracker.confirmation_threshold", confirmation_threshold);
+  options.append_parameter_override("tracker.gate_threshold_strict", gate_threshold_strict);
+  options.append_parameter_override("tracker.gate_threshold_confirmed", gate_threshold_confirmed);
+  options.append_parameter_override("tracker.merge_overlap_threshold", merge_overlap_threshold);
   // These scenarios grow boxes abruptly; size gating is covered in test_camera_tracker.
-  options.append_parameter_override("association_max_size_ratio", 100.0);
-  options.append_parameter_override("crop_padding", 0);
-  options.append_parameter_override("max_crops_per_object", 20);
+  options.append_parameter_override("tracker.association_max_size_ratio", 100.0);
+  options.append_parameter_override("tracker.crop_padding", 0);
+  options.append_parameter_override("tracker.max_crops_per_object", 20);
   return options;
 }
 
 rclcpp::NodeOptions defaultTrackerOptions()
 {
   rclcpp::NodeOptions options;
+  options.append_parameter_override("tracker.crop_replace_min_interval_seconds", 0.0);
   options.arguments({"--ros-args",
                      "-r",
                      "detections_2d:=/remapped/detections_2d",
@@ -117,11 +140,11 @@ rclcpp::NodeOptions defaultTrackerOptions()
                      "detections_3d:=/remapped/detections_3d",
                      "-r",
                      "camera/image:=/remapped/image"});
-  options.append_parameter_override("world_frame", "map");
-  options.append_parameter_override("snapshot_rate_hz", 100.0);
-  options.append_parameter_override("confirmation_threshold", 3);
-  options.append_parameter_override("crop_padding", 0);
-  options.append_parameter_override("max_crops_per_object", 20);
+  options.append_parameter_override("tracker.world_frame", "map");
+  options.append_parameter_override("tracker.snapshot_rate_hz", 100.0);
+  options.append_parameter_override("tracker.confirmation_threshold", 3);
+  options.append_parameter_override("tracker.crop_padding", 0);
+  options.append_parameter_override("tracker.max_crops_per_object", 20);
   return options;
 }
 
@@ -135,7 +158,7 @@ makeImage(const rclcpp::Time& stamp, const std::string& frame_id, uint8_t tag)
   image.width           = 32;
   image.encoding        = sensor_msgs::image_encodings::BGR8;
   image.step            = image.width * 3;
-  image.data.assign(image.height * image.step, tag);
+  image.data.assign(static_cast<size_t>(image.height) * image.step, tag);
   return image;
 }
 
@@ -160,11 +183,13 @@ makeDetections2D(const rclcpp::Time& stamp, const std::string& frame_id, const s
   return array;
 }
 
-vision_msgs::msg::Detection3DArray makeDetections3D(const rclcpp::Time& stamp,
-                                                    const std::string& frame_id,
-                                                    const std::string& id,
-                                                    double x,
-                                                    double size)
+vision_msgs::msg::Detection3DArray
+makeDetections3D(const rclcpp::Time& stamp,
+                 const std::string& frame_id,
+                 const std::string& id,
+                 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters): fixed parameter order
+                 double x,
+                 double size)
 {
   vision_msgs::msg::Detection3DArray array;
   array.header.stamp    = stamp;
@@ -194,6 +219,7 @@ struct CameraPublisher
 
   void publish(const rclcpp::Time& stamp,
                const std::string& local_id,
+               // NOLINTNEXTLINE(bugprone-easily-swappable-parameters): fixed parameter order
                double local_x,
                uint8_t tag,
                bool publish_2d                   = true,
@@ -232,19 +258,24 @@ class TrackerHarness
 {
 public:
   explicit TrackerHarness(bool two_cameras                = true,
-                          bool with_manager               = false,
                           int confirmation_threshold      = 3,
                           double gate_threshold_strict    = 3.0,
                           double gate_threshold_confirmed = 10.0,
-                          double merge_overlap_threshold  = 0.6)
+                          double merge_overlap_threshold  = 0.6,
+                          double crop_interval            = 0.0)
   {
     m_source_node = std::make_shared<rclcpp::Node>("multi_camera_test_source");
-    m_tracker     = std::make_shared<ObjectTrackerComponent>(
-      two_cameras ? commonTrackerOptions(confirmation_threshold,
-                                         gate_threshold_strict,
-                                         gate_threshold_confirmed,
-                                         merge_overlap_threshold)
-                  : defaultTrackerOptions());
+    m_host =
+      std::make_shared<rclcpp::Node>("scene_graph_manager",
+                                     two_cameras ? commonTrackerOptions(confirmation_threshold,
+                                                                        gate_threshold_strict,
+                                                                        gate_threshold_confirmed,
+                                                                        merge_overlap_threshold,
+                                                                        crop_interval)
+                                                 : defaultTrackerOptions());
+    m_diagnostics.emplace(m_host);
+    m_worker.initialize(*m_host, m_graph, "tracker", *m_diagnostics);
+    m_worker.start();
 
     const auto SENSOR_QOS = rclcpp::SensorDataQoS();
     if (two_cameras)
@@ -263,14 +294,8 @@ public:
                            SENSOR_QOS);
     }
 
-    m_candidates_sub = m_source_node->create_subscription<ObjectCandidateArray>(
-      "object_candidate_snapshots",
-      rclcpp::QoS(1000).reliable().transient_local(),
-      [this](ObjectCandidateArray::ConstSharedPtr snapshot) {
-        std::scoped_lock lock(m_candidates_mutex);
-        m_latest_candidates = snapshot->objects;
-        m_candidates.insert(m_candidates.end(), snapshot->objects.begin(), snapshot->objects.end());
-      });
+    // Each graph change appends the objects to the history, like a snapshot did.
+    m_poll_timer = m_source_node->create_wall_timer(10ms, [this]() { pollGraph(); });
 
     m_tf_buffer = std::make_shared<tf2_ros::Buffer>(m_source_node->get_clock());
     m_tf_listener =
@@ -282,24 +307,11 @@ public:
       m_tf_broadcaster->sendTransform(makeTransform(m_rear->frame_id, -1.0));
     }
 
-    if (with_manager)
-    {
-      rclcpp::NodeOptions manager_options;
-      manager_options.append_parameter_override("frame_id", "map");
-      m_manager =
-        std::make_shared<semantic_scene_forests_object_manager::ObjectManagerNode>(manager_options);
-      m_get_objects = m_source_node->create_client<GetObjects>("get_objects");
-      m_get_visuals = m_source_node->create_client<GetObjectVisuals>("get_object_visuals");
-    }
-
     m_add_observations = m_source_node->create_client<AddObservations>("add_observations");
+    m_add_object       = m_source_node->create_client<AddObject>("add_object");
 
     m_executor.add_node(m_source_node);
-    m_executor.add_node(m_tracker);
-    if (m_manager)
-    {
-      m_executor.add_node(m_manager);
-    }
+    m_executor.add_node(m_host);
     m_spinner = std::thread([this]() { m_executor.spin(); });
   }
 
@@ -310,10 +322,11 @@ public:
     {
       m_spinner.join();
     }
+    m_worker.stop();
   }
 
-  template <typename Predicate>
-  static bool waitUntil(Predicate&& predicate, std::chrono::milliseconds timeout)
+  template <typename TPredicate>
+  static bool waitUntil(TPredicate&& predicate, std::chrono::milliseconds timeout)
   {
     const auto DEADLINE = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < DEADLINE)
@@ -327,10 +340,10 @@ public:
     return predicate();
   }
 
-  bool ready(bool manager = false) const
+  bool ready() const
   {
     return waitUntil(
-      [this, manager]() {
+      [this]() {
         const bool FRONT_READY = m_front->detections_2d->get_subscription_count() > 0 &&
                                  m_front->detections_3d->get_subscription_count() > 0 &&
                                  m_front->image->get_subscription_count() > 0;
@@ -342,19 +355,31 @@ public:
         const bool REAR_TF_READY =
           !m_rear || m_tf_buffer->canTransform(
                        "map", m_rear->frame_id, tf2::TimePointZero, tf2::durationFromSec(0.0));
-        const bool SERVICES_READY =
-          !manager || (m_get_objects->service_is_ready() && m_get_visuals->service_is_ready());
-        return FRONT_READY && REAR_READY && TF_READY && REAR_TF_READY && SERVICES_READY;
+        return FRONT_READY && REAR_READY && TF_READY && REAR_TF_READY;
       },
       5s);
   }
 
-  CameraPublisher& front() { return *m_front; }
-  CameraPublisher& rear() { return *m_rear; }
+  CameraPublisher& front()
+  {
+    if (!m_front)
+    {
+      throw std::runtime_error("front camera not configured");
+    }
+    return *m_front;
+  }
+  CameraPublisher& rear()
+  {
+    if (!m_rear)
+    {
+      throw std::runtime_error("rear camera not configured in this harness");
+    }
+    return *m_rear;
+  }
 
   bool setConfirmationThreshold(int64_t threshold)
   {
-    return m_tracker->set_parameter(rclcpp::Parameter("confirmation_threshold", threshold))
+    return m_host->set_parameter(rclcpp::Parameter("tracker.confirmation_threshold", threshold))
       .successful;
   }
 
@@ -409,14 +434,62 @@ public:
     return true;
   }
 
-  std::optional<GetObjects::Response> getObjects() const
+  SceneGraph& graph() { return *m_graph; }
+
+  bool setParameter(const std::string& name, double value)
   {
-    auto future = m_get_objects->async_send_request(std::make_shared<GetObjects::Request>());
+    return m_host->set_parameter(rclcpp::Parameter(name, value)).successful;
+  }
+
+  std::optional<AddObject::Response>
+  addObject(const std::string& class_name,
+            const std::string& frame_id,
+            // NOLINTNEXTLINE(bugprone-easily-swappable-parameters): fixed parameter order
+            double x,
+            double size,
+            int stamp_sec = 0) const
+  {
+    if (!m_add_object->wait_for_service(2s))
+    {
+      return std::nullopt;
+    }
+    auto request                       = std::make_shared<AddObject::Request>();
+    request->header.frame_id           = frame_id;
+    request->header.stamp.sec          = stamp_sec;
+    request->class_name                = class_name;
+    request->bbox.center.position.x    = x;
+    request->bbox.center.orientation.w = 1.0;
+    request->bbox.size.x = request->bbox.size.y = request->bbox.size.z = size;
+    request->image_crops.push_back(makeImage(rclcpp::Time(1, 0), "manual", 99));
+    auto future = m_add_object->async_send_request(request);
     if (!waitUntil([&future]() { return future.wait_for(0s) == std::future_status::ready; }, 2s))
     {
       return std::nullopt;
     }
     return *future.get();
+  }
+
+  // The graph's object nodes as candidates; crops decoded back to images.
+  std::vector<ObjectCandidate> graphObjects() const
+  {
+    std::vector<ObjectCandidate> result;
+    for (const auto& node : m_graph->getObjectNodes())
+    {
+      ObjectCandidate candidate;
+      candidate.id                        = node.id;
+      candidate.class_name                = node.class_name;
+      candidate.detection.bbox            = node.bbox;
+      candidate.detection.header.frame_id = node.frame_id;
+      candidate.last_seen                 = node.last_seen;
+      for (const auto& crop : node.crops)
+      {
+        auto image   = *cv_bridge::toCvCopy(*crop, "bgr8")->toImageMsg();
+        image.header = crop->header;
+        candidate.image_crops.push_back(std::move(image));
+      }
+      result.push_back(std::move(candidate));
+    }
+    return result;
   }
 
   std::optional<AddObservations::Response>
@@ -436,19 +509,29 @@ public:
     return *future.get();
   }
 
-  std::optional<GetObjectVisuals::Response> getVisuals(const std::vector<int64_t>& ids) const
+private:
+  void pollGraph()
   {
-    auto request        = std::make_shared<GetObjectVisuals::Request>();
-    request->object_ids = ids;
-    auto future         = m_get_visuals->async_send_request(request);
-    if (!waitUntil([&future]() { return future.wait_for(0s) == std::future_status::ready; }, 2s))
+    auto objects = graphObjects();
+    // Change signature: ids, observation times and crop counts.
+    std::vector<int64_t> signature;
+    for (const auto& object : objects)
     {
-      return std::nullopt;
+      signature.push_back(object.id);
+      signature.push_back(rclcpp::Time(object.last_seen).nanoseconds());
+      signature.push_back(static_cast<int64_t>(object.image_crops.size()));
     }
-    return *future.get();
+    if (signature == m_seen_signature)
+    {
+      return;
+    }
+    m_seen_signature = std::move(signature);
+    std::scoped_lock lock(m_candidates_mutex);
+    m_candidates.insert(m_candidates.end(), objects.begin(), objects.end());
+    m_latest_candidates = std::move(objects);
   }
 
-private:
+  // NOLINTNEXTLINE(bugprone-easily-swappable-parameters): fixed parameter order
   CameraPublisher makeCamera(const std::string& frame_id,
                              const std::string& detections_2d_topic,
                              const std::string& detections_3d_topic,
@@ -465,15 +548,17 @@ private:
     return camera;
   }
 
+  std::shared_ptr<SceneGraph> m_graph{std::make_shared<SceneGraph>()};
   rclcpp::Node::SharedPtr m_source_node;
-  rclcpp::Node::SharedPtr m_tracker;
-  rclcpp::Node::SharedPtr m_manager;
+  rclcpp::Node::SharedPtr m_host;
+  TrackerWorker m_worker; // Declared after the host node: destroyed before it.
+  std::optional<diagnostic_updater::Updater> m_diagnostics; // Destroyed before the worker.
   std::optional<CameraPublisher> m_front;
   std::optional<CameraPublisher> m_rear;
-  rclcpp::Subscription<ObjectCandidateArray>::SharedPtr m_candidates_sub;
-  rclcpp::Client<GetObjects>::SharedPtr m_get_objects;
-  rclcpp::Client<GetObjectVisuals>::SharedPtr m_get_visuals;
+  rclcpp::TimerBase::SharedPtr m_poll_timer;
+  std::vector<int64_t> m_seen_signature; // only touched by m_poll_timer
   rclcpp::Client<AddObservations>::SharedPtr m_add_observations;
+  rclcpp::Client<AddObject>::SharedPtr m_add_object;
   std::shared_ptr<tf2_ros::Buffer> m_tf_buffer;
   std::unique_ptr<tf2_ros::TransformListener> m_tf_listener;
   std::unique_ptr<tf2_ros::StaticTransformBroadcaster> m_tf_broadcaster;
@@ -502,6 +587,7 @@ std::set<int64_t> candidateIds(const std::vector<ObjectCandidate>& candidates)
 }
 
 void publishBatches(CameraPublisher& camera,
+                    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters): fixed parameter order
                     double start_time,
                     int count,
                     const std::string& local_id,
@@ -523,23 +609,33 @@ void publishBatches(CameraPublisher& camera,
   }
 }
 
+void initializeWorker(const rclcpp::NodeOptions& options)
+{
+  auto graph = std::make_shared<SceneGraph>();
+  auto host  = std::make_shared<rclcpp::Node>("scene_graph_manager", options);
+  diagnostic_updater::Updater diagnostics(host);
+  TrackerWorker worker;
+  worker.initialize(*host, graph, "tracker", diagnostics);
+}
+
 TEST(MultiCameraTrackerParameters, AcceptsNamedIndependentInputs)
 {
-  EXPECT_NO_THROW(std::make_shared<ObjectTrackerComponent>(twoCameraOptions()));
+  EXPECT_NO_THROW(initializeWorker(twoCameraOptions()));
 }
 
 TEST(MultiCameraTrackerParameters, RejectsEmptyCameraName)
 {
   auto options = twoCameraOptions();
-  options.append_parameter_override("camera_names", std::vector<std::string>{"front", ""});
-  EXPECT_THROW(std::make_shared<ObjectTrackerComponent>(options), std::exception);
+  options.append_parameter_override("tracker.camera_names", std::vector<std::string>{"front", ""});
+  EXPECT_THROW(initializeWorker(options), std::exception);
 }
 
 TEST(MultiCameraTrackerParameters, RejectsDuplicateResolvedTopics)
 {
   auto options = twoCameraOptions();
-  options.append_parameter_override("cameras.rear.detections_2d_topic", "/front/detections_2d");
-  EXPECT_THROW(std::make_shared<ObjectTrackerComponent>(options), std::exception);
+  options.append_parameter_override("tracker.cameras.rear.detections_2d_topic",
+                                    "/front/detections_2d");
+  EXPECT_THROW(initializeWorker(options), std::exception);
 }
 
 TEST(MultiCameraTracker, CameraInputsDoNotCrossPair)
@@ -679,8 +775,8 @@ TEST(MultiCameraTracker, DelayedAndDuplicateSourceFramesDoNotReverseTrackTime)
   // The rear camera confirms the same object from older frames: it joins the global track
   // without moving its observation time backwards.
   publishBatches(harness.rear(), 9.9, 3, "2", 6.0, 120);
-  ASSERT_TRUE(harness.waitUntil(
-    [&harness]() { return containsCrop(harness.candidates().back(), 120, "rear_frame"); }, 2s));
+  // Its older crops are not stored (the graph only takes newer ones), so give the cycles time.
+  std::this_thread::sleep_for(300ms);
   const auto AFTER_DELAYED = harness.candidates();
   EXPECT_EQ(candidateIds(AFTER_DELAYED).size(), 1U);
   EXPECT_GE(rclcpp::Time(AFTER_DELAYED.back().last_seen).nanoseconds(), BEFORE_STAMP);
@@ -688,7 +784,7 @@ TEST(MultiCameraTracker, DelayedAndDuplicateSourceFramesDoNotReverseTrackTime)
   harness.rear().publish(rclcpp::Time(static_cast<int64_t>(9.92e9)), "2", 6.0, 121);
   EXPECT_TRUE(harness.noCropTagFor(121, 300ms));
   harness.front().publish(rclcpp::Time(static_cast<int64_t>(10.1e9)), "1", 4.0, 130);
-  ASSERT_TRUE(harness.waitForCandidates(BEFORE.size() + 2));
+  ASSERT_TRUE(harness.waitForCandidates(BEFORE.size() + 1));
   const auto ALL = harness.candidates();
   for (size_t index = 1; index < ALL.size(); ++index)
   {
@@ -713,7 +809,7 @@ TEST(MultiCameraTracker, ActiveCameraContinuesWhenOtherCameraHasNoTf)
 TEST(MultiCameraTracker, DefaultCameraPreservesTopicRemaps)
 {
   TrackerHarness harness(false);
-  ASSERT_TRUE(harness.ready(false));
+  ASSERT_TRUE(harness.ready());
   publishBatches(harness.front(), 13.0, 3, "1", 4.0, 160);
   ASSERT_TRUE(harness.waitForCandidates(1));
   EXPECT_EQ(candidateIds(harness.candidates()).size(), 1U);
@@ -751,7 +847,7 @@ TEST(MultiCameraTracker, LongDelayedSourceCanConfirmNewTrack)
 
 TEST(MultiCameraTracker, PublishedTrackSurvivesMergeWithNewerTrack)
 {
-  TrackerHarness harness(true, false, 5, 3.0, 0.1);
+  TrackerHarness harness(true, 5, 3.0, 0.1);
   ASSERT_TRUE(harness.ready());
 
   publishBatches(harness.front(), 20.0, 5, "1", 4.0, 170, 10.0);
@@ -760,9 +856,9 @@ TEST(MultiCameraTracker, PublishedTrackSurvivesMergeWithNewerTrack)
   ASSERT_TRUE(harness.setConfirmationThreshold(6));
 
   // The new track confirms with more observations than the published survivor.
-  const auto BEFORE_NEW_TRACK = harness.candidates().size();
   publishBatches(harness.rear(), 21.0, 5, "2", 8.0, 180, 10.0);
-  ASSERT_TRUE(harness.waitForCandidates(BEFORE_NEW_TRACK + 5));
+  // The rear track is not confirmed yet, so nothing changes in the graph to wait for.
+  std::this_thread::sleep_for(100ms);
   harness.rear().publish(
     rclcpp::Time(static_cast<int64_t>(21.05e9)), "2", 8.0, 181, true, true, true, "", 10.0);
   ASSERT_TRUE(harness.waitUntil(
@@ -778,7 +874,7 @@ TEST(MultiCameraTracker, PublishedTrackSurvivesMergeWithNewerTrack)
 
 TEST(MultiCameraTracker, SnapshotRetiresPublishedTrackAfterMerge)
 {
-  TrackerHarness harness(true, false, 3, 0.1, 0.1);
+  TrackerHarness harness(true, 3, 0.1, 0.1);
   ASSERT_TRUE(harness.ready());
 
   publishBatches(harness.front(), 30.0, 3, "1", 4.0, 190, 1.0);
@@ -828,6 +924,7 @@ TEST(TrackedObject, ObservationTimeNeverMovesBackwards)
 }
 
 ObjectCandidate
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters): fixed parameter order
 observation(const std::string& class_name, const std::string& frame_id, double x, double size)
 {
   ObjectCandidate observation;
@@ -861,6 +958,8 @@ TEST(MultiCameraTracker, ManualObservationsJoinTracksOrStartPersistentOnes)
     negative_stamp,
   });
   ASSERT_TRUE(RESPONSE);
+  // NOLINTBEGIN(bugprone-unchecked-optional-access): guarded by ASSERT_TRUE, which the check does
+  // not model
   EXPECT_FALSE(RESPONSE->success);
   ASSERT_EQ(RESPONSE->object_ids.size(), 6U);
   EXPECT_EQ(RESPONSE->object_ids[0], CAMERA_ID);
@@ -878,6 +977,7 @@ TEST(MultiCameraTracker, ManualObservationsJoinTracksOrStartPersistentOnes)
   EXPECT_EQ(RESPONSE->object_ids[5], 0);
   EXPECT_NE(RESPONSE->message.find("empty class_name"), std::string::npos);
   EXPECT_NE(RESPONSE->message.find("negative detection timestamp"), std::string::npos);
+  // NOLINTEND(bugprone-unchecked-optional-access)
 
   // The manual track outlives its one-cycle tracklet and carries the observation's crop.
   std::this_thread::sleep_for(100ms); // ~10 global cycles at 100 Hz
@@ -889,52 +989,207 @@ TEST(MultiCameraTracker, ManualObservationsJoinTracksOrStartPersistentOnes)
   EXPECT_NE(std::ranges::find(LATEST, CAMERA_ID, &ObjectCandidate::id), LATEST.end());
 }
 
-TEST(MultiCameraTracker, ManagerKeepsSharedGlobalIdsAndVisuals)
+TEST(MultiCameraTracker, GraphKeepsGlobalIdsAndCrops)
 {
-  TrackerHarness harness(true, true);
-  ASSERT_TRUE(harness.ready(true));
+  TrackerHarness harness;
+  ASSERT_TRUE(harness.ready());
+  const auto OBJECTS = [&harness]() { return harness.graph().getObjectNodes(); };
   publishBatches(harness.front(), 14.0, 3, "1", 4.0, 170);
-  ASSERT_TRUE(harness.waitForCandidates(1));
-  ASSERT_TRUE(TrackerHarness::waitUntil(
-    [&harness]() {
-      const auto OBJECTS = harness.getObjects();
-      return OBJECTS && OBJECTS->objects.size() == 1U;
-    },
-    2s));
-  const auto FIRST_OBJECTS = harness.getObjects();
-  ASSERT_TRUE(FIRST_OBJECTS);
-  const int64_t GLOBAL_ID = FIRST_OBJECTS->objects.front().id;
+  ASSERT_TRUE(TrackerHarness::waitUntil([&]() { return OBJECTS().size() == 1U; }, 2s));
+  const int64_t GLOBAL_ID = OBJECTS().front().id;
   publishBatches(harness.rear(), 15.0, 3, "42", 6.0, 180);
-  ASSERT_TRUE(harness.waitForCandidates(2));
   publishBatches(harness.front(), 16.0, 3, "1", 19.0, 190);
-  ASSERT_TRUE(harness.waitForCandidates(3));
+  ASSERT_TRUE(TrackerHarness::waitUntil([&]() { return OBJECTS().size() == 2U; }, 2s));
+  for (const auto& object : OBJECTS())
+  {
+    EXPECT_FALSE(object.crops.empty());
+    EXPECT_EQ(object.source, ObjectNode::SOURCE_CAMERA);
+    EXPECT_EQ(object.frame_id, "map");
+  }
+  EXPECT_TRUE(harness.graph().hasNode(GLOBAL_ID));
+}
+
+// D3 writeToGraph: create, move, class vote ignored.
+TEST(MultiCameraTracker, ConfirmedTrackCreatesNodeMovesItAndNeverTouchesItsClass)
+{
+  TrackerHarness harness;
+  ASSERT_TRUE(harness.ready());
+  publishBatches(harness.front(), 40.0, 3, "1", 4.0, 10);
+  ASSERT_TRUE(
+    TrackerHarness::waitUntil([&]() { return harness.graph().getObjectNodes().size() == 1U; }, 2s));
+  const auto CREATED = harness.graph().getObjectNodes().front();
+  EXPECT_EQ(CREATED.class_name, "cup");
+  EXPECT_DOUBLE_EQ(CREATED.bbox.center.position.x, 5.0); // front camera at map x = 1
+  // Another component renames it; the tracker keeps observing "cup" but must not rename it back.
+  ASSERT_TRUE(harness.graph().setObjectClass(CREATED.id, "mug"));
+  publishBatches(harness.front(), 41.0, 3, "1", 4.2, 11);
   ASSERT_TRUE(TrackerHarness::waitUntil(
-    [&harness]() {
-      const auto OBJECTS = harness.getObjects();
-      return OBJECTS && OBJECTS->objects.size() == 2U;
+    [&]() { return harness.graph().getObjectNodes().front().bbox.center.position.x > 5.0; }, 2s));
+  const auto MOVED = harness.graph().getObjectNodes().front();
+  EXPECT_EQ(MOVED.id, CREATED.id);
+  EXPECT_EQ(MOVED.class_name, "mug");
+  EXPECT_GT(rclcpp::Time(MOVED.last_seen), rclcpp::Time(CREATED.last_seen));
+}
+
+// D3: a newer crop is only offered; the graph takes it after crop_replace_min_interval_seconds.
+TEST(MultiCameraTracker, CropsFollowTheReplaceInterval)
+{
+  TrackerHarness harness(true, 3, 3.0, 10.0, 0.6, 10.0);
+  ASSERT_TRUE(harness.ready());
+  publishBatches(harness.front(), 50.0, 3, "1", 4.0, 10);
+  ASSERT_TRUE(
+    TrackerHarness::waitUntil([&]() { return harness.graph().getObjectNodes().size() == 1U; }, 2s));
+  publishBatches(harness.front(), 51.0, 3, "1", 4.0, 11); // 1 s later: too soon
+  std::this_thread::sleep_for(200ms);
+  EXPECT_EQ(harness.graph().getObjectNodes().front().crops.size(), 1U);
+  publishBatches(harness.front(), 61.0, 3, "1", 4.0, 12); // 11 s later: taken
+  ASSERT_TRUE(TrackerHarness::waitUntil(
+    [&]() { return harness.graph().getObjectNodes().front().crops.size() == 2U; }, 2s));
+}
+
+// D3: node deleted while its track lives: nothing more is written, the node is not recreated.
+TEST(MultiCameraTracker, DeletedNodeIsNotRecreatedWhileItsTrackLives)
+{
+  TrackerHarness harness;
+  ASSERT_TRUE(harness.ready());
+  publishBatches(harness.front(), 70.0, 3, "1", 4.0, 10);
+  ASSERT_TRUE(
+    TrackerHarness::waitUntil([&]() { return harness.graph().getObjectNodes().size() == 1U; }, 2s));
+  ASSERT_TRUE(harness.graph().removeNode(harness.graph().getObjectNodes().front().id));
+  publishBatches(harness.front(), 71.0, 3, "1", 4.0, 11);
+  publishBatches(harness.front(), 72.0, 3, "1", 4.0, 12);
+  std::this_thread::sleep_for(300ms);
+  EXPECT_TRUE(harness.graph().getObjectNodes().empty());
+}
+
+// An explicit sighting (add_observations) brings a deleted object back under the same id.
+TEST(MultiCameraTracker, ExplicitSightingRevivesDeletedObject)
+{
+  TrackerHarness harness;
+  ASSERT_TRUE(harness.ready());
+  publishBatches(harness.front(), 80.0, 3, "1", 4.0, 10);
+  ASSERT_TRUE(
+    TrackerHarness::waitUntil([&]() { return harness.graph().getObjectNodes().size() == 1U; }, 2s));
+  const int64_t ID = harness.graph().getObjectNodes().front().id;
+  ASSERT_TRUE(harness.graph().removeNode(ID));
+  publishBatches(harness.front(), 81.0, 3, "1", 4.0, 11); // camera sightings: stays hidden
+  std::this_thread::sleep_for(200ms);
+  ASSERT_TRUE(harness.graph().getObjectNodes().empty());
+  const auto RESPONSE = harness.addObservations({observation("cup", "map", 5.0, 1.0)});
+  ASSERT_TRUE(RESPONSE && RESPONSE->success) << (RESPONSE ? RESPONSE->message : "no response");
+  // NOLINTBEGIN(bugprone-unchecked-optional-access): guarded by ASSERT_TRUE, which the check does
+  // not model
+  EXPECT_EQ(RESPONSE->object_ids.front(), ID);
+  // NOLINTEND(bugprone-unchecked-optional-access)
+  ASSERT_TRUE(TrackerHarness::waitUntil([&]() { return harness.graph().hasNode(ID); }, 2s));
+}
+
+// D3: retire. A stale track whose pose a differently sized track now occupies is replaced.
+TEST(MultiCameraTracker, RetiredTrackLeavesTheGraph)
+{
+  TrackerHarness harness;
+  ASSERT_TRUE(harness.setParameter("tracker.association_max_size_ratio", 2.0));
+  ASSERT_TRUE(harness.ready());
+  publishBatches(harness.front(), 10.0, 3, "1", 4.0, 10, 1.0);
+  ASSERT_TRUE(
+    TrackerHarness::waitUntil([&]() { return harness.graph().getObjectNodes().size() == 1U; }, 2s));
+  const int64_t OLD_ID = harness.graph().getObjectNodes().front().id;
+  publishBatches(harness.rear(), 100.0, 3, "2", 6.0, 20, 10.0); // 90 s later > stale_timeout
+  ASSERT_TRUE(TrackerHarness::waitUntil(
+    [&]() {
+      const auto NODES = harness.graph().getObjectNodes();
+      return NODES.size() == 1U && NODES.front().id != OLD_ID;
     },
     2s));
-  const auto OBJECTS = harness.getObjects();
-  ASSERT_TRUE(OBJECTS);
-  std::vector<int64_t> ids;
-  for (const auto& object : OBJECTS->objects)
-  {
-    ids.push_back(object.id);
-  }
-  EXPECT_NE(std::ranges::find(ids, GLOBAL_ID), ids.end());
-  const auto VISUALS = harness.getVisuals(ids);
-  ASSERT_TRUE(VISUALS);
-  ASSERT_EQ(VISUALS->visuals.size(), 2U);
-  for (const auto& visuals : VISUALS->visuals)
-  {
-    ASSERT_FALSE(visuals.image_crops.empty());
-    if (visuals.object_id == GLOBAL_ID)
-    {
-      EXPECT_TRUE(std::ranges::any_of(visuals.image_crops, [](const auto& crop) {
-        return !crop.data.empty() && crop.data.front() == 180;
-      }));
-    }
-  }
+}
+
+// D3: merge. The younger identity's node goes, the older one survives.
+TEST(MultiCameraTracker, MergedTrackLeavesTheGraph)
+{
+  TrackerHarness harness(true, 3, 0.1, 0.1);
+  ASSERT_TRUE(harness.ready());
+  publishBatches(harness.front(), 30.0, 3, "1", 4.0, 190, 1.0);
+  publishBatches(harness.rear(), 30.1, 3, "2", 8.0, 191, 1.0);
+  ASSERT_TRUE(
+    TrackerHarness::waitUntil([&]() { return harness.graph().getObjectNodes().size() == 2U; }, 2s));
+  publishBatches(harness.front(), 31.0, 3, "1", 4.0, 192, 20.0);
+  publishBatches(harness.rear(), 31.1, 3, "2", 8.0, 193, 20.0);
+  ASSERT_TRUE(
+    TrackerHarness::waitUntil([&]() { return harness.graph().getObjectNodes().size() == 1U; }, 2s));
+}
+
+// D3/D4: add_object starts a confirmed track (no confirmation count) that is then a normal track.
+TEST(MultiCameraTracker, AddObjectTrackIsUpdatedMergedAndRetiredLikeAnyOther)
+{
+  TrackerHarness harness;
+  ASSERT_TRUE(harness.setParameter("tracker.association_max_size_ratio", 2.0));
+  ASSERT_TRUE(harness.ready());
+
+  const auto BAD = harness.addObject("", "map", 0.0, 0.5);
+  ASSERT_TRUE(BAD);
+  // NOLINTBEGIN(bugprone-unchecked-optional-access): guarded by ASSERT_TRUE, which the check does
+  // not model
+  EXPECT_FALSE(BAD->success);
+
+  const auto ADDED = harness.addObject("cup", "map", 5.0, 1.0, 10);
+  ASSERT_TRUE(ADDED);
+  ASSERT_TRUE(ADDED->success) << ADDED->message;
+  const int64_t ID = ADDED->object_id;
+  ASSERT_TRUE(TrackerHarness::waitUntil([&]() { return harness.graph().hasNode(ID); }, 2s));
+  // NOLINTEND(bugprone-unchecked-optional-access)
+  const auto NODE = objectNode(harness.graph(), ID);
+  EXPECT_EQ(NODE.source, ObjectNode::SOURCE_MANUAL);
+  EXPECT_EQ(NODE.class_name, "cup");
+  ASSERT_EQ(NODE.crops.size(), 1U); // JPEG-encoded on ingress
+  EXPECT_EQ(NODE.crops.front()->format, "bgr8; jpeg compressed bgr8");
+
+  // Updated: a camera sighting of the same cup (map x = 5) joins it and moves its last_seen.
+  publishBatches(harness.front(), 12.0, 3, "1", 4.0, 30, 1.0);
+  ASSERT_TRUE(TrackerHarness::waitUntil(
+    [&]() {
+      const auto NODES = harness.graph().getObjectNodes();
+      return NODES.size() == 1U && NODES.front().id == ID && NODES.front().last_seen.sec >= 12;
+    },
+    2s));
+  EXPECT_EQ(objectNode(harness.graph(), ID).source, ObjectNode::SOURCE_MANUAL);
+
+  // Retired: a differently sized track much later takes over its pose.
+  publishBatches(harness.rear(), 200.0, 3, "2", 6.0, 40, 10.0);
+  ASSERT_TRUE(TrackerHarness::waitUntil(
+    [&]() {
+      const auto NODES = harness.graph().getObjectNodes();
+      return NODES.size() == 1U && NODES.front().id != ID;
+    },
+    2s));
+}
+
+// D3/D4: an add_object track overlapping a camera track merges into it (older id survives; the
+// merged track takes the newer observation time, here the manual one).
+TEST(MultiCameraTracker, AddObjectTrackMergesIntoOverlappingCameraTrack)
+{
+  TrackerHarness harness;
+  ASSERT_TRUE(harness.ready());
+  publishBatches(harness.rear(), 10.0, 3, "9", 6.0, 50, 1.0); // map x = 5
+  ASSERT_TRUE(
+    TrackerHarness::waitUntil([&]() { return harness.graph().getObjectNodes().size() == 1U; }, 2s));
+  const int64_t CAMERA_ID = harness.graph().getObjectNodes().front().id;
+  const auto ADDED        = harness.addObject("cup", "map", 5.0, 1.0, 20);
+  ASSERT_TRUE(ADDED && ADDED->success);
+  // NOLINTBEGIN(bugprone-unchecked-optional-access): guarded by ASSERT_TRUE, which the check does
+  // not model
+  EXPECT_NE(ADDED->object_id, CAMERA_ID);
+  // NOLINTEND(bugprone-unchecked-optional-access)
+  ASSERT_TRUE(TrackerHarness::waitUntil(
+    [&]() {
+      const auto NODES = harness.graph().getObjectNodes();
+      return NODES.size() == 1U && NODES.front().id == CAMERA_ID &&
+             NODES.front().last_seen.sec == 20;
+    },
+    2s));
+  // NOLINTBEGIN(bugprone-unchecked-optional-access): guarded by ASSERT_TRUE, which the check does
+  // not model
+  EXPECT_FALSE(harness.graph().hasNode(ADDED->object_id));
+  // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 } // namespace

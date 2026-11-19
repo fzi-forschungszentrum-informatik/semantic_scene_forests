@@ -39,7 +39,7 @@
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
-  <exec_depend>semantic_scene_forests_object_manager</exec_depend>
+  <exec_depend>semantic_scene_forests_manager</exec_depend>
   <exec_depend>semantic_scene_forests_object_tracker</exec_depend>
   <exec_depend>semantic_scene_forests_generation</exec_depend>
   <exec_depend>semantic_scene_forests_query</exec_depend>

@@ -26,17 +26,15 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-from collections.abc import Sequence
-from typing import TypeAlias
+from datetime import timedelta
+from typing import ClassVar, TypeAlias
 
-from sensor_msgs.msg import Image
-from vision_msgs.msg import Detection3D
+from builtin_interfaces.msg import Time
+from vision_msgs.msg import BoundingBox3D
 
 from semantic_scene_forests_msgs.msg import SceneGraph as SceneGraphMsg
 
-Visuals: TypeAlias = tuple[
-    Image | None, Image | None, Image | None, Image | None, Image | None
-]
+Crop: TypeAlias = tuple[Time, bytes]  # (stamp, JPEG bytes)
 Node: TypeAlias = ConceptNode | ObjectNode
 NodeEdge: TypeAlias = tuple[int, Edge]
 GraphEdge: TypeAlias = tuple[int, int, Edge]
@@ -49,6 +47,7 @@ class GraphErrorKind:
     EDGE_ALREADY_EXISTS: GraphErrorKind
     CYCLE: GraphErrorKind
     GRAPH_EDITING_FAILED: GraphErrorKind
+    INVALID_LABEL: GraphErrorKind
 
 class GraphError(RuntimeError):
     kind: GraphErrorKind
@@ -56,21 +55,33 @@ class GraphError(RuntimeError):
 class ConceptNode:
     id: int
     concept_name: str
+    workers: dict[str, bool]  # worker name -> processed
 
     def __init__(self, id: int, concept_name: str) -> None: ...
 
 class ObjectNode:
+    SOURCE_CAMERA: ClassVar[int]
+    SOURCE_MANUAL: ClassVar[int]
     id: int
     class_name: str
-    detection: Detection3D | None
-    visuals: Visuals
+    bbox: BoundingBox3D
+    frame_id: str
+    source: int
+    last_seen: Time
+    last_updated: Time
+    crops: list[Crop]
+    workers: dict[str, bool]  # worker name -> processed
 
     def __init__(
         self,
         id: int,
         class_name: str,
-        detection: Detection3D | None = None,
-        visuals: Sequence[Image | None] | None = None,
+        bbox: BoundingBox3D | None = None,
+        frame_id: str = "",
+        source: int = ...,
+        last_seen: Time | None = None,
+        last_updated: Time | None = None,
+        crops: list[Crop] = ...,
     ) -> None: ...
 
 class Edge:
@@ -79,19 +90,20 @@ class Edge:
     def __init__(self, label: str) -> None: ...
 
 class SceneGraph:
-    def add_object_node(
-        self,
-        class_name: str,
-        detection: Detection3D | None = None,
-        visuals: Sequence[Image | None] | None = None,
-    ) -> int: ...
-    def add_object_node_with_id(
-        self,
-        id: int,
-        class_name: str,
-        detection: Detection3D | None = None,
-        visuals: Sequence[Image | None] | None = None,
-    ) -> int: ...
+    def allocate_id(self) -> int: ...
+    def add_object(self, node: ObjectNode) -> None: ...
+    def update_object_pose(
+        self, id: int, bbox: BoundingBox3D, last_seen: Time
+    ) -> None: ...
+    def set_crop_policy(self, max_crops: int, min_interval: timedelta) -> None: ...
+    def offer_crop(self, id: int, stamp: Time, jpeg: bytes) -> bool: ...
+    def set_object_class(self, id: int, class_name: str) -> None: ...
+    def find_or_add_concept(self, label: str) -> tuple[int, bool]: ...
+    def find_concept(self, label: str) -> int | None: ...
+    def add_concept_edge(self, source_id: int, relation: str, label: str) -> int: ...
+    def mark_processed(self, id: int, worker: str) -> None: ...
+    def unprocessed_by(self, worker: str) -> list[int]: ...
+    def prune_isolated_concepts(self) -> list[int]: ...
     def add_concept_node(self, concept_name: str) -> int: ...
     def add_concept_node_with_id(self, id: int, concept_name: str) -> int: ...
     def remove_node(self, id: int) -> Node: ...

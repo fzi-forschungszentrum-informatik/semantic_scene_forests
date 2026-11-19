@@ -36,6 +36,7 @@
 #include <QPointF>
 #include <QString>
 #include <QStyleOptionGraphicsItem>
+#include <utility>
 
 #include "semantic_scene_forests_visualization_rqt/color_palette.hpp"
 #include "semantic_scene_forests_visualization_rqt/edge_item.hpp"
@@ -56,10 +57,10 @@ QFont labelFont()
 
 } // namespace
 
-NodeItem::NodeItem(int64_t id, NodeKind kind, const std::string& label)
+NodeItem::NodeItem(int64_t id, NodeKind kind, std::string label)
   : m_id{id}
   , m_kind{kind}
-  , m_label{label}
+  , m_label{std::move(label)}
 {
   setFlag(QGraphicsItem::ItemIsMovable, true);
   setFlag(QGraphicsItem::ItemIsSelectable, true);
@@ -92,20 +93,20 @@ void NodeItem::setHighlighted(bool highlighted)
 
 void NodeItem::rebuildStaticLabel()
 {
-  const QString text = QString{"[%1] %2"}.arg(m_id).arg(QString::fromStdString(m_label));
-  m_static_label.setText(text);
+  const QString TEXT = QString{"[%1] %2"}.arg(m_id).arg(QString::fromStdString(m_label));
+  m_static_label.setText(TEXT);
   m_static_label.setTextFormat(Qt::PlainText);
   m_static_label.prepare(QTransform{}, labelFont());
 }
 
 QRectF NodeItem::boundingRect() const
 {
-  const auto label_size = m_static_label.size();
-  const qreal r         = radius();
-  const qreal half_w    = std::max<qreal>(r, label_size.width() / 2.0) + 2.0;
-  const qreal top       = -r - LABEL_GAP - label_size.height() - 2.0;
-  const qreal bottom    = r + 2.0;
-  return QRectF{QPointF{-half_w, top}, QPointF{half_w, bottom}};
+  const auto LABEL_SIZE = m_static_label.size();
+  const qreal R         = radius();
+  const qreal HALF_W    = std::max<qreal>(R, LABEL_SIZE.width() / 2.0) + 2.0;
+  const qreal TOP       = -R - LABEL_GAP - LABEL_SIZE.height() - 2.0;
+  const qreal BOTTOM    = R + 2.0;
+  return QRectF{QPointF{-HALF_W, TOP}, QPointF{HALF_W, BOTTOM}};
 }
 
 QColor NodeItem::fillColor() const
@@ -131,19 +132,19 @@ void NodeItem::paint(QPainter* painter,
 {
   painter->setRenderHint(QPainter::Antialiasing, true);
 
-  const qreal r     = radius();
-  const QColor fill = fillColor();
-  QPen border{fill.darker(160)};
+  const qreal R     = radius();
+  const QColor FILL = fillColor();
+  QPen border{FILL.darker(160)};
   border.setWidthF(1.0);
   painter->setPen(border);
-  painter->setBrush(QBrush{fill});
-  painter->drawEllipse(QPointF{0.0, 0.0}, r, r);
+  painter->setBrush(QBrush{FILL});
+  painter->drawEllipse(QPointF{0.0, 0.0}, R, R);
 
   painter->setFont(labelFont());
   painter->setPen(QPen{QColor{220, 220, 220}});
-  const auto label_size = m_static_label.size();
-  const QPointF label_pos{-label_size.width() / 2.0, -r - LABEL_GAP - label_size.height()};
-  painter->drawStaticText(label_pos, m_static_label);
+  const auto LABEL_SIZE = m_static_label.size();
+  const QPointF LABEL_POS{-LABEL_SIZE.width() / 2.0, -R - LABEL_GAP - LABEL_SIZE.height()};
+  painter->drawStaticText(LABEL_POS, m_static_label);
 }
 
 QVariant NodeItem::itemChange(GraphicsItemChange change, const QVariant& value)

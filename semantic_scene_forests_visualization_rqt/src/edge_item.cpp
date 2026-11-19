@@ -62,6 +62,7 @@ QFont edgeLabelFont()
 
 } // namespace
 
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters): fixed parameter order
 EdgeItem::EdgeItem(NodeItem* source, NodeItem* target, const std::string& label)
   : m_source{source}
   , m_target{target}
@@ -84,30 +85,30 @@ void EdgeItem::updateGeometry()
     m_p2 = QPointF{0.0, 0.0};
     return;
   }
-  const QPointF src   = m_source->pos();
-  const QPointF dst   = m_target->pos();
-  const QPointF delta = dst - src;
-  const qreal length  = std::hypot(delta.x(), delta.y());
-  if (length < 1e-6)
+  const QPointF SRC   = m_source->pos();
+  const QPointF DST   = m_target->pos();
+  const QPointF DELTA = DST - SRC;
+  const qreal LENGTH  = std::hypot(DELTA.x(), DELTA.y());
+  if (LENGTH < 1e-6)
   {
-    m_p1 = src;
-    m_p2 = dst;
+    m_p1 = SRC;
+    m_p2 = DST;
     return;
   }
-  const QPointF dir = delta / length;
-  m_p1              = src + (dir * (m_source->radius() + NODE_MARGIN_PAD));
-  m_p2              = dst - (dir * (m_target->radius() + NODE_MARGIN_PAD));
+  const QPointF DIR = DELTA / LENGTH;
+  m_p1              = SRC + (DIR * (m_source->radius() + NODE_MARGIN_PAD));
+  m_p2              = DST - (DIR * (m_target->radius() + NODE_MARGIN_PAD));
   update();
 }
 
 QRectF EdgeItem::boundingRect() const
 {
-  const qreal min_x = std::min(m_p1.x(), m_p2.x());
-  const qreal min_y = std::min(m_p1.y(), m_p2.y());
-  const qreal max_x = std::max(m_p1.x(), m_p2.x());
-  const qreal max_y = std::max(m_p1.y(), m_p2.y());
-  const qreal pad   = ARROW_SIZE + 4.0 + m_static_label.size().height();
-  return QRectF{QPointF{min_x - pad, min_y - pad}, QPointF{max_x + pad, max_y + pad}};
+  const qreal MIN_X = std::min(m_p1.x(), m_p2.x());
+  const qreal MIN_Y = std::min(m_p1.y(), m_p2.y());
+  const qreal MAX_X = std::max(m_p1.x(), m_p2.x());
+  const qreal MAX_Y = std::max(m_p1.y(), m_p2.y());
+  const qreal PAD   = ARROW_SIZE + 4.0 + m_static_label.size().height();
+  return QRectF{QPointF{MIN_X - PAD, MIN_Y - PAD}, QPointF{MAX_X + PAD, MAX_Y + PAD}};
 }
 
 QPainterPath EdgeItem::shape() const
@@ -136,33 +137,33 @@ void EdgeItem::paint(QPainter* painter,
   painter->drawLine(m_p1, m_p2);
 
   // Arrowhead at m_p2 pointing along (m_p2 - m_p1).
-  const QPointF delta = m_p2 - m_p1;
-  const qreal length  = std::hypot(delta.x(), delta.y());
-  if (length < 1e-6)
+  const QPointF DELTA = m_p2 - m_p1;
+  const qreal LENGTH  = std::hypot(DELTA.x(), DELTA.y());
+  if (LENGTH < 1e-6)
   {
     return;
   }
-  const qreal angle      = std::atan2(delta.y(), delta.x());
-  const qreal wing_angle = std::numbers::pi / 7.0;
-  const QPointF tip      = m_p2;
-  const QPointF left{tip.x() - (ARROW_SIZE * std::cos(angle - wing_angle)),
-                     tip.y() - (ARROW_SIZE * std::sin(angle - wing_angle))};
-  const QPointF right{tip.x() - (ARROW_SIZE * std::cos(angle + wing_angle)),
-                      tip.y() - (ARROW_SIZE * std::sin(angle + wing_angle))};
+  const qreal ANGLE      = std::atan2(DELTA.y(), DELTA.x());
+  const qreal WING_ANGLE = std::numbers::pi / 7.0;
+  const QPointF TIP      = m_p2;
+  const QPointF LEFT{TIP.x() - (ARROW_SIZE * std::cos(ANGLE - WING_ANGLE)),
+                     TIP.y() - (ARROW_SIZE * std::sin(ANGLE - WING_ANGLE))};
+  const QPointF RIGHT{TIP.x() - (ARROW_SIZE * std::cos(ANGLE + WING_ANGLE)),
+                      TIP.y() - (ARROW_SIZE * std::sin(ANGLE + WING_ANGLE))};
   QPolygonF head;
-  head << tip << left << right;
+  head << TIP << LEFT << RIGHT;
   painter->setBrush(QBrush{m_color});
   painter->drawPolygon(head);
 
   // Label at midpoint, offset slightly perpendicular to the line.
   painter->setFont(edgeLabelFont());
   painter->setPen(QPen{m_color.lighter(140)});
-  const QPointF mid = (m_p1 + m_p2) / 2.0;
-  const QPointF perp{-delta.y() / length, delta.x() / length};
-  const auto label_size = m_static_label.size();
-  const QPointF label_pos =
-    mid + (perp * 6.0) - QPointF{label_size.width() / 2.0, label_size.height() / 2.0};
-  painter->drawStaticText(label_pos, m_static_label);
+  const QPointF MID = (m_p1 + m_p2) / 2.0;
+  const QPointF PERP{-DELTA.y() / LENGTH, DELTA.x() / LENGTH};
+  const auto LABEL_SIZE = m_static_label.size();
+  const QPointF LABEL_POS =
+    MID + (PERP * 6.0) - QPointF{LABEL_SIZE.width() / 2.0, LABEL_SIZE.height() / 2.0};
+  painter->drawStaticText(LABEL_POS, m_static_label);
 }
 
 } // namespace semantic_scene_forests_visualization_rqt

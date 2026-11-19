@@ -30,7 +30,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cstdlib>
 #include <stdexcept>
 #include <utility>
 
@@ -66,23 +65,14 @@ DecideFn makeDecisionClient(const object_tracker::Params::Arbiter& params)
   const auto FORMAT = parseDecisionProvider(params.provider);
   if (!FORMAT)
   {
-    throw std::invalid_argument("arbiter.provider must be openai, openrouter, ollama or vllm: " +
-                                params.provider);
+    throw std::invalid_argument(
+      "tracker.arbiter.provider must be openai, openrouter, ollama or vllm: " + params.provider);
   }
-  // Keys stay out of committed configs: an empty key falls back to the provider's env variable.
   // Local servers (Ollama, vLLM) need no key.
   const bool LOCAL = FORMAT == oai::DecisionFormat::OLLAMA || FORMAT == oai::DecisionFormat::VLLM;
-  std::string api_key = params.api_key;
-  if (api_key.empty() && !LOCAL)
+  if (params.api_key.empty() && !LOCAL)
   {
-    const char* env =
-      std::getenv(FORMAT == oai::DecisionFormat::OPENAI ? "OPENAI_API_KEY" : "OPENROUTER_API_KEY");
-    api_key = env ? env : "";
-  }
-  if (api_key.empty() && !LOCAL)
-  {
-    throw std::invalid_argument("arbiter.api_key (or OPENAI_API_KEY / OPENROUTER_API_KEY) is "
-                                "required for provider " +
+    throw std::invalid_argument("tracker.arbiter.api_key is required for provider " +
                                 params.provider);
   }
   nlohmann::json extra_body;
@@ -91,12 +81,13 @@ DecideFn makeDecisionClient(const object_tracker::Params::Arbiter& params)
     extra_body = nlohmann::json::parse(params.extra_body, nullptr, false);
     if (!extra_body.is_object())
     {
-      throw std::invalid_argument("arbiter.extra_body must be a JSON object: " + params.extra_body);
+      throw std::invalid_argument("tracker.arbiter.extra_body must be a JSON object: " +
+                                  params.extra_body);
     }
   }
   oai::ClientBuilder builder;
   builder.baseUrl(params.server_url)
-    .apiKey(api_key)
+    .apiKey(params.api_key)
     .model(params.model)
     .extraBody(extra_body)
     .connectTimeout(std::chrono::seconds{5})
@@ -178,6 +169,7 @@ void ArbiterWorker::run(const std::stop_token& stop)
   }
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): refactor out of scope
 ArbiterResult ArbiterWorker::decide(const DecideFn& decide,
                                     oai::DecisionFormat format,
                                     const std::string& model,
@@ -198,7 +190,7 @@ ArbiterResult ArbiterWorker::decide(const DecideFn& decide,
     }
     for (const auto& crop : *crops)
     {
-      builder.image(cv_bridge::toCvCopy(crop, "bgr8")->image);
+      builder.image(cv_bridge::toCvCopy(*crop, "bgr8")->image);
     }
   };
   const auto SIZE = [](const Eigen::Vector3d& v) { return nlohmann::json{v.x(), v.y(), v.z()}; };
@@ -306,7 +298,9 @@ ArbiterResult ArbiterWorker::decide(const DecideFn& decide,
       return result;
     }
     result.object_probability = answers[1].probability;
-    result.same_probability   = std::min(*answers[0].probability, *answers[1].probability);
+    // both probabilities were checked above
+    result.same_probability =
+      std::min(answers[0].probability.value_or(0.0), answers[1].probability.value_or(0.0));
   }
   // An invalid or missing choice leaves the label empty: the vote stays in charge.
   const auto CHOICE =

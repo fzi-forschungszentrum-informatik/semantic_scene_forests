@@ -17,7 +17,9 @@ RViz display plugin for showing managed objects and scene graph context in 3D.
 
 | Kind | Name | Type |
 |---|---|---|
-| Display input | configurable RViz topic | `semantic_scene_forests_object_msgs/msg/ManagedObjectArray` |
+| Display input | configurable RViz topic (default `scene_graph`) | `semantic_scene_forests_msgs/msg/SceneGraph` (object nodes drawn as boxes) |
+| Action client | `attribute_objects` | `semantic_scene_forests_msgs/action/RunWorker` |
+| Action client | `generate_concepts` | `semantic_scene_forests_msgs/action/RunWorker` |
 
 ## Entry Point
 

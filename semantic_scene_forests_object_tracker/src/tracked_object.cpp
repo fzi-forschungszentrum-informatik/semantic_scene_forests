@@ -31,33 +31,36 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <utility>
 
 #include <vision_msgs/msg/object_hypothesis_with_pose.hpp>
 
 namespace semantic_scene_forests_object_tracker {
 
-TrackedObject::TrackedObject(const DetectionAdapter& initial_detection,
-                             const rclcpp::Time& initial_time,
-                             uint64_t track_id,
-                             double measurement_std,
-                             double process_noise_std,
-                             int confirmation_threshold,
-                             size_t max_crops,
-                             double bbox_size_alpha)
+TrackedObject::TrackedObject(
+  const DetectionAdapter& initial_detection,
+  rclcpp::Time initial_time,
+  // NOLINTNEXTLINE(bugprone-easily-swappable-parameters): fixed parameter order
+  uint64_t track_id,
+  double measurement_std,
+  double process_noise_std,
+  int confirmation_threshold,
+  size_t max_crops,
+  double bbox_size_alpha)
   : track_id(track_id)
   , class_id(initial_detection.class_id)
   , class_name(initial_detection.class_name)
   , bbox3d_frame_id(initial_detection.frame_id)
   , score(initial_detection.score)
   , confirmed(confirmation_threshold <= 1)
-  , observation_count(1)
-  , last_seen(initial_time)
+  , last_seen(std::move(initial_time))
   , last_detection(initial_detection)
   , m_process_noise_std(process_noise_std)
   , m_bbox_size_alpha(bbox_size_alpha)
   , m_confirmation_threshold(confirmation_threshold)
   , m_max_crops(max_crops)
 {
+  // NOLINTNEXTLINE(readability-simplify-boolean-expr): the negation must also reject NaN
   if (!(bbox_size_alpha > 0.0 && bbox_size_alpha <= 1.0))
   {
     throw std::invalid_argument("bbox_size_alpha must be in (0, 1]");
@@ -148,11 +151,14 @@ double TrackedObject::mahalanobisDistance(const DetectionAdapter& detection)
   return std::sqrt(std::max(0.0, dist_sq));
 }
 
-double TrackedObject::coveredFraction(const Eigen::Vector3d& center_a,
-                                      const Eigen::Vector3d& size_a,
-                                      const Eigen::Vector3d& center_b,
-                                      const Eigen::Vector3d& size_b,
-                                      double min_extent)
+double TrackedObject::coveredFraction(
+  // NOLINTNEXTLINE(bugprone-easily-swappable-parameters): fixed parameter order
+  const Eigen::Vector3d& center_a,
+  const Eigen::Vector3d& size_a,
+  // NOLINTNEXTLINE(bugprone-easily-swappable-parameters): fixed parameter order
+  const Eigen::Vector3d& center_b,
+  const Eigen::Vector3d& size_b,
+  double min_extent)
 {
   const Eigen::Vector3d A_SIZE    = size_a.cwiseMax(min_extent);
   const Eigen::Vector3d B_SIZE    = size_b.cwiseMax(min_extent);
@@ -287,18 +293,14 @@ vision_msgs::msg::Detection3D TrackedObject::toDetection3D() const
   return det;
 }
 
-void TrackedObject::addCrop(const sensor_msgs::msg::Image& crop)
+void TrackedObject::addCrop(CropPtr crop)
 {
   if (m_crops.size() >= m_max_crops)
   {
     m_crops.pop_front();
   }
-  m_crops.push_back(crop);
-}
-
-std::vector<sensor_msgs::msg::Image> TrackedObject::getCrops() const
-{
-  return {m_crops.begin(), m_crops.end()};
+  m_crops.push_back(std::move(crop));
+  ++m_crop_revision;
 }
 
 } // namespace semantic_scene_forests_object_tracker

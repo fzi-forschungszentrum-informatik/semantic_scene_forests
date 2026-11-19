@@ -39,6 +39,7 @@
 
 #include <rclcpp/logger.hpp>
 #include <rclcpp/time.hpp>
+#include <semantic_scene_forests/scene_graph.hpp>
 
 #include "arbiter_worker.hpp"
 #include "camera_tracker.hpp"
@@ -81,7 +82,9 @@ public:
     std::string last_error;
   };
 
-  explicit GlobalTracker(rclcpp::Logger logger);
+  // New track IDs are allocated by `graph`: a global track's ID is its scene graph node ID.
+  GlobalTracker(rclcpp::Logger logger,
+                std::shared_ptr<fzi::semantic_scene_forests::SceneGraph> graph);
 
   // One reconciliation cycle. `results` are finished arbiter answers; returns the new
   // arbiter requests (always empty when arbiter_enabled is false).
@@ -90,19 +93,37 @@ public:
                                     const object_tracker::Params& params,
                                     bool arbiter_enabled);
 
-  const std::vector<std::unique_ptr<TrackedObject>>& tracks() const { return m_tracks; }
-  bool isStale(const TrackedObject& track, const object_tracker::Params& params) const;
+  // Adds a track confirmed at once: no confirmation count, no label check (add_object). Returns
+  // its ID. `crops` are JPEG; the track is normal from then on (updated, merged, retired).
+  uint64_t addConfirmed(const std::string& class_name,
+                        const Eigen::Vector3d& position,
+                        const Eigen::Vector3d& size,
+                        const rclcpp::Time& stamp,
+                        const std::vector<CropPtr>& crops,
+                        const object_tracker::Params& params);
+  [[nodiscard]] const std::vector<std::unique_ptr<TrackedObject>>& tracks() const
+  {
+    return m_tracks;
+  }
+  [[nodiscard]] bool isStale(const TrackedObject& track,
+                             const object_tracker::Params& params) const;
   // True while a new track waits for its label check; held tracks are not published.
-  bool isHeld(const TrackedObject& track) const { return m_held.contains(track.track_id); }
-  bool isHeld(uint64_t id) const { return m_held.contains(id); }
+  [[nodiscard]] bool isHeld(const TrackedObject& track) const
+  {
+    return m_held.contains(track.track_id);
+  }
+  [[nodiscard]] bool isHeld(uint64_t id) const { return m_held.contains(id); }
   // Global track a tracklet of the last cycle is linked to; nullopt if it was skipped or its
   // track was removed. Links end in the first cycle that no longer contains the tracklet.
-  std::optional<uint64_t> linkedTrack(const std::string& camera, uint64_t local_id) const;
-  // The ID the next new global track gets; IDs only grow.
-  uint64_t nextId() const { return m_next_id; }
-  Stats stats(const object_tracker::Params& params) const;
+  [[nodiscard]] std::optional<uint64_t> linkedTrack(const std::string& camera,
+                                                    uint64_t local_id) const;
+  // IDs of the tracks created in the last cycle, in creation order.
+  [[nodiscard]] const std::vector<uint64_t>& createdLastCycle() const { return m_created; }
+  // {merged-away id, surviving id} of the merges in the last cycle, in order.
+  [[nodiscard]] const std::vector<TrackPair>& mergedLastCycle() const { return m_merged; }
+  [[nodiscard]] Stats stats(const object_tracker::Params& params) const;
   // Labels the arbiter judged not to be physical objects; only grows.
-  const std::set<std::string>& rejectedLabels() const { return m_rejected_labels; }
+  [[nodiscard]] const std::set<std::string>& rejectedLabels() const { return m_rejected_labels; }
 
 private:
   using LinkKey = std::pair<std::string, uint64_t>; // {camera, local id}
@@ -113,7 +134,7 @@ private:
   };
 
   TrackedObject* find(uint64_t id);
-  bool labelAccepted(const TrackedObject& track, const std::string& label) const;
+  [[nodiscard]] bool labelAccepted(const TrackedObject& track, const std::string& label) const;
   // Starts a global track; with the arbiter it is held and a label check is returned.
   std::optional<ArbiterRequest>
   createFrom(const Tracklet& tracklet, const object_tracker::Params& params, bool arbiter_enabled);
@@ -126,6 +147,7 @@ private:
   void eraseRemoved();
 
   rclcpp::Logger m_logger;
+  std::shared_ptr<fzi::semantic_scene_forests::SceneGraph> m_graph;
   std::vector<std::unique_ptr<TrackedObject>> m_tracks;
   std::map<LinkKey, Link> m_links;
   std::map<uint64_t, std::set<std::string>> m_accepted_labels;
@@ -137,7 +159,8 @@ private:
   std::set<std::string> m_rejected_labels; // not physical objects, ignored for the session
   std::set<LinkKey> m_rejected_links;      // camera tracks of rejected tracks, ignored while alive
   std::optional<rclcpp::Time> m_latest;    // latest observation time across all cameras
-  uint64_t m_next_id{1};
+  std::vector<uint64_t> m_created;         // tracks created in the last cycle
+  std::vector<TrackPair> m_merged;         // {removed, survivor} merges in the last cycle
   size_t m_decisions{0};
   size_t m_merges{0};
   size_t m_replacements{0};

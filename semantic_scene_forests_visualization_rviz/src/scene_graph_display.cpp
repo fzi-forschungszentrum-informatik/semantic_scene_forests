@@ -38,6 +38,7 @@
 #include <QMetaObject>
 #include <QMouseEvent>
 #include <QVBoxLayout>
+#include <utility>
 
 #include <OgreEntity.h>
 #include <OgreSceneManager.h>
@@ -56,7 +57,6 @@
 #include "rviz_common/view_manager.hpp"
 #include "rviz_rendering/render_window.hpp"
 #include "semantic_scene_forests_msgs/msg/scene_graph.hpp"
-#include "semantic_scene_forests_object_msgs/msg/managed_object.hpp"
 #include "semantic_scene_forests_visualization_rviz/image_viewer_dialog.hpp"
 #include "semantic_scene_forests_visualization_rviz/scene_graph_object_selection_handler.hpp"
 
@@ -66,7 +66,7 @@ namespace {
 
 // Seconds since the object was last observed, measured with RViz's ROS clock (sim time when
 // use_sim_time is set); nullopt for unset or future stamps.
-std::optional<double> ageSeconds(const semantic_scene_forests_object_msgs::msg::ManagedObject& obj,
+std::optional<double> ageSeconds(const fzi::semantic_scene_forests::ObjectNode& obj,
                                  const rclcpp::Time& now)
 {
   const rclcpp::Time LAST_SEEN(obj.last_seen, now.get_clock_type());
@@ -121,6 +121,10 @@ void SceneGraphDisplay::onInitialize()
 {
   rviz_common::Display::onInitialize();
 
+  m_retry_timer = new QTimer(this);
+  connect(m_retry_timer, &QTimer::timeout, this, &SceneGraphDisplay::retryIncompleteRender);
+  m_retry_timer->start(1000);
+
   // The MessageFilter will drop messages with empty header.frame_id.
   // We handle TF transforms per-object internally, so we don't need
   // the MessageFilter's automatic transformation. Messages will be
@@ -133,21 +137,6 @@ void SceneGraphDisplay::onInitialize()
   m_scene_graph_node->setVisible(true);
   m_object_nodes_node->setVisible(true);
   m_labels_node->setVisible(true);
-
-  // Topic properties (first)
-  m_managed_objects_topic_property = new rviz_common::properties::RosTopicProperty(
-    "Managed Objects Topic",
-    "managed_objects", // Default value
-    rosidl_generator_traits::data_type<
-      semantic_scene_forests_object_msgs::msg::ManagedObjectArray>(),
-    "Topic containing managed objects from the Object Manager",
-    this,
-    SLOT(updateManagedObjectsTopic()));
-
-  // Create QoS profile property as child of topic property
-  m_qos_profile_property = new rviz_common::properties::QosProfileProperty(
-    m_managed_objects_topic_property,
-    rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local());
 
   // Visualization group
   auto* visualization_property = new rviz_common::properties::Property(
@@ -185,58 +174,31 @@ void SceneGraphDisplay::onInitialize()
   // Store ROS node abstraction for topic property initialization
   m_rviz_ros_node = context_->getRosNodeAbstraction();
 
-  // Initialize the topic property with the node abstraction (CRITICAL for RosTopicProperty!)
-  m_managed_objects_topic_property->initialize(m_rviz_ros_node);
-
-  // Initialize QoS property with callback
-  m_qos_profile_property->initialize([this](rclcpp::QoS profile) {
-    this->m_qos_profile = profile;
-    updateManagedObjectsTopic();
-  });
-
   m_scene_graph_topic_property = new rviz_common::properties::RosTopicProperty(
     "Scene Graph Topic",
     "scene_graph",
     rosidl_generator_traits::data_type<semantic_scene_forests_msgs::msg::SceneGraph>(),
-    "Topic containing the scene graph (node/edge statistics)",
+    "Topic containing the scene graph (object nodes and node/edge statistics)",
     this,
     SLOT(updateSceneGraphTopic()));
 
-  m_scene_graph_qos_profile_property = new rviz_common::properties::QosProfileProperty(
-    m_scene_graph_topic_property, rclcpp::QoS(rclcpp::KeepLast(1)).best_effort());
-
+  // Initialize the topic property with the node abstraction (CRITICAL for RosTopicProperty!)
   m_scene_graph_topic_property->initialize(m_rviz_ros_node);
 
-  m_scene_graph_qos_profile_property->initialize([this](rclcpp::QoS profile) {
-    m_scene_graph_qos_profile = profile;
-    updateSceneGraphTopic();
-  });
-
-  auto ros_node   = context_->getRosNodeAbstraction().lock()->get_raw_node();
-  m_action_client = rclcpp_action::create_client<UpdateSceneGraph>(ros_node, "update_scene_graph");
-  m_block_object_client =
-    ros_node->create_client<semantic_scene_forests_object_msgs::srv::BlockObject>("block_object");
-
-  // Create managed objects subscription with QoS from property
-  m_managed_objects_sub =
-    ros_node->create_subscription<semantic_scene_forests_object_msgs::msg::ManagedObjectArray>(
-      m_managed_objects_topic_property->getTopicStd(),
-      m_qos_profile,
-      std::bind(&SceneGraphDisplay::onManagedObjects, this, std::placeholders::_1));
-
-  RCLCPP_INFO(
-    ros_node->get_logger(),
-    "Subscribed to %s topic with QoS: reliability=%s, durability=%s, depth=%zu",
-    m_managed_objects_topic_property->getTopicStd().c_str(),
-    m_qos_profile.reliability() == rclcpp::ReliabilityPolicy::Reliable ? "Reliable" : "Best Effort",
-    m_qos_profile.durability() == rclcpp::DurabilityPolicy::TransientLocal ? "Transient Local"
-                                                                           : "Volatile",
-    m_qos_profile.depth());
+  auto ros_node = context_->getRosNodeAbstraction().lock()->get_raw_node();
+  m_attribute_objects_client =
+    rclcpp_action::create_client<RunWorker>(ros_node, "attribute_objects");
+  m_generate_concepts_client =
+    rclcpp_action::create_client<RunWorker>(ros_node, "generate_concepts");
+  m_delete_object_client =
+    ros_node->create_client<semantic_scene_forests_object_msgs::srv::DeleteObject>("delete_object");
 
   m_scene_graph_sub = ros_node->create_subscription<semantic_scene_forests_msgs::msg::SceneGraph>(
     m_scene_graph_topic_property->getTopicStd(),
     m_scene_graph_qos_profile,
-    std::bind(&SceneGraphDisplay::onSceneGraph, this, std::placeholders::_1));
+    [this](const semantic_scene_forests_msgs::msg::SceneGraph::ConstSharedPtr& msg) {
+      onSceneGraph(msg);
+    });
 
   // Create service client for requesting object visuals
   m_get_visuals_client =
@@ -256,6 +218,8 @@ void SceneGraphDisplay::reset()
 {
   rviz_common::Display::reset();
   clearVisuals();
+  // Redrawn by retryIncompleteRender() once TF is back; an unchanged graph is not republished.
+  m_render_incomplete = !m_last_objects.empty();
   // Note: We do NOT reset action state here — reset() fires on every topic/frame change
   // and would wipe the progress bar mid-action. Action state is only reset when
   // an action completes or fails.
@@ -300,8 +264,9 @@ void SceneGraphDisplay::clearVisuals()
   m_object_visuals.clear();
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): refactor out of scope
 void SceneGraphDisplay::updateObjectNodes(
-  const std::vector<semantic_scene_forests_object_msgs::msg::ManagedObject>& objects)
+  const std::vector<fzi::semantic_scene_forests::ObjectNode>& objects)
 {
   // Check if context still exists
   auto ros_node_abstraction = context_->getRosNodeAbstraction().lock();
@@ -333,9 +298,13 @@ void SceneGraphDisplay::updateObjectNodes(
 
   for (const auto& obj : objects)
   {
+    if (m_object_shapes.contains(obj.id))
+    {
+      continue; // Already drawn (retry after a partial render).
+    }
     Ogre::Vector3 frame_pos;
     Ogre::Quaternion frame_orient;
-    const std::string& frame_id = obj.detection.header.frame_id;
+    const std::string& frame_id = obj.frame_id;
 
     if (frame_id.empty())
     {
@@ -359,7 +328,8 @@ void SceneGraphDisplay::updateObjectNodes(
       continue;
     }
 
-    if (!context_->getFrameManager()->getTransform(obj.detection.header, frame_pos, frame_orient))
+    if (!context_->getFrameManager()->getTransform(
+          frame_id, rclcpp::Time(obj.last_seen, RCL_ROS_TIME), frame_pos, frame_orient))
     {
       RCLCPP_WARN(ros_node->get_logger(),
                   "Transform failed for object %ld (frame '%s' → '%s'), skipping",
@@ -372,8 +342,8 @@ void SceneGraphDisplay::updateObjectNodes(
       continue;
     }
 
-    // Transform bbox center position from detection frame → fixed frame.
-    const auto& bp = obj.detection.bbox.center.position;
+    // Transform bbox center position from object frame → fixed frame.
+    const auto& bp = obj.bbox.center.position;
     const Ogre::Vector3 LOCAL_POS(
       static_cast<float>(bp.x), static_cast<float>(bp.y), static_cast<float>(bp.z));
     const Ogre::Vector3 WORLD_POS = frame_pos + frame_orient * LOCAL_POS;
@@ -393,7 +363,7 @@ void SceneGraphDisplay::updateObjectNodes(
                  WORLD_POS.y,
                  WORLD_POS.z);
 
-    const auto& sz = obj.detection.bbox.size;
+    const auto& sz = obj.bbox.size;
     const Ogre::Vector3 BBOX_SCALE(static_cast<float>(std::max(sz.x, 0.01) * SCALE),
                                    static_cast<float>(std::max(sz.y, 0.01) * SCALE),
                                    static_cast<float>(std::max(sz.z, 0.01) * SCALE));
@@ -402,6 +372,8 @@ void SceneGraphDisplay::updateObjectNodes(
       rviz_rendering::Shape::Cube, scene_manager_, m_object_nodes_node);
     shape->setPosition(WORLD_POS);
     shape->setScale(BBOX_SCALE);
+    // TODO: the manager publishes on change only, so ages and stale fading refresh only when a
+    // new scene_graph arrives; add a redraw timer if static scenes need live ages.
     const auto AGE    = ageSeconds(obj, NOW);
     auto object_color = COLOR;
     if (AGE && *AGE > STALE_AFTER)
@@ -432,7 +404,7 @@ void SceneGraphDisplay::updateObjectNodes(
     if (SHOW_LABELS)
     {
       Ogre::SceneNode* label_node = m_labels_node->createChildSceneNode();
-      const float Z_OFFSET        = static_cast<float>(sz.z) * SCALE / 2.0F + 0.15F;
+      const float Z_OFFSET        = (static_cast<float>(sz.z) * SCALE / 2.0F) + 0.15F;
       label_node->setPosition(WORLD_POS + Ogre::Vector3(0.0F, 0.0F, Z_OFFSET));
 
       auto* text = new rviz_rendering::MovableText(
@@ -441,7 +413,7 @@ void SceneGraphDisplay::updateObjectNodes(
                              rviz_rendering::MovableText::V_ABOVE);
       text->showOnTop(true);
       label_node->attachObject(text);
-      m_object_labels[obj.id] = {label_node, text};
+      m_object_labels[obj.id] = {.node = label_node, .text = text};
     }
   }
 
@@ -451,7 +423,12 @@ void SceneGraphDisplay::updateObjectNodes(
                success_count,
                failure_count);
 
-  if (failure_count > 0)
+  m_render_incomplete = failure_count > 0;
+  if (failure_count == 0)
+  {
+    deleteStatusStd("Transform");
+  }
+  else
   {
     std::string status_msg = std::to_string(failure_count) + " objects skipped (TF failures: ";
     bool first             = true;
@@ -486,29 +463,29 @@ QWidget* SceneGraphDisplay::createControlWidget()
   layout->setSpacing(8);
   layout->setContentsMargins(8, 8, 8, 8);
 
-  m_phase1_button = new QPushButton("Update Instance Graph");
-  m_phase1_button->setObjectName("Phase1Button");
-  m_phase1_button->setToolTip(
-    "Trigger PHASE_1: Update instance-level scene graph with current detections");
-  m_phase1_button->setMinimumHeight(35);
-  connect(m_phase1_button,
+  m_attribute_objects_button = new QPushButton("Attribute Objects");
+  m_attribute_objects_button->setObjectName("AttributeObjectsButton");
+  m_attribute_objects_button->setToolTip(
+    "Run the attribute_objects worker once: attribute the current objects");
+  m_attribute_objects_button->setMinimumHeight(35);
+  connect(m_attribute_objects_button,
           &QPushButton::clicked,
           this,
-          &SceneGraphDisplay::sendPhase1Goal,
+          &SceneGraphDisplay::sendAttributeObjectsGoal,
           Qt::QueuedConnection); // Use queued connection for thread safety
-  layout->addWidget(m_phase1_button);
+  layout->addWidget(m_attribute_objects_button);
 
-  m_phase2_button = new QPushButton("Update Meta Graph");
-  m_phase2_button->setObjectName("Phase2Button");
-  m_phase2_button->setToolTip(
-    "Trigger PHASE_2: Update meta-level scene graph with semantic relationships");
-  m_phase2_button->setMinimumHeight(35);
-  connect(m_phase2_button,
+  m_generate_concepts_button = new QPushButton("Generate Concepts");
+  m_generate_concepts_button->setObjectName("GenerateConceptsButton");
+  m_generate_concepts_button->setToolTip(
+    "Run the generate_concepts worker once: generate concepts and their relationships");
+  m_generate_concepts_button->setMinimumHeight(35);
+  connect(m_generate_concepts_button,
           &QPushButton::clicked,
           this,
-          &SceneGraphDisplay::sendPhase2Goal,
+          &SceneGraphDisplay::sendGenerateConceptsGoal,
           Qt::QueuedConnection); // Use queued connection for thread safety
-  layout->addWidget(m_phase2_button);
+  layout->addWidget(m_generate_concepts_button);
 
   layout->addSpacing(8);
 
@@ -547,17 +524,18 @@ QWidget* SceneGraphDisplay::createControlWidget()
   return widget;
 }
 
-void SceneGraphDisplay::sendPhase1Goal()
+void SceneGraphDisplay::sendAttributeObjectsGoal()
 {
-  sendGoal(UpdateSceneGraph::Goal::PHASE_1);
+  sendGoal(m_attribute_objects_client, "attribute_objects");
 }
 
-void SceneGraphDisplay::sendPhase2Goal()
+void SceneGraphDisplay::sendGenerateConceptsGoal()
 {
-  sendGoal(UpdateSceneGraph::Goal::PHASE_2);
+  sendGoal(m_generate_concepts_client, "generate_concepts");
 }
 
-void SceneGraphDisplay::sendGoal(uint8_t phase)
+void SceneGraphDisplay::sendGoal(const rclcpp_action::Client<RunWorker>::SharedPtr& client,
+                                 const QString& name)
 {
   // Check if action already in progress
   if (m_action_in_progress)
@@ -571,7 +549,7 @@ void SceneGraphDisplay::sendGoal(uint8_t phase)
   }
 
   // Check if action client exists
-  if (!m_action_client)
+  if (!client)
   {
     if (m_status_label)
     {
@@ -582,7 +560,7 @@ void SceneGraphDisplay::sendGoal(uint8_t phase)
   }
 
   // Wait for action server with timeout
-  if (!m_action_client->wait_for_action_server(std::chrono::seconds(2)))
+  if (!client->wait_for_action_server(std::chrono::seconds(2)))
   {
     if (m_status_label)
     {
@@ -591,16 +569,15 @@ void SceneGraphDisplay::sendGoal(uint8_t phase)
     }
     setStatus(rviz_common::properties::StatusProperty::Error,
               "Action",
-              "UpdateSceneGraph action server not available");
+              name + " action server not available");
     RCLCPP_ERROR(context_->getRosNodeAbstraction().lock()->get_raw_node()->get_logger(),
                  "Action server not available");
     return;
   }
 
-  UpdateSceneGraph::Goal goal;
-  goal.phase = phase;
+  RunWorker::Goal goal;
 
-  rclcpp_action::Client<UpdateSceneGraph>::SendGoalOptions options;
+  rclcpp_action::Client<RunWorker>::SendGoalOptions options;
   options.goal_response_callback = [this](auto&& goal_handle) {
     handleGoalResponse(std::forward<decltype(goal_handle)>(goal_handle));
   };
@@ -612,15 +589,19 @@ void SceneGraphDisplay::sendGoal(uint8_t phase)
     handleResult(std::forward<decltype(result)>(result));
   };
 
-  m_action_client->async_send_goal(goal, options);
+  client->async_send_goal(goal, options);
 
   m_action_in_progress = true;
 
   // Update UI state with null checks
-  if (m_phase1_button)
-    m_phase1_button->setEnabled(false);
-  if (m_phase2_button)
-    m_phase2_button->setEnabled(false);
+  if (m_attribute_objects_button)
+  {
+    m_attribute_objects_button->setEnabled(false);
+  }
+  if (m_generate_concepts_button)
+  {
+    m_generate_concepts_button->setEnabled(false);
+  }
   if (m_progress_bar)
   {
     m_progress_bar->setVisible(true);
@@ -629,7 +610,7 @@ void SceneGraphDisplay::sendGoal(uint8_t phase)
   }
   if (m_status_label)
   {
-    m_status_label->setText(QString("Sending Phase %1 goal...").arg(static_cast<int>(phase)));
+    m_status_label->setText(QString("Sending %1 goal...").arg(name));
     m_status_label->setStyleSheet("color: blue; font-weight: bold;");
   }
 }
@@ -664,9 +645,8 @@ void SceneGraphDisplay::handleGoalResponse(const GoalHandle::SharedPtr& goal_han
     Qt::QueuedConnection);
 }
 
-void SceneGraphDisplay::handleFeedback(
-  const GoalHandle::SharedPtr& /* goal_handle */,
-  const std::shared_ptr<const UpdateSceneGraph::Feedback>& feedback)
+void SceneGraphDisplay::handleFeedback(const GoalHandle::SharedPtr& /* goal_handle */,
+                                       const std::shared_ptr<const RunWorker::Feedback>& feedback)
 {
   QMetaObject::invokeMethod(
     this,
@@ -677,8 +657,8 @@ void SceneGraphDisplay::handleFeedback(
         return;
       }
 
-      const uint32_t CURRENT = feedback->current_object;
-      const uint32_t TOTAL   = feedback->total_objects;
+      const uint32_t CURRENT = feedback->current;
+      const uint32_t TOTAL   = feedback->total;
       const int PCT          = (TOTAL > 0) ? static_cast<int>(CURRENT * 100U / TOTAL) : 0;
 
       m_progress_bar->setValue(PCT);
@@ -734,13 +714,13 @@ void SceneGraphDisplay::resetActionState()
   m_action_in_progress = false;
 
   // QPointer will be null if widgets are destroyed, so checks are safe
-  if (m_phase1_button)
+  if (m_attribute_objects_button)
   {
-    m_phase1_button->setEnabled(true);
+    m_attribute_objects_button->setEnabled(true);
   }
-  if (m_phase2_button)
+  if (m_generate_concepts_button)
   {
-    m_phase2_button->setEnabled(true);
+    m_generate_concepts_button->setEnabled(true);
   }
   if (m_progress_bar)
   {
@@ -753,6 +733,26 @@ void SceneGraphDisplay::resetActionState()
     m_status_label->setText("Ready");
     m_status_label->setStyleSheet("color: gray; font-weight: bold;");
   }
+}
+
+void SceneGraphDisplay::retryIncompleteRender()
+{
+  // The manager publishes only on change, so objects skipped for missing TF (e.g. the latched
+  // graph arriving before any TF right after startup) are retried here instead of waiting for the
+  // next scene_graph.
+  // ponytail: retries every second for as long as an object stays unresolvable (e.g. a stamp
+  // older than the TF cache with a moving fixed frame); rate-limit if the redraw cost shows.
+  if (m_render_incomplete)
+  {
+    // Only the missing objects are added: drawn ones keep their shapes and selection handlers.
+    updateObjectNodes(m_last_objects);
+  }
+}
+
+void SceneGraphDisplay::fixedFrameChanged()
+{
+  clearVisuals();
+  updateObjectNodes(m_last_objects);
 }
 
 void SceneGraphDisplay::updateObjectColor()
@@ -781,109 +781,6 @@ void SceneGraphDisplay::updateLabels()
 }
 
 
-void SceneGraphDisplay::updateManagedObjectsTopic()
-{
-  auto ros_node_abstraction = m_rviz_ros_node.lock();
-  if (!ros_node_abstraction)
-  {
-    RCLCPP_DEBUG(rclcpp::get_logger("SceneGraphDisplay"),
-                 "ROS node abstraction no longer available");
-    return;
-  }
-
-  auto ros_node = ros_node_abstraction->get_raw_node();
-
-  std::string topic_name_str = m_managed_objects_topic_property->getTopicStd();
-  if (topic_name_str.empty())
-  {
-    RCLCPP_DEBUG(ros_node->get_logger(), "Managed objects topic is empty");
-    return;
-  }
-
-  // Check if topic actually changed
-  if (m_managed_objects_sub && m_managed_objects_sub->get_topic_name() == topic_name_str)
-  {
-    return;
-  }
-
-  // Unsubscribe from old topic
-  m_managed_objects_sub.reset();
-  clearVisuals();
-
-  // Get current QoS from property - it will be updated via callback when changed
-  // The callback will call updateManagedObjectsTopic() again, but the topic check will prevent
-  // infinite loop
-
-  // Create new subscription with new topic and current QoS
-  try
-  {
-    m_managed_objects_sub =
-      ros_node->create_subscription<semantic_scene_forests_object_msgs::msg::ManagedObjectArray>(
-        topic_name_str,
-        m_qos_profile,
-        std::bind(&SceneGraphDisplay::onManagedObjects, this, std::placeholders::_1));
-
-    RCLCPP_INFO(
-      ros_node->get_logger(),
-      "Subscribed to managed objects topic: %s with QoS: reliability=%s, durability=%s, depth=%zu",
-      topic_name_str.c_str(),
-      m_qos_profile.reliability() == rclcpp::ReliabilityPolicy::Reliable ? "Reliable"
-                                                                         : "Best Effort",
-      m_qos_profile.durability() == rclcpp::DurabilityPolicy::TransientLocal ? "Transient Local"
-                                                                             : "Volatile",
-      m_qos_profile.depth());
-  }
-  catch (const std::exception& e)
-  {
-    RCLCPP_ERROR(ros_node->get_logger(),
-                 "Failed to subscribe to topic '%s': %s",
-                 topic_name_str.c_str(),
-                 e.what());
-    setStatusStd(rviz_common::properties::StatusProperty::Error,
-                 "Subscription",
-                 std::string("Failed to subscribe: ") + e.what());
-  }
-}
-
-void SceneGraphDisplay::onManagedObjects(
-  semantic_scene_forests_object_msgs::msg::ManagedObjectArray::ConstSharedPtr msg)
-{
-  // Check if context still exists
-  auto ros_node_abstraction = context_->getRosNodeAbstraction().lock();
-  if (!ros_node_abstraction)
-  {
-    return; // Display already destroyed
-  }
-
-  auto ros_node = ros_node_abstraction->get_raw_node();
-
-  RCLCPP_DEBUG(
-    ros_node->get_logger(), "Received managed objects: %zu objects", msg->objects.size());
-
-  QMetaObject::invokeMethod(
-    this,
-    [this, objects = msg->objects]() {
-      clearVisuals();
-      updateObjectNodes(objects);
-    },
-    Qt::QueuedConnection);
-
-  const size_t object_count = msg->objects.size();
-  QMetaObject::invokeMethod(
-    this,
-    [this, object_count]() {
-      if (m_node_count_label)
-      {
-        m_node_count_label->setText(QString("Objects: %1").arg(static_cast<int>(object_count)));
-      }
-    },
-    Qt::QueuedConnection);
-
-  setStatusStd(rviz_common::properties::StatusProperty::Ok,
-               "Managed Objects",
-               "Objects: " + std::to_string(object_count));
-}
-
 void SceneGraphDisplay::updateSceneGraphTopic()
 {
   auto ros_node_abstraction = m_rviz_ros_node.lock();
@@ -906,13 +803,16 @@ void SceneGraphDisplay::updateSceneGraphTopic()
   }
 
   m_scene_graph_sub.reset();
+  clearVisuals();
 
   try
   {
     m_scene_graph_sub = ros_node->create_subscription<semantic_scene_forests_msgs::msg::SceneGraph>(
       topic_name_str,
       m_scene_graph_qos_profile,
-      std::bind(&SceneGraphDisplay::onSceneGraph, this, std::placeholders::_1));
+      [this](const semantic_scene_forests_msgs::msg::SceneGraph::ConstSharedPtr& msg) {
+        onSceneGraph(msg);
+      });
 
     RCLCPP_INFO(
       ros_node->get_logger(), "Subscribed to scene graph topic: %s", topic_name_str.c_str());
@@ -930,34 +830,50 @@ void SceneGraphDisplay::updateSceneGraphTopic()
 }
 
 void SceneGraphDisplay::onSceneGraph(
-  semantic_scene_forests_msgs::msg::SceneGraph::ConstSharedPtr msg)
+  const semantic_scene_forests_msgs::msg::SceneGraph::ConstSharedPtr& msg)
 {
   if (!context_->getRosNodeAbstraction().lock())
   {
     return;
   }
 
-  const size_t obj_count     = msg->object_nodes.size();
-  const size_t concept_count = msg->concept_nodes.size();
-  const size_t edge_count    = msg->edges.size();
+  auto graph = fzi::semantic_scene_forests::SceneGraph::fromMsg(*msg);
+  if (!graph)
+  {
+    setStatusStd(rviz_common::properties::StatusProperty::Warn,
+                 "Scene Graph",
+                 "Invalid scene graph: " + graph.error().message);
+    return;
+  }
+
+  const size_t OBJ_COUNT     = msg->object_nodes.size();
+  const size_t CONCEPT_COUNT = msg->concept_nodes.size();
+  const size_t EDGE_COUNT    = msg->edges.size();
 
   QMetaObject::invokeMethod(
     this,
-    [this, obj_count, concept_count, edge_count]() {
+    [this, objects = (*graph)->getObjectNodes(), OBJ_COUNT, CONCEPT_COUNT, EDGE_COUNT]() {
+      m_last_objects = objects;
+      clearVisuals();
+      updateObjectNodes(m_last_objects);
+      if (m_node_count_label)
+      {
+        m_node_count_label->setText(QString("Objects: %1").arg(static_cast<int>(OBJ_COUNT)));
+      }
       if (m_scene_graph_info_label)
       {
         m_scene_graph_info_label->setText(QString("Graph: %1 obj, %2 concept, %3 edges")
-                                            .arg(static_cast<int>(obj_count))
-                                            .arg(static_cast<int>(concept_count))
-                                            .arg(static_cast<int>(edge_count)));
+                                            .arg(static_cast<int>(OBJ_COUNT))
+                                            .arg(static_cast<int>(CONCEPT_COUNT))
+                                            .arg(static_cast<int>(EDGE_COUNT)));
       }
     },
     Qt::QueuedConnection);
 
   setStatusStd(rviz_common::properties::StatusProperty::Ok,
                "Scene Graph",
-               "Nodes: " + std::to_string(obj_count + concept_count) +
-                 ", Edges: " + std::to_string(edge_count));
+               "Nodes: " + std::to_string(OBJ_COUNT + CONCEPT_COUNT) +
+                 ", Edges: " + std::to_string(EDGE_COUNT));
 }
 
 void SceneGraphDisplay::requestObjectVisuals(int64_t object_id)
@@ -979,14 +895,17 @@ void SceneGraphDisplay::requestObjectVisuals(int64_t object_id)
     std::make_shared<semantic_scene_forests_object_msgs::srv::GetObjectVisuals::Request>();
   request->object_ids.push_back(object_id);
 
+  // NOLINTBEGIN(performance-unnecessary-value-param): rclcpp deduces the callback from SharedFuture
   auto result = m_get_visuals_client->async_send_request(
     request,
     [this](rclcpp::Client<semantic_scene_forests_object_msgs::srv::GetObjectVisuals>::SharedFuture
              future) { onObjectVisualsResponse(future); });
+  // NOLINTEND(performance-unnecessary-value-param)
 }
 
 void SceneGraphDisplay::onObjectVisualsResponse(
-  rclcpp::Client<semantic_scene_forests_object_msgs::srv::GetObjectVisuals>::SharedFuture result)
+  const rclcpp::Client<semantic_scene_forests_object_msgs::srv::GetObjectVisuals>::SharedFuture&
+    result)
 {
   auto ros_node_abstraction = context_->getRosNodeAbstraction().lock();
   if (!ros_node_abstraction)
@@ -997,7 +916,7 @@ void SceneGraphDisplay::onObjectVisualsResponse(
 
   try
   {
-    auto response = result.get();
+    const auto& response = result.get();
     if (response->visuals.empty())
     {
       RCLCPP_WARN(ros_node->get_logger(), "No visuals received");
@@ -1076,8 +995,9 @@ bool SceneGraphDisplay::handleContextMenu(const QPoint& pos)
     return false;
   }
 
+  // pick() rejects degenerate rectangles (x2 <= x1 or y2 <= y1), so pick a 1x1 pixel area.
   selection_manager->pick(
-    m_render_panel->getRenderWindow(), pos.x(), pos.y(), pos.x(), pos.y(), results);
+    m_render_panel->getRenderWindow(), pos.x(), pos.y(), pos.x() + 1, pos.y() + 1, results);
   if (results.empty())
   {
     return false;
@@ -1102,11 +1022,11 @@ bool SceneGraphDisplay::handleContextMenu(const QPoint& pos)
     return false;
   }
 
-  const int64_t object_id = sg_handler->getObjectId();
+  const int64_t OBJECT_ID = sg_handler->getObjectId();
   ObjectVisual visual;
   {
     const std::scoped_lock LOCK{m_object_visuals_mutex};
-    auto it = m_object_visuals.find(object_id);
+    auto it = m_object_visuals.find(OBJECT_ID);
     if (it == m_object_visuals.end())
     {
       return false;
@@ -1121,39 +1041,28 @@ bool SceneGraphDisplay::handleContextMenu(const QPoint& pos)
   {
     QAction* action =
       menu->addAction(QString("Show Images (%1)").arg(static_cast<int>(visual.images.size())));
-    connect(action, &QAction::triggered, [this, object_id, visual]() {
-      showImageDialog(object_id, visual);
+    connect(action, &QAction::triggered, [this, OBJECT_ID, visual]() {
+      showImageDialog(OBJECT_ID, visual);
     });
   }
   else
   {
     QAction* action = menu->addAction("Load Images");
     action->setToolTip("Request object images from Object Manager");
-    connect(action, &QAction::triggered, [this, object_id]() { requestObjectVisuals(object_id); });
+    connect(action, &QAction::triggered, [this, OBJECT_ID]() { requestObjectVisuals(OBJECT_ID); });
   }
 
   menu->addSeparator();
 
-  // Block object action — shows images for confirmation and calls the service
-  QAction* block_action = menu->addAction(QString("Block Object %1").arg(object_id));
-  block_action->setToolTip("Block this object and show its images");
-  connect(block_action, &QAction::triggered, [this, object_id, visual]() {
-    blockObject(object_id);
-    if (!visual.images.empty())
-    {
-      showImageDialog(object_id, visual);
-    }
-    else
-    {
-      requestObjectVisuals(object_id);
-    }
-  });
+  QAction* delete_action = menu->addAction(QString("Delete Object %1").arg(OBJECT_ID));
+  delete_action->setToolTip("Remove this object from the scene graph");
+  connect(delete_action, &QAction::triggered, [this, OBJECT_ID]() { deleteObject(OBJECT_ID); });
 
   m_render_panel->showContextMenu(menu);
   return true;
 }
 
-void SceneGraphDisplay::blockObject(int64_t object_id)
+void SceneGraphDisplay::deleteObject(int64_t object_id)
 {
   auto ros_node_abstraction = context_->getRosNodeAbstraction().lock();
   if (!ros_node_abstraction)
@@ -1162,38 +1071,40 @@ void SceneGraphDisplay::blockObject(int64_t object_id)
   }
   auto ros_node = ros_node_abstraction->get_raw_node();
 
-  if (!m_block_object_client->wait_for_service(std::chrono::milliseconds(500)))
+  if (!m_delete_object_client->wait_for_service(std::chrono::milliseconds(500)))
   {
-    RCLCPP_WARN(ros_node->get_logger(), "block_object service not available");
-    setStatusStd(
-      rviz_common::properties::StatusProperty::Warn, "Block", "block_object service not available");
+    RCLCPP_WARN(ros_node->get_logger(), "delete_object service not available");
+    setStatusStd(rviz_common::properties::StatusProperty::Warn,
+                 "Delete",
+                 "delete_object service not available");
     return;
   }
 
-  auto req = std::make_shared<semantic_scene_forests_object_msgs::srv::BlockObject::Request>();
+  auto req = std::make_shared<semantic_scene_forests_object_msgs::srv::DeleteObject::Request>();
   req->object_id = object_id;
 
-  m_block_object_client->async_send_request(
+  // NOLINTBEGIN(performance-unnecessary-value-param): rclcpp deduces the callback from SharedFuture
+  m_delete_object_client->async_send_request(
     req,
     [this, object_id](
-      rclcpp::Client<semantic_scene_forests_object_msgs::srv::BlockObject>::SharedFuture future) {
+      rclcpp::Client<semantic_scene_forests_object_msgs::srv::DeleteObject>::SharedFuture future) {
       try
       {
-        auto resp                 = future.get();
-        const bool success        = resp->success;
-        const std::string message = resp->message;
+        const auto& resp          = future.get();
+        const bool SUCCESS        = resp->success;
+        const std::string MESSAGE = resp->message;
         QMetaObject::invokeMethod(
           this,
-          [this, object_id, success, message]() {
-            if (success)
+          [this, object_id, SUCCESS, MESSAGE]() {
+            if (SUCCESS)
             {
               setStatusStd(rviz_common::properties::StatusProperty::Ok,
-                           "Block",
-                           "Blocked object " + std::to_string(object_id) + ": " + message);
+                           "Delete",
+                           "Deleted object " + std::to_string(object_id) + ": " + MESSAGE);
             }
             else
             {
-              setStatusStd(rviz_common::properties::StatusProperty::Warn, "Block", message);
+              setStatusStd(rviz_common::properties::StatusProperty::Warn, "Delete", MESSAGE);
             }
           },
           Qt::QueuedConnection);
@@ -1204,10 +1115,11 @@ void SceneGraphDisplay::blockObject(int64_t object_id)
         if (node)
         {
           RCLCPP_ERROR(
-            node->get_raw_node()->get_logger(), "block_object call failed: %s", e.what());
+            node->get_raw_node()->get_logger(), "delete_object call failed: %s", e.what());
         }
       }
     });
+  // NOLINTEND(performance-unnecessary-value-param)
 }
 
 void SceneGraphDisplay::showImageDialog(int64_t id, const ObjectVisual& visual)

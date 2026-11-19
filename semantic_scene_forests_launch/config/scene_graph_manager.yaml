@@ -1,0 +1,138 @@
+# Copyright (c) 2026 FZI Forschungszentrum Informatik
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+#    * Redistributions of source code must retain the above copyright
+#      notice, this list of conditions and the following disclaimer.
+#
+#    * Redistributions in binary form must reproduce the above copyright
+#      notice, this list of conditions and the following disclaimer in the
+#      documentation and/or other materials provided with the distribution.
+#
+#    * Neither the name of the copyright holder nor the names of its
+#      contributors may be used to endorse or promote products derived from
+#      this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
+scene_graph_manager:
+  ros__parameters:
+    # scene_graph_combined.launch.xml sets both frame_id and tracker.world_frame from
+    # scene_graph_frame; the defaults here only apply when the node is started without it.
+    frame_id: "spotty/map"
+    publish_max_rate_hz: 1.0
+    workers: ["tracker", "object_attribution", "concept_generation", "pruning"]
+    worker_types:
+      tracker: "semantic_scene_forests_object_tracker::TrackerWorker"
+      object_attribution: "semantic_scene_forests_generation::ObjectAttributionWorker"
+      concept_generation: "semantic_scene_forests_generation::ConceptGenerationWorker"
+      pruning: "semantic_scene_forests_manager::PruningWorker"
+
+    tracker:
+      world_frame: "spotty/vision"
+      camera_names: ["frontleft", "frontright", "right", "left", "back"]
+      cameras:
+        # Inactive: hand is not listed in camera_names.
+        hand:
+          detections_2d_topic: "/spotty/yolo/hand/tracking"
+          detections_3d_topic: "/spotty/yolo/hand/detections_3d"
+          image_topic: "/spotty/camera/hand/image"
+          image_rotation: 0  # TODO: clockwise rotation that makes this camera upright
+        frontleft:
+          detections_2d_topic: "/spotty/yolo/frontleft/tracking"
+          detections_3d_topic: "/spotty/yolo/frontleft/detections_3d"
+          image_topic: "/spotty/camera/frontleft/image"
+          image_rotation: 90  # TODO: clockwise rotation that makes this camera upright
+        frontright:
+          detections_2d_topic: "/spotty/yolo/frontright/tracking"
+          detections_3d_topic: "/spotty/yolo/frontright/detections_3d"
+          image_topic: "/spotty/camera/frontright/image"
+          image_rotation: 270  # TODO: clockwise rotation that makes this camera upright
+        left:
+          detections_2d_topic: "/spotty/yolo/left/tracking"
+          detections_3d_topic: "/spotty/yolo/left/detections_3d"
+          image_topic: "/spotty/camera/left/image"
+          image_rotation: 0  # TODO: clockwise rotation that makes this camera upright
+        right:
+          detections_2d_topic: "/spotty/yolo/right/tracking"
+          detections_3d_topic: "/spotty/yolo/right/detections_3d"
+          image_topic: "/spotty/camera/right/image"
+          image_rotation: 0  # TODO: clockwise rotation that makes this camera upright
+        back:
+          detections_2d_topic: "/spotty/yolo/back/tracking"
+          detections_3d_topic: "/spotty/yolo/back/detections_3d"
+          image_topic: "/spotty/camera/back/image"
+          image_rotation: 0  # TODO: clockwise rotation that makes this camera upright
+      max_trackable_objects: 1000
+      gate_threshold_strict: 3.0
+      gate_threshold_confirmed: 10.0
+      # Initial tuning only: calibrate for large furniture versus small tabletop objects.
+      local_track_timeout: 5.0
+      stale_timeout: 60.0
+      sync_queue_size: 100
+      max_association_distance: 0.5
+      replacement_overlap_threshold: 0.5
+      bbox_size_alpha: 0.2
+      confidence_threshold: 0.8
+      measurement_noise_std: 0.4
+      process_noise_std: 0.05
+      confirmation_threshold: 3
+      unconfirmed_track_timeout: 30.0
+      merge_overlap_threshold: 0.5
+      overlap_min_extent: 0.1
+      association_max_size_ratio: 2.0
+      # Identity decisions for label conflicts and partial overlaps between global tracks.
+      # api_key is required for openai/openrouter; set it locally, never commit it.
+      arbiter:
+        enabled: true
+        provider: "openrouter"
+        server_url: "https://openrouter.ai/api/alpha"
+        model: "openai/gpt-6-luna-decisions"
+        api_key: ""
+        # provider: "ollama"
+        # server_url: "http://localhost:11434/v1/"
+        # model: "d1-omni:600m"
+        min_overlap: 0.1
+        same_object_probability: 0.8
+      crop_padding: 10
+      max_crops_per_object: 5
+      snapshot_rate_hz: 2.0
+
+    # extra_body is a JSON object merged into every request; keep the single quotes
+    # (ROS parses bare {} as YAML).
+    object_attribution:
+      server_url: "https://openrouter.ai/api/v1"
+      api_key: ""
+      extra_body: '{"provider": {"only": ["google-vertex/europe"], "allow_fallbacks": false}}'
+      prompt_dir: ""
+      model: "anthropic/claude-haiku-5.5"
+      tasks:
+        - "semantic_scene_forests_generation/ColorTask"
+        - "semantic_scene_forests_generation/MaterialTask"
+        - "semantic_scene_forests_generation/ManipulationTask"
+      poll_interval_seconds: 1.0
+
+    concept_generation:
+      server_url: "https://openrouter.ai/api/v1"
+      api_key: ""
+      extra_body: '{"provider": {"only": ["google-vertex/europe"], "allow_fallbacks": false}}'
+      prompt_dir: ""
+      model: "anthropic/claude-haiku-5.5"
+      tasks:
+        - "semantic_scene_forests_generation/CategoryTask"
+        - "semantic_scene_forests_generation/AffordanceTask"
+      interval_seconds: 120
+
+    pruning:
+      interval_seconds: 10.0

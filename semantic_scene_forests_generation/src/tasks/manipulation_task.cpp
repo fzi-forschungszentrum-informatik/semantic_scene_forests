@@ -40,11 +40,12 @@ void ManipulationTask::initialize(rclcpp::Node* node, const TemplateMap& templat
   m_templates = &templates;
 }
 
-TaskResult ManipulationTask::execute(oai::OpenAIClient& client,
-                                     std::vector<oai::Message>& history,
-                                     int64_t object_id,
-                                     const std::vector<cv::Mat>& /*crops*/,
-                                     fzi::semantic_scene_forests::SceneGraph& graph)
+TaskResult
+ManipulationTask::execute(oai::OpenAIClient& client,
+                          std::vector<oai::Message>& history,
+                          int64_t object_id,
+                          const std::vector<cv::Mat>& /*crops*/,
+                          const std::shared_ptr<fzi::semantic_scene_forests::SceneGraph>& graph)
 {
   return runObjectAttributeTask(client,
                                 history,

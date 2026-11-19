@@ -35,7 +35,9 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
-find_package(rclcpp_components REQUIRED)
+find_package(pluginlib REQUIRED)
+find_package(semantic_scene_forests REQUIRED)
+find_package(semantic_scene_forests_manager REQUIRED)
 find_package(semantic_scene_forests_msgs REQUIRED)
 find_package(semantic_scene_forests_object_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
@@ -60,9 +62,9 @@ generate_parameter_library(object_tracker_parameters
   src/object_tracker_parameters.yaml
 )
 
-# Tracker component library
-add_library(object_tracker_component SHARED
-  src/object_tracker_component.cpp
+# Tracker worker plugin (hosted by the scene_graph_manager), also linked by the tests.
+add_library(tracker_worker SHARED
+  src/tracker_worker.cpp
   src/arbiter_worker.cpp
   src/camera_tracker.cpp
   src/global_tracker.cpp
@@ -70,12 +72,12 @@ add_library(object_tracker_component SHARED
   src/tracked_object.cpp
   src/tracker_geometry.cpp
 )
-target_include_directories(object_tracker_component PUBLIC
+target_include_directories(tracker_worker PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
-target_compile_features(object_tracker_component PUBLIC cxx_std_23)
-target_link_libraries(object_tracker_component PUBLIC
+target_compile_features(tracker_worker PUBLIC cxx_std_23)
+target_link_libraries(tracker_worker PUBLIC
   ${geometry_msgs_TARGETS}
   ${semantic_scene_forests_msgs_TARGETS}
   ${semantic_scene_forests_object_msgs_TARGETS}
@@ -86,8 +88,9 @@ target_link_libraries(object_tracker_component PUBLIC
   cv_bridge::cv_bridge
   message_filters::message_filters
   rclcpp::rclcpp
-  rclcpp_components::component
-  rclcpp_components::component_manager
+  pluginlib::pluginlib
+  semantic_scene_forests::semantic_scene_forests
+  semantic_scene_forests_manager::worker_interface # worker_interface.hpp (header-only interface target)
   diagnostic_updater::diagnostic_updater
   semantic_scene_forests_utils::semantic_scene_forests_utils
   sensor_msgs::sensor_msgs_library
@@ -99,42 +102,34 @@ target_link_libraries(object_tracker_component PUBLIC
   oai_api::oai_api
   nlohmann_json::nlohmann_json
 )
-rclcpp_components_register_nodes(object_tracker_component
-  "semantic_scene_forests_object_tracker::ObjectTrackerComponent"
+pluginlib_export_plugin_description_file(semantic_scene_forests_manager
+  semantic_scene_forests_object_tracker_workers.xml
 )
 
 install(TARGETS
-  object_tracker_component
+  tracker_worker
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
 )
 
-install(DIRECTORY launch config
-  DESTINATION share/${PROJECT_NAME}
-)
-
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
-  find_package(semantic_scene_forests_object_manager REQUIRED)
   ament_add_gtest(test_bbox_transform test/test_bbox_transform.cpp)
-  target_link_libraries(test_bbox_transform object_tracker_component)
+  target_link_libraries(test_bbox_transform tracker_worker)
   ament_add_gtest(test_tracked_object test/test_tracked_object.cpp)
-  target_link_libraries(test_tracked_object object_tracker_component)
+  target_link_libraries(test_tracked_object tracker_worker)
   target_include_directories(test_tracked_object PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-  foreach(unit_test test_image_rotation test_camera_tracker test_global_tracker)
+  foreach(unit_test test_image_rotation test_camera_tracker test_global_tracker test_arbiter_config)
     ament_add_gtest(${unit_test} test/${unit_test}.cpp)
-    target_link_libraries(${unit_test} object_tracker_component)
+    target_link_libraries(${unit_test} tracker_worker)
     target_include_directories(${unit_test} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   endforeach()
   target_include_directories(test_bbox_transform PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
   ament_add_gtest(test_multi_camera_tracker test/test_multi_camera_tracker.cpp)
-  target_link_libraries(
-    test_multi_camera_tracker
-    object_tracker_component
-    semantic_scene_forests_object_manager::object_manager_component)
+  target_link_libraries(test_multi_camera_tracker tracker_worker)
 endif()
 
 ament_package()

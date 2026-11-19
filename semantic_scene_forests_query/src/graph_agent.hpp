@@ -44,30 +44,6 @@
 
 namespace semantic_scene_forests_query {
 
-// ---------------------------------------------------------------------------
-// Object information sourced from the object manager (NOT the scene graph).
-//
-// Scene-graph ObjectNodes carry only an id (see semantic_scene_forests_msgs/ObjectNode and
-// SceneGraph::fromMsg, which sets class_name to ""), so the class name and pose
-// must be resolved through the /managed_objects cache supplied by the node.
-// ---------------------------------------------------------------------------
-
-struct ObjectInfo
-{
-  std::string class_name;
-  // Bounding-box centre, in the frame published by the object manager.
-  double position_x{};
-  double position_y{};
-  double position_z{};
-  // Bounding-box size.
-  double size_x{};
-  double size_y{};
-  double size_z{};
-};
-
-// Resolve object-manager metadata for a scene-graph object id.
-using ObjectLookup = std::function<std::optional<ObjectInfo>(int64_t id)>;
-
 // Run a one-shot vision completion over an object's image crops (fetched from
 // the object manager via /get_object_visuals) and return a textual description.
 // `focus` lets the caller bias the description toward what the agent cares about.
@@ -108,7 +84,6 @@ class GraphAgentSession
 {
 public:
   GraphAgentSession(std::unique_ptr<fzi::semantic_scene_forests::SceneGraph> graph,
-                    ObjectLookup object_lookup,
                     VisualInspector inspect,
                     ExpandCallback on_expand,
                     StopCheck should_stop,
@@ -137,7 +112,7 @@ private:
                std::string_view args,
                const std::expected<std::string, std::string>& result) const;
 
-  // Render a node as {id, type, name}; name for objects comes from ObjectLookup.
+  // Render a node as {id, type, name}; name for objects is their class name.
   [[nodiscard]] std::optional<std::string> nodeName(int64_t id) const;
 
   // Tool implementations (all return a JSON string; errors as std::unexpected).
@@ -157,7 +132,6 @@ private:
   toolInspectObjectVisual(std::string_view args);
 
   std::unique_ptr<fzi::semantic_scene_forests::SceneGraph> m_graph;
-  ObjectLookup m_object_lookup;
   VisualInspector m_inspect;
   ExpandCallback m_on_expand;
   StopCheck m_should_stop;

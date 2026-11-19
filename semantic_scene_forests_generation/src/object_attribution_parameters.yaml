@@ -1,0 +1,72 @@
+# Copyright (c) 2026 FZI Forschungszentrum Informatik
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+#    * Redistributions of source code must retain the above copyright
+#      notice, this list of conditions and the following disclaimer.
+#
+#    * Redistributions in binary form must reproduce the above copyright
+#      notice, this list of conditions and the following disclaimer in the
+#      documentation and/or other materials provided with the distribution.
+#
+#    * Neither the name of the copyright holder nor the names of its
+#      contributors may be used to endorse or promote products derived from
+#      this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
+# Declared under the worker's configured name, e.g. object_attribution.server_url.
+object_attribution:
+  server_url:
+    type: string
+    default_value: "http://ids-gpu-01.fzi.de:30001/v1"
+    description: "OpenAI-compatible LLM server endpoint."
+  api_key:
+    type: string
+    default_value: ""
+    description: "Bearer token for the server. Leave empty for unauthenticated local servers."
+  extra_body:
+    type: string
+    default_value: ""
+    description: "JSON object merged into every LLM request body, e.g. OpenRouter routing: {\"provider\": {\"order\": [\"anthropic\"]}}. Empty sends nothing extra."
+    read_only: true
+  llm_connect_timeout_seconds:
+    type: int
+    default_value: 5
+    description: "Maximum time allowed to establish an LLM HTTP connection."
+  llm_request_timeout_seconds:
+    type: int
+    default_value: 120
+    description: "Maximum time allowed for an LLM HTTP request, including inference."
+  prompt_dir:
+    type: string
+    default_value: ""
+    description: "Directory containing .j2 Jinja2 prompt templates. Defaults to the package share/resources directory when empty."
+  model:
+    type: string
+    default_value: "Qwen/Qwen3-VL-8B-Instruct"
+    description: "VLM model name used for the per-object tasks."
+  tasks:
+    type: string_array
+    default_value:
+      - "semantic_scene_forests_generation/ColorTask"
+      - "semantic_scene_forests_generation/MaterialTask"
+      - "semantic_scene_forests_generation/ManipulationTask"
+    description: "Pluginlib class names of IObjectTask plugins to run on each object."
+  poll_interval_seconds:
+    type: double
+    default_value: 1.0
+    description: "Period of the query for objects this worker has not described yet."
+    validation:
+      gt<>: [0.0]

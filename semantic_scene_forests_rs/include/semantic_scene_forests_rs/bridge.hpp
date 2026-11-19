@@ -41,7 +41,6 @@ struct Status;
 struct IdResult;
 struct EdgeList;
 struct GraphRecord;
-struct PayloadRecord;
 struct ObjectNodeRecord;
 
 class NativeGraph
@@ -49,13 +48,14 @@ class NativeGraph
 public:
   NativeGraph();
   ~NativeGraph();
-  IdResult addObjectNode(rust::Str name, const PayloadRecord& payload);
-  rust::Vec<ObjectNodeRecord> objectNodes() const;
+  int64_t allocateId();
+  Status addObject(const ObjectNodeRecord& node);
+  [[nodiscard]] rust::Vec<ObjectNodeRecord> objectNodes() const;
   Status copyFrom(const NativeGraph& other);
   IdResult addConceptNode(rust::Str name);
-  bool hasNode(int64_t id) const;
+  [[nodiscard]] bool hasNode(int64_t id) const;
   Status addEdge(int64_t source, int64_t target, rust::Str label);
-  EdgeList outgoingEdges(int64_t id) const;
+  [[nodiscard]] EdgeList outgoingEdges(int64_t id) const;
   Status loadMessage(const GraphRecord& message);
   GraphRecord toMessage();
   Status updateFromMessage(const GraphRecord& message);

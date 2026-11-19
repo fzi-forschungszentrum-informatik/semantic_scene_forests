@@ -53,7 +53,7 @@ public:
   static constexpr qreal CONCEPT_RADIUS = 8.0;
   static constexpr qreal OBJECT_RADIUS  = 16.0;
 
-  NodeItem(int64_t id, NodeKind kind, const std::string& label);
+  NodeItem(int64_t id, NodeKind kind, std::string label);
 
   [[nodiscard]] qreal radius() const
   {

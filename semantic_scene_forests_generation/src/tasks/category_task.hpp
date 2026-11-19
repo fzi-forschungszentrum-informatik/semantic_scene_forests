@@ -39,10 +39,11 @@ public:
 
   void initialize(rclcpp::Node* node, const TemplateMap& templates) override;
 
-  TaskResult execute(oai::OpenAIClient& client,
-                     std::vector<oai::Message>& history,
-                     const fzi::semantic_scene_forests::SceneGraph& current_graph,
-                     fzi::semantic_scene_forests::SceneGraph& graph) override;
+  TaskResult
+  execute(oai::OpenAIClient& client,
+          std::vector<oai::Message>& history,
+          const std::vector<fzi::semantic_scene_forests::ConceptNode>& concepts,
+          const std::shared_ptr<fzi::semantic_scene_forests::SceneGraph>& graph) override;
 
 private:
   rclcpp::Logger m_logger{rclcpp::get_logger("CategoryTask")};

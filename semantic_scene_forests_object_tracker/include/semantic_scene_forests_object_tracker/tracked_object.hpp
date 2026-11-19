@@ -38,11 +38,14 @@
 
 #include <Eigen/Dense>
 #include <rclcpp/time.hpp>
-#include <sensor_msgs/msg/image.hpp>
+#include <semantic_scene_forests/graph_nodes.hpp>
 #include <vision_msgs/msg/detection2_d.hpp>
 #include <vision_msgs/msg/detection3_d.hpp>
 
 namespace semantic_scene_forests_object_tracker {
+
+// JPEG crop stamped with its frame stamp in header.stamp; shared with the scene graph.
+using CropPtr = fzi::semantic_scene_forests::CropPtr;
 
 struct DetectionAdapter
 {
@@ -58,7 +61,7 @@ class TrackedObject
 {
 public:
   TrackedObject(const DetectionAdapter& initial_detection,
-                const rclcpp::Time& initial_time,
+                rclcpp::Time initial_time,
                 uint64_t track_id,
                 double measurement_std,
                 double process_noise_std,
@@ -96,8 +99,10 @@ public:
 
   vision_msgs::msg::Detection3D toDetection3D() const;
 
-  void addCrop(const sensor_msgs::msg::Image& crop);
-  std::vector<sensor_msgs::msg::Image> getCrops() const;
+  void addCrop(CropPtr crop);
+  const std::deque<CropPtr>& getCrops() const { return m_crops; }
+  // Incremented by every addCrop; lets writers skip unchanged crop sets.
+  uint64_t cropRevision() const { return m_crop_revision; }
 
   uint64_t track_id;
   int class_id;
@@ -106,7 +111,7 @@ public:
   Eigen::Vector3d bbox3d_size;
   double score;
   bool confirmed;
-  int observation_count;
+  int observation_count{1};
   rclcpp::Time last_seen;
   double time_since_update{0.0};
   DetectionAdapter last_detection;
@@ -126,8 +131,9 @@ private:
 
   void refreshClassName();
 
-  std::deque<sensor_msgs::msg::Image> m_crops;
+  std::deque<CropPtr> m_crops;
   size_t m_max_crops;
+  uint64_t m_crop_revision{0};
 };
 
 } // namespace semantic_scene_forests_object_tracker

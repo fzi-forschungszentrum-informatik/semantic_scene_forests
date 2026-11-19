@@ -70,6 +70,7 @@ configure_file(
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_ros REQUIRED)
 find_package(semantic_scene_forests_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(vision_msgs REQUIRED)
 
 find_package(Boost REQUIRED)
@@ -88,6 +89,7 @@ target_include_directories(semantic_scene_forests PUBLIC
 target_link_libraries(
         semantic_scene_forests PUBLIC
         ${semantic_scene_forests_msgs_TARGETS}
+        ${sensor_msgs_TARGETS}
         ${vision_msgs_TARGETS}
         Boost::boost
         fmt::fmt

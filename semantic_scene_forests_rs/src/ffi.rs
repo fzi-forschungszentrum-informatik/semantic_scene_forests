@@ -38,6 +38,7 @@ pub(crate) mod bridge {
         EdgeAlreadyExists,
         Cycle,
         GraphEditingFailed,
+        InvalidLabel,
     }
 
     struct Status {
@@ -69,9 +70,20 @@ pub(crate) mod bridge {
         frame_id: String,
     }
 
+    #[derive(Default)]
+    struct StampRecord {
+        sec: i32,
+        nanosec: u32,
+    }
+
     struct ObjectRecord {
         header: HeaderRecord,
         id: i64,
+        class_name: String,
+        bbox: BBoxRecord,
+        source: u8,
+        last_updated: StampRecord,
+        last_seen: StampRecord,
     }
 
     struct ConceptRecord {
@@ -93,49 +105,32 @@ pub(crate) mod bridge {
         orientation: [f64; 4],
     }
 
-    struct HypothesisRecord {
-        class_id: String,
-        score: f64,
-        pose: PoseRecord,
-        covariance: [f64; 36],
-    }
-
     #[derive(Default)]
-    struct DetectionRecord {
-        header: HeaderRecord,
-        results: Vec<HypothesisRecord>,
+    struct BBoxRecord {
         center: PoseRecord,
         size: [f64; 3],
-        id: String,
     }
 
-    #[derive(Default)]
-    struct ImageRecord {
-        header: HeaderRecord,
-        height: u32,
-        width: u32,
-        encoding: String,
-        is_bigendian: u8,
-        step: u32,
-        data: Vec<u8>,
+    struct CropRecord {
+        stamp: StampRecord,
+        jpeg: Vec<u8>,
     }
 
-    #[derive(Default)]
-    struct ImageSlot {
-        present: bool,
-        image: ImageRecord,
-    }
-
-    struct PayloadRecord {
-        has_detection: bool,
-        detection: DetectionRecord,
-        visuals: [ImageSlot; 5],
+    struct WorkerRecord {
+        name: String,
+        processed: bool,
     }
 
     struct ObjectNodeRecord {
         id: i64,
         class_name: String,
-        payload: PayloadRecord,
+        bbox: BBoxRecord,
+        frame_id: String,
+        source: u8,
+        last_seen: StampRecord,
+        last_updated: StampRecord,
+        crops: Vec<CropRecord>,
+        workers: Vec<WorkerRecord>,
     }
 
     unsafe extern "C++" {
@@ -144,12 +139,10 @@ pub(crate) mod bridge {
 
         #[cxx_name = "newGraph"]
         fn new_graph() -> UniquePtr<NativeGraph>;
-        #[cxx_name = "addObjectNode"]
-        fn add_object_node(
-            self: Pin<&mut NativeGraph>,
-            name: &str,
-            payload: &PayloadRecord,
-        ) -> IdResult;
+        #[cxx_name = "allocateId"]
+        fn allocate_id(self: Pin<&mut NativeGraph>) -> i64;
+        #[cxx_name = "addObject"]
+        fn add_object(self: Pin<&mut NativeGraph>, node: &ObjectNodeRecord) -> Status;
         #[cxx_name = "objectNodes"]
         fn object_nodes(self: &NativeGraph) -> Vec<ObjectNodeRecord>;
         #[cxx_name = "copyFrom"]
@@ -172,7 +165,27 @@ pub(crate) mod bridge {
 }
 
 use crate::SceneGraphMsg;
-use ros_env::{semantic_scene_forests_msgs::msg, std_msgs::msg::Header};
+use ros_env::{
+    builtin_interfaces::msg::Time, semantic_scene_forests_msgs::msg, std_msgs::msg::Header,
+};
+
+impl From<&Time> for bridge::StampRecord {
+    fn from(stamp: &Time) -> Self {
+        Self {
+            sec: stamp.sec,
+            nanosec: stamp.nanosec,
+        }
+    }
+}
+
+impl From<bridge::StampRecord> for Time {
+    fn from(stamp: bridge::StampRecord) -> Self {
+        Self {
+            sec: stamp.sec,
+            nanosec: stamp.nanosec,
+        }
+    }
+}
 
 impl From<&Header> for bridge::HeaderRecord {
     fn from(header: &Header) -> Self {
@@ -206,6 +219,11 @@ impl From<&SceneGraphMsg> for bridge::GraphRecord {
                 .map(|node| bridge::ObjectRecord {
                     header: (&node.header).into(),
                     id: node.id,
+                    class_name: node.class_name.clone(),
+                    bbox: (&node.bbox).into(),
+                    source: node.source,
+                    last_updated: (&node.last_updated).into(),
+                    last_seen: (&node.last_seen).into(),
                 })
                 .collect(),
             concepts: message
@@ -240,6 +258,11 @@ impl From<bridge::GraphRecord> for SceneGraphMsg {
                 .map(|node| msg::ObjectNode {
                     header: node.header.into(),
                     id: node.id,
+                    class_name: node.class_name,
+                    bbox: node.bbox.into(),
+                    source: node.source,
+                    last_updated: node.last_updated.into(),
+                    last_seen: node.last_seen.into(),
                 })
                 .collect(),
             concept_nodes: message

@@ -44,8 +44,8 @@
 
 #include <Eigen/Dense>
 #include <oai_api/client.hpp>
-#include <sensor_msgs/msg/image.hpp>
 
+#include "semantic_scene_forests_object_tracker/tracked_object.hpp"
 #include <semantic_scene_forests_object_tracker/object_tracker_parameters.hpp>
 
 namespace semantic_scene_forests_object_tracker {
@@ -60,8 +60,8 @@ struct ArbiterRequest
   uint64_t b_id{0};
   std::string a_label;
   std::string b_label;
-  std::shared_ptr<const std::vector<sensor_msgs::msg::Image>> a_crops;
-  std::shared_ptr<const std::vector<sensor_msgs::msg::Image>> b_crops;
+  std::shared_ptr<const std::vector<CropPtr>> a_crops;
+  std::shared_ptr<const std::vector<CropPtr>> b_crops;
   Eigen::Vector3d a_size;
   Eigen::Vector3d b_size;
   double center_distance{0.0};

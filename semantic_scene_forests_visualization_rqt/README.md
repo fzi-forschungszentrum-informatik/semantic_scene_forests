@@ -17,9 +17,9 @@ RQT plugin for interactive inspection of the semantic scene graph.
 
 | Kind | Name | Type |
 |---|---|---|
-| Subscribe | `/scene_graph` | `semantic_scene_forests_msgs/msg/SceneGraph` |
-| Subscribe | `managed_objects` | `semantic_scene_forests_object_msgs/msg/ManagedObjectArray` |
-| Action client | `/update_scene_graph` | `semantic_scene_forests_msgs/action/UpdateSceneGraph` |
+| Subscribe | `/scene_graph` | `semantic_scene_forests_msgs/msg/SceneGraph` (object node class names label the view) |
+| Action client | `attribute_objects` | `semantic_scene_forests_msgs/action/RunWorker` |
+| Action client | `generate_concepts` | `semantic_scene_forests_msgs/action/RunWorker` |
 | Action client | `find_object` | `semantic_scene_forests_planning_msgs/action/FindObject` |
 | Action client | `prompt_llm` | `semantic_scene_forests_planning_msgs/action/PromptLLM` |
 | Service client | `get_object_visuals` | `semantic_scene_forests_object_msgs/srv/GetObjectVisuals` |

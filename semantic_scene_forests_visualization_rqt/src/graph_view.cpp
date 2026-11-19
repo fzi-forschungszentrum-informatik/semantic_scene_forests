@@ -136,8 +136,8 @@ void GraphView::positionRefreshButton()
   {
     return;
   }
-  const int margin = 8;
-  m_refresh_button->move(viewport()->width() - m_refresh_button->width() - margin, margin);
+  const int MARGIN = 8;
+  m_refresh_button->move(viewport()->width() - m_refresh_button->width() - MARGIN, MARGIN);
 }
 
 void GraphView::updateRefreshButtonStyle()
@@ -147,14 +147,14 @@ void GraphView::updateRefreshButtonStyle()
     return;
   }
   // Highlight when new data is waiting. Matches the Rust app's orange accent.
-  const QString style = m_pending_update
+  const QString STYLE = m_pending_update
                           ? "QToolButton { background: #ff9a3c; color: #1e1e24; border: 1px solid"
                             " #ff7a1c; border-radius: 4px; font-size: 18px; font-weight: bold; }"
                             "QToolButton:hover { background: #ffaf5c; }"
                           : "QToolButton { background: #3a3a44; color: #dddddd; border: 1px solid"
                             " #555560; border-radius: 4px; font-size: 18px; }"
                             "QToolButton:hover { background: #4a4a56; }";
-  m_refresh_button->setStyleSheet(style);
+  m_refresh_button->setStyleSheet(STYLE);
 }
 
 void GraphView::setHasPendingUpdate(bool pending)
@@ -173,18 +173,6 @@ void GraphView::setGraph(std::shared_ptr<const fzi::semantic_scene_forests::Scen
 {
   m_graph = std::move(graph);
   rebuildScene();
-}
-
-void GraphView::setObjectClassNames(std::unordered_map<int64_t, std::string> names)
-{
-  m_object_class_names = std::move(names);
-  for (auto& [id, item] : m_nodes)
-  {
-    if (item->kind() == NodeKind::OBJECT)
-    {
-      item->setLabel(objectLabelFor(id, item->label()));
-    }
-  }
 }
 
 void GraphView::setViewMode(ViewMode mode)
@@ -240,26 +228,16 @@ std::vector<TopLevelConcept> GraphView::topLevelConcepts() const
   }
   for (const auto& cn : m_graph->getConceptNodes())
   {
-    const auto outgoing = m_graph->outgoingEdges(cn.id);
-    const bool is_sink  = !outgoing.has_value() || outgoing.value().empty();
-    if (is_sink)
+    const auto OUTGOING = m_graph->outgoingEdges(cn.id);
+    const bool IS_SINK  = !OUTGOING.has_value() || OUTGOING.value().empty();
+    if (IS_SINK)
     {
       result.push_back({cn.id, QString::fromStdString(cn.concept_name)});
     }
   }
-  std::sort(result.begin(), result.end(), [](const TopLevelConcept& a, const TopLevelConcept& b) {
-    return a.id < b.id;
-  });
+  std::ranges::sort(result,
+                    [](const TopLevelConcept& a, const TopLevelConcept& b) { return a.id < b.id; });
   return result;
-}
-
-std::string GraphView::objectLabelFor(int64_t id, const std::string& fallback) const
-{
-  if (auto it = m_object_class_names.find(id); it != m_object_class_names.end())
-  {
-    return it->second;
-  }
-  return fallback.empty() ? "object" : fallback;
 }
 
 std::unordered_set<int64_t> GraphView::reachableFromVisibleRoots() const
@@ -269,8 +247,8 @@ std::unordered_set<int64_t> GraphView::reachableFromVisibleRoots() const
   {
     return included;
   }
-  const auto top_level = topLevelConcepts();
-  if (top_level.empty())
+  const auto TOP_LEVEL = topLevelConcepts();
+  if (TOP_LEVEL.empty())
   {
     // No top-level concepts identified — include everything.
     for (const auto& node : m_graph->getNodes())
@@ -281,7 +259,7 @@ std::unordered_set<int64_t> GraphView::reachableFromVisibleRoots() const
   }
 
   std::queue<int64_t> queue;
-  for (const auto& tlc : top_level)
+  for (const auto& tlc : TOP_LEVEL)
   {
     if (m_hidden_roots.contains(tlc.id))
     {
@@ -294,9 +272,9 @@ std::unordered_set<int64_t> GraphView::reachableFromVisibleRoots() const
   }
   while (!queue.empty())
   {
-    const int64_t current = queue.front();
+    const int64_t CURRENT = queue.front();
     queue.pop();
-    auto incoming = m_graph->incomingEdges(current);
+    auto incoming = m_graph->incomingEdges(CURRENT);
     if (!incoming.has_value())
     {
       continue;
@@ -321,7 +299,7 @@ void GraphView::clearScene()
   // pointers in m_nodes/m_edges. Block signals as a belt-and-braces measure.
   m_nodes.clear();
   m_edges.clear();
-  const QSignalBlocker blocker{&m_scene};
+  const QSignalBlocker BLOCKER{&m_scene};
   m_scene.clear();
 }
 
@@ -335,26 +313,22 @@ void GraphView::rebuildScene()
     return;
   }
 
-  const auto included =
+  const auto INCLUDED =
     m_inspected_filter.has_value() ? *m_inspected_filter : reachableFromVisibleRoots();
 
   for (const auto& node : m_graph->getNodes())
   {
-    const int64_t id = nodeId(node);
-    if (!included.contains(id))
+    const int64_t ID = nodeId(node);
+    if (!INCLUDED.contains(ID))
     {
       continue;
     }
-    const bool is_concept = isConcept(node);
-    const NodeKind kind   = is_concept ? NodeKind::CONCEPT : NodeKind::OBJECT;
-    std::string label     = nodeName(node);
-    if (!is_concept)
-    {
-      label = objectLabelFor(id, label);
-    }
-    auto* item = new NodeItem{id, kind, label};
+    const bool IS_CONCEPT   = isConcept(node);
+    const NodeKind KIND     = IS_CONCEPT ? NodeKind::CONCEPT : NodeKind::OBJECT;
+    const std::string LABEL = nodeName(node);
+    auto* item              = new NodeItem{ID, KIND, LABEL};
     m_scene.addItem(item);
-    m_nodes.emplace(id, item);
+    m_nodes.emplace(ID, item);
   }
 
   for (const auto& [src_id, tgt_id, edge] : m_graph->getEdges())
@@ -403,8 +377,8 @@ void GraphView::updateSceneRectFromItems()
   }
   QRectF bounds = m_scene.itemsBoundingRect();
   // Pad so nodes near the edge aren't flush against the viewport border.
-  const qreal pad = 200.0;
-  bounds.adjust(-pad, -pad, pad, pad);
+  const qreal PAD = 200.0;
+  bounds.adjust(-PAD, -PAD, PAD, PAD);
   setSceneRect(bounds);
 }
 
@@ -423,16 +397,17 @@ void GraphView::computeForceDirectedInitial()
   {
     return;
   }
-  const qreal radius = NODE_SPACING * std::sqrt(static_cast<qreal>(m_nodes.size()));
+  const qreal RADIUS = NODE_SPACING * std::sqrt(static_cast<qreal>(m_nodes.size()));
   std::mt19937 rng{42};
   std::uniform_real_distribution<qreal> angle_dist{0.0, 2.0 * std::numbers::pi};
   for (auto& [id, item] : m_nodes)
   {
-    const qreal angle = angle_dist(rng);
-    item->setPos(radius * std::cos(angle), radius * std::sin(angle));
+    const qreal ANGLE = angle_dist(rng);
+    item->setPos(RADIUS * std::cos(ANGLE), RADIUS * std::sin(ANGLE));
   }
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): refactor out of scope
 void GraphView::computeLayeredPositions()
 {
   if (m_graph == nullptr || m_nodes.empty())
@@ -486,10 +461,10 @@ void GraphView::computeLayeredPositions()
           max_succ = std::max(max_succ, layer_it->second);
         }
       }
-      const std::uint32_t new_layer = max_succ + 1;
-      if (layers[id] < new_layer)
+      const std::uint32_t NEW_LAYER = max_succ + 1;
+      if (layers[id] < NEW_LAYER)
       {
-        layers[id] = new_layer;
+        layers[id] = NEW_LAYER;
         changed    = true;
       }
     }
@@ -500,17 +475,17 @@ void GraphView::computeLayeredPositions()
   {
     max_concept_layer = std::max(max_concept_layer, l);
   }
-  const std::uint32_t object_layer = max_concept_layer + 1;
+  const std::uint32_t OBJECT_LAYER = max_concept_layer + 1;
 
   std::unordered_map<std::uint32_t, std::vector<int64_t>> layer_groups;
   for (const auto& [id, item] : m_nodes)
   {
-    const std::uint32_t layer = (item->kind() == NodeKind::CONCEPT) ? layers[id] : object_layer;
-    layer_groups[layer].push_back(id);
+    const std::uint32_t LAYER = (item->kind() == NodeKind::CONCEPT) ? layers[id] : OBJECT_LAYER;
+    layer_groups[LAYER].push_back(id);
   }
   for (auto& [layer, group] : layer_groups)
   {
-    std::sort(group.begin(), group.end());
+    std::ranges::sort(group);
   }
 
   std::size_t max_layer_count = 1;
@@ -518,17 +493,17 @@ void GraphView::computeLayeredPositions()
   {
     max_layer_count = std::max(max_layer_count, group.size());
   }
-  const qreal layer_spacing =
+  const qreal LAYER_SPACING =
     std::max(static_cast<qreal>(max_layer_count) * NODE_SPACING / 4.0, LAYER_MIN_SPACING);
 
   for (const auto& [layer, group] : layer_groups)
   {
-    const qreal y     = static_cast<qreal>(layer) * layer_spacing;
-    const qreal count = static_cast<qreal>(group.size());
+    const qreal Y    = static_cast<qreal>(layer) * LAYER_SPACING;
+    const auto COUNT = static_cast<qreal>(group.size());
     for (std::size_t i = 0; i < group.size(); ++i)
     {
-      const qreal x = (static_cast<qreal>(i) - ((count - 1.0) / 2.0)) * NODE_SPACING;
-      m_nodes[group[i]]->setPos(x, y);
+      const qreal X = (static_cast<qreal>(i) - ((COUNT - 1.0) / 2.0)) * NODE_SPACING;
+      m_nodes[group[i]]->setPos(X, Y);
     }
   }
 }
@@ -555,14 +530,14 @@ void GraphView::stepForceLayout()
   {
     for (std::size_t j = i + 1; j < nodes_vec.size(); ++j)
     {
-      const QPointF delta   = nodes_vec[i].second->pos() - nodes_vec[j].second->pos();
-      qreal dist_sq         = (delta.x() * delta.x()) + (delta.y() * delta.y());
+      const QPointF DELTA   = nodes_vec[i].second->pos() - nodes_vec[j].second->pos();
+      qreal dist_sq         = (DELTA.x() * DELTA.x()) + (DELTA.y() * DELTA.y());
       dist_sq               = std::max(dist_sq, 1.0);
-      const qreal force_mag = FORCE_REPULSION / dist_sq;
-      const qreal dist      = std::sqrt(dist_sq);
-      const QPointF unit    = delta / dist;
-      forces[nodes_vec[i].first] += unit * force_mag;
-      forces[nodes_vec[j].first] -= unit * force_mag;
+      const qreal FORCE_MAG = FORCE_REPULSION / dist_sq;
+      const qreal DIST      = std::sqrt(dist_sq);
+      const QPointF UNIT    = DELTA / DIST;
+      forces[nodes_vec[i].first] += UNIT * FORCE_MAG;
+      forces[nodes_vec[j].first] -= UNIT * FORCE_MAG;
     }
   }
 
@@ -573,10 +548,10 @@ void GraphView::stepForceLayout()
     {
       continue;
     }
-    const QPointF delta = edge->target()->pos() - edge->source()->pos();
-    const QPointF pull  = delta * FORCE_ATTRACTION;
-    forces[edge->source()->id()] += pull;
-    forces[edge->target()->id()] -= pull;
+    const QPointF DELTA = edge->target()->pos() - edge->source()->pos();
+    const QPointF PULL  = DELTA * FORCE_ATTRACTION;
+    forces[edge->source()->id()] += PULL;
+    forces[edge->target()->id()] -= PULL;
   }
 
   // Apply forces with simple Euler integration + damping; clamp velocity for stability.
@@ -586,13 +561,13 @@ void GraphView::stepForceLayout()
     QPointF velocity = forces[id] * FORCE_TIMESTEP;
     velocity -= item->pos() * FORCE_GLOBAL_ATTRACTION;
     velocity *= FORCE_DAMPING;
-    const qreal vmag = std::hypot(velocity.x(), velocity.y());
-    if (vmag > FORCE_MAX_VELOCITY)
+    const qreal VMAG = std::hypot(velocity.x(), velocity.y());
+    if (VMAG > FORCE_MAX_VELOCITY)
     {
-      velocity *= FORCE_MAX_VELOCITY / vmag;
+      velocity *= FORCE_MAX_VELOCITY / VMAG;
     }
     item->setPos(item->pos() + velocity);
-    max_disp = std::max(max_disp, vmag);
+    max_disp = std::max(max_disp, VMAG);
   }
 
   for (auto* edge : m_edges)
@@ -610,14 +585,14 @@ void GraphView::stepForceLayout()
 
 void GraphView::onSelectionChanged()
 {
-  const auto selected = m_scene.selectedItems();
-  if (selected.isEmpty())
+  const auto SELECTED = m_scene.selectedItems();
+  if (SELECTED.isEmpty())
   {
     updateHighlighting();
     emit selectionCleared();
     return;
   }
-  auto* node = qgraphicsitem_cast<NodeItem*>(selected.first());
+  auto* node = qgraphicsitem_cast<NodeItem*>(SELECTED.first());
   if (node == nullptr)
   {
     return;
@@ -645,9 +620,9 @@ void GraphView::updateHighlighting()
       highlighted.insert(node->id());
       while (!queue.empty())
       {
-        const int64_t current = queue.front();
+        const int64_t CURRENT = queue.front();
         queue.pop();
-        auto incoming = m_graph->incomingEdges(current);
+        auto incoming = m_graph->incomingEdges(CURRENT);
         if (!incoming.has_value())
         {
           continue;
@@ -670,22 +645,22 @@ void GraphView::updateHighlighting()
 
 void GraphView::wheelEvent(QWheelEvent* event)
 {
-  const int delta_y =
+  const int DELTA_Y =
     event->angleDelta().y() != 0 ? event->angleDelta().y() : event->pixelDelta().y();
-  if (delta_y == 0)
+  if (DELTA_Y == 0)
   {
     event->ignore();
     return;
   }
-  const qreal current = transform().m11();
-  const qreal factor  = (delta_y > 0) ? ZOOM_FACTOR : (1.0 / ZOOM_FACTOR);
-  const qreal next    = current * factor;
-  if (next < MIN_SCALE || next > MAX_SCALE)
+  const qreal CURRENT = transform().m11();
+  const qreal FACTOR  = (DELTA_Y > 0) ? ZOOM_FACTOR : (1.0 / ZOOM_FACTOR);
+  const qreal NEXT    = CURRENT * FACTOR;
+  if (NEXT < MIN_SCALE || NEXT > MAX_SCALE)
   {
     event->accept();
     return;
   }
-  scale(factor, factor);
+  scale(FACTOR, FACTOR);
   event->accept();
 }
 
@@ -706,10 +681,10 @@ void GraphView::mouseMoveEvent(QMouseEvent* event)
 {
   if (m_panning)
   {
-    const QPoint delta = event->pos() - m_pan_start;
+    const QPoint DELTA = event->pos() - m_pan_start;
     m_pan_start        = event->pos();
-    horizontalScrollBar()->setValue(horizontalScrollBar()->value() - delta.x());
-    verticalScrollBar()->setValue(verticalScrollBar()->value() - delta.y());
+    horizontalScrollBar()->setValue(horizontalScrollBar()->value() - DELTA.x());
+    verticalScrollBar()->setValue(verticalScrollBar()->value() - DELTA.y());
     event->accept();
     return;
   }

@@ -44,23 +44,23 @@
   <depend>semantic_scene_forests_msgs</depend>
   <depend>semantic_scene_forests_object_msgs</depend>
   <depend>semantic_scene_forests</depend>
-  <depend>semantic_scene_forests_utils</depend>
   <depend>oai_api</depend>
   <!-- minja is fetched via CMake FetchContent — no ROS package dependency needed -->
   <depend>rclcpp</depend>
   <depend>rclcpp_action</depend>
-  <depend>rclcpp_components</depend>
   <depend>pluginlib</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>vision_msgs</depend>
   <depend>cv_bridge</depend>
+  <depend>diagnostic_updater</depend>
   <depend>ament_index_cpp</depend>
   <depend>boost</depend>
   <depend>fmt</depend>
   <depend>nlohmann-json-dev</depend>
-  <depend>diagnostic_msgs</depend>
-  <depend>diagnostic_updater</depend>
+  <depend>semantic_scene_forests_manager</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

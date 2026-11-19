@@ -53,10 +53,7 @@
 #include <semantic_scene_forests/scene_graph.hpp>
 
 #include <diagnostic_updater/diagnostic_updater.hpp>
-#include <diagnostic_updater/publisher.hpp>
 #include <semantic_scene_forests_msgs/msg/scene_graph.hpp>
-#include <semantic_scene_forests_object_msgs/msg/managed_object.hpp>
-#include <semantic_scene_forests_object_msgs/msg/managed_object_array.hpp>
 #include <semantic_scene_forests_object_msgs/srv/get_object_visuals.hpp>
 #include <semantic_scene_forests_planning_msgs/action/find_object.hpp>
 #include <semantic_scene_forests_planning_msgs/action/prompt_llm.hpp>
@@ -84,10 +81,9 @@ public:
   ~SceneGraphQueryNode() override;
 
 private:
-  using SceneGraphMsg      = semantic_scene_forests_msgs::msg::SceneGraph;
-  using ManagedObject      = semantic_scene_forests_object_msgs::msg::ManagedObject;
-  using ManagedObjectArray = semantic_scene_forests_object_msgs::msg::ManagedObjectArray;
-  using GetObjectVisuals   = semantic_scene_forests_object_msgs::srv::GetObjectVisuals;
+  using SceneGraphMsg    = semantic_scene_forests_msgs::msg::SceneGraph;
+  using ObjectNodeMsg    = semantic_scene_forests_msgs::msg::ObjectNode;
+  using GetObjectVisuals = semantic_scene_forests_object_msgs::srv::GetObjectVisuals;
 
   using FindObjectAction = semantic_scene_forests_planning_msgs::action::FindObject;
   using PromptLLMAction  = semantic_scene_forests_planning_msgs::action::PromptLLM;
@@ -96,7 +92,6 @@ private:
 
   // ── ROS infrastructure ──────────────────────────────────────────────────
   rclcpp::Subscription<SceneGraphMsg>::SharedPtr m_graph_sub;
-  rclcpp::Subscription<ManagedObjectArray>::SharedPtr m_objects_sub;
   rclcpp::Client<GetObjectVisuals>::SharedPtr m_visuals_client;
   rclcpp_action::Server<FindObjectAction>::SharedPtr m_find_object_server;
   rclcpp_action::Server<PromptLLMAction>::SharedPtr m_prompt_llm_server;
@@ -112,10 +107,6 @@ private:
   // ── Shared state ────────────────────────────────────────────────────────
   mutable std::mutex m_graph_mutex;
   std::optional<SceneGraphMsg> m_last_graph;
-  mutable std::mutex m_objects_mutex;
-  std::unordered_map<int64_t, ManagedObject> m_cached_objects;
-  // Whether an authoritative managed-object snapshot has arrived.
-  bool m_objects_received{false};
 
   // ── Action workers ──────────────────────────────────────────────────────
   // One in-flight jthread per action type: a new goal of the same type is
@@ -132,10 +123,6 @@ private:
 
   // ── Diagnostics ────────────────────────────────────────────────────────
   diagnostic_updater::Updater m_diagnostic_updater;
-  double m_min_freq{0.1};
-  double m_max_freq{1000.0};
-  std::unique_ptr<diagnostic_updater::HeaderlessTopicDiagnostic> m_graph_freq;
-  std::unique_ptr<diagnostic_updater::HeaderlessTopicDiagnostic> m_objects_freq;
   semantic_scene_forests_utils::ErrorCounter m_llm_errors;
   semantic_scene_forests_utils::ErrorCounter m_service_errors;
   semantic_scene_forests_utils::ErrorCounter m_action_errors;
@@ -145,7 +132,6 @@ private:
 
   // ── Subscription callbacks ──────────────────────────────────────────────--
   void onSceneGraph(const SceneGraphMsg::SharedPtr& msg);
-  void onManagedObjects(const ManagedObjectArray::SharedPtr& msg);
 
   // ── Diagnostics ─────────────────────────────────────────────────────────
   void onConnectivityDiagnostic(diagnostic_updater::DiagnosticStatusWrapper& stat);
@@ -160,13 +146,10 @@ private:
   };
 
   // Build an independent SceneGraph snapshot from the latest received message.
-  // Sanitizes it against the current managed-object membership (when an
-  // authoritative managed-object array has been received) so removed objects
-  // are invisible to the agent.
   [[nodiscard]] std::expected<SceneSnapshot, std::string> snapshotGraph() const;
 
-  // Object-manager lookup bound into the agent session.
-  [[nodiscard]] std::optional<ObjectInfo> lookupObject(int64_t id) const;
+  // True if the latest scene graph message still contains this object.
+  [[nodiscard]] bool hasObject(int64_t id) const;
 
   // Vision sub-completion over an object's crops (via /get_object_visuals).
   // Polls the service future so the wait is bounded by the visuals timeout and
@@ -220,8 +203,8 @@ private:
 
   rclcpp_action::GoalResponse
   handleFindObjectGoal(const rclcpp_action::GoalUUID& uuid,
-                       std::shared_ptr<const FindObjectAction::Goal> goal);
-  rclcpp_action::CancelResponse
+                       const std::shared_ptr<const FindObjectAction::Goal>& goal);
+  static rclcpp_action::CancelResponse
   handleFindObjectCancel(const std::shared_ptr<FindObjectGoal>& goal_handle);
   void handleFindObjectAccepted(const std::shared_ptr<FindObjectGoal>& goal_handle);
   void executeFindObject(const std::shared_ptr<FindObjectGoal>& goal_handle, std::stop_token stop);
@@ -229,8 +212,8 @@ private:
   // ── PromptLLM action ────────────────────────────────────────────────────--
   rclcpp_action::GoalResponse
   handlePromptLLMGoal(const rclcpp_action::GoalUUID& uuid,
-                      std::shared_ptr<const PromptLLMAction::Goal> goal);
-  rclcpp_action::CancelResponse
+                      const std::shared_ptr<const PromptLLMAction::Goal>& goal);
+  static rclcpp_action::CancelResponse
   handlePromptLLMCancel(const std::shared_ptr<PromptLLMGoal>& goal_handle);
   void handlePromptLLMAccepted(const std::shared_ptr<PromptLLMGoal>& goal_handle);
   void executePromptLLM(const std::shared_ptr<PromptLLMGoal>& goal_handle, std::stop_token stop);

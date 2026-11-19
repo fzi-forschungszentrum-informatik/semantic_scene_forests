@@ -1,57 +1,57 @@
 # semantic_scene_forests_generation
 
-ROS 2 component that generates a semantic scene graph from managed objects with a two-phase VLM/LLM pipeline.
+Worker plugins for the `scene_graph_manager` that add semantics to the objects in the shared SceneGraph with
+a two-phase VLM/LLM pipeline.
 
 ## Task
 
-- Consume persistent object state from the object manager.
-- Run per-object tasks for instance attributes.
-- Run whole-graph tasks for higher-level semantics.
-- Publish the current graph and expose an action to refresh it.
+- `ObjectAttributionWorker` (phase 1): run per-object tasks for instance attributes.
+- `ConceptGenerationWorker` (phase 2): run whole-graph tasks for higher-level semantics.
+- Write results to the manager's shared SceneGraph; the manager publishes `/scene_graph`.
 
 ## Runtime Interface
 
+Both workers are loaded by `semantic_scene_forests_manager::SceneGraphManagerNode` and serve their
+action on the manager node. Parameters live under the worker's configured name
+(`object_attribution.*`, `concept_generation.*`).
+
 | Kind | Name | Type |
 |---|---|---|
-| Subscribe | `/managed_objects` | `semantic_scene_forests_object_msgs/msg/ManagedObjectArray` |
-| Publish | `/scene_graph` | `semantic_scene_forests_msgs/msg/SceneGraph` |
-| Action server | `/update_scene_graph` | `semantic_scene_forests_msgs/action/UpdateSceneGraph` |
-| Service client | `/get_object_visuals` | `semantic_scene_forests_object_msgs/srv/GetObjectVisuals` |
-
-The graph is published at 1 Hz with reliable, transient-local QoS.
+| Action server | `attribute_objects` | `semantic_scene_forests_msgs/action/RunWorker` |
+| Action server | `generate_concepts` | `semantic_scene_forests_msgs/action/RunWorker` |
 
 ## Update Behavior
 
-- Each new managed object joins a queue that a background worker describes with the Phase 1 tasks,
-  one object at a time. A failed object is logged and counted in diagnostics, and is only retried
-  by a manual Phase 1.
-- Every `phase2_interval_seconds` (default 120) the worker runs Phase 2 over concepts it has not
+- `ObjectAttributionWorker` polls every `poll_interval_seconds` (default 1.0) for objects it has not
+  described yet and describes them one at a time with its `tasks`, reading crops from
+  the graph. A technical failure stops the current pass and leaves the failed object and
+  remaining objects pending for the next tick.
+- `ConceptGenerationWorker` runs every `interval_seconds` (default 120) over concepts it has not
   processed yet, and skips the LLM if there are none. A failed run retries at the next tick.
-- `/update_scene_graph` is the manual rerun: Phase 1 redescribes all objects and Phase 2 reprocesses
-  all concepts. The worker pauses after its current step while a goal runs, and only one goal runs
-  at a time.
-- `/add_scene_context` reports busy while an update step is in flight.
-- Tasks run against a private graph snapshot. The live graph is locked only while a snapshot is
-  taken or a successful update is committed.
-- LLM connection, LLM request, and object-visuals request timeouts are configurable through
-  `llm_connect_timeout_seconds`, `llm_request_timeout_seconds`, and
-  `visuals_request_timeout_seconds`.
-- Cancellation is checked at worker checkpoints. An in-flight HTTP call or plugin task must
-  return before the goal can finish cancellation.
-- Teardown stops the worker cooperatively at the next checkpoint and waits for the current
+- `attribute_objects` reruns phase 1 over all objects; `generate_concepts` reruns phase 2
+  over all concepts. Each action is reject-while-busy, one goal at a time.
+- Only input nodes are marked processed; new concepts, including their ancestors, stay pending
+  until they are inputs to a later run.
+- Tasks return a `TaskResult` error for malformed model output: it is logged and processing
+  continues with the next task. Technical failures (request errors, missing templates, unexpected
+  exceptions) throw, stop the run immediately, and abort a manual action with the failure reason.
+  Background workers retry at the next scheduled tick. Already-applied graph writes are retained.
+- Tasks work on the live shared graph. Each concept+edge write is one atomic call, made after the
+  LLM returns; no lock is held during an LLM call. A rejected or invalid write is logged and skipped.
+  An object deleted before its turn is skipped. The graph is a shared workspace: no worker owns
+  concepts or edges.
+- LLM connection and request timeouts are `llm_connect_timeout_seconds` and
+  `llm_request_timeout_seconds`. Cancellation is checked at task boundaries; an in-flight HTTP
+  call must return first.
+- Teardown stops the workers cooperatively at the next checkpoint and waits for the current
   blocking call; a goal caught in teardown receives no terminal result.
-- When the managed-object array changes, the graph is pruned to the retained objects: absent
-  objects, their incident edges, and concepts no longer reachable from any retained object are
-  removed, while concepts shared with retained objects and their transitive ancestors survive.
-  An empty managed array empties the graph.
-- Updates keep running while objects come and go: each commit drops objects that were removed
-  meanwhile, and Phase 1 skips objects that are gone before their turn.
 
-## Exported Components
+## Exported Plugins
 
-- Component: `semantic_scene_forests_generation::SceneGraphGenerationNode`
-- Auto-generated executable: `semantic_scene_forests_generation_node`
-- Plugin base classes:
+- Workers (`semantic_scene_forests_generation_workers.xml`):
+  - `semantic_scene_forests_generation::ObjectAttributionWorker`
+  - `semantic_scene_forests_generation::ConceptGenerationWorker`
+- Task plugin base classes:
   - `semantic_scene_forests_generation::IObjectTask`
   - `semantic_scene_forests_generation::IGraphTask`
 
@@ -62,8 +62,8 @@ The graph is published at 1 Hz with reliable, transient-local QoS.
 
 ## Entry Points
 
-- Launch file: `launch/semantic_scene_forests_generation.launch.xml`
-- Plugin description: `semantic_scene_forests_generation_plugins.xml`
+- Task plugin description: `semantic_scene_forests_generation_plugins.xml`
+- Started by `ros2 launch semantic_scene_forests_launch scene_graph_combined.launch.xml`
 
 ## Limitations
 
