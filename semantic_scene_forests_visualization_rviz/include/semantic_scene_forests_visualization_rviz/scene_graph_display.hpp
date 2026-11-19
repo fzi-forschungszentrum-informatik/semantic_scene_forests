@@ -29,7 +29,6 @@
 #ifndef SEMANTIC_SCENE_FORESTS_VISUALIZATION_RVIZ_SCENE_GRAPH_DISPLAY_HPP_
 #define SEMANTIC_SCENE_FORESTS_VISUALIZATION_RVIZ_SCENE_GRAPH_DISPLAY_HPP_
 
-#include <chrono>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -85,7 +84,6 @@ public:
 
   void onInitialize() override;
   void reset() override;
-  void update(std::chrono::nanoseconds wall_dt, std::chrono::nanoseconds ros_dt) override;
   void fixedFrameChanged() override;
 
 private:
@@ -128,7 +126,8 @@ private:
   //! Last received objects, re-rendered while some were skipped for missing TF.
   std::vector<fzi::semantic_scene_forests::ObjectNode> m_last_objects;
   bool m_render_incomplete{false};
-  std::chrono::nanoseconds m_retry_elapsed{0};
+  //! Retries skipped objects; a QTimer because Display::update() differs between rviz distros.
+  QTimer* m_retry_timer{nullptr};
 
   // Labels: raw pointers — MovableText (Ogre::SimpleRenderable) requires manual cleanup
   struct LabelVisual
@@ -191,6 +190,7 @@ private:
 
   // NOLINTNEXTLINE(readability-redundant-access-specifiers): Q_SLOTS section for moc
 private Q_SLOTS:
+  void retryIncompleteRender();
   void updateObjectColor();
   void updateLabels();
   void updateSceneGraphTopic();

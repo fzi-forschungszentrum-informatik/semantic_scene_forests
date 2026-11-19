@@ -121,6 +121,10 @@ void SceneGraphDisplay::onInitialize()
 {
   rviz_common::Display::onInitialize();
 
+  m_retry_timer = new QTimer(this);
+  connect(m_retry_timer, &QTimer::timeout, this, &SceneGraphDisplay::retryIncompleteRender);
+  m_retry_timer->start(1000);
+
   // The MessageFilter will drop messages with empty header.frame_id.
   // We handle TF transforms per-object internally, so we don't need
   // the MessageFilter's automatic transformation. Messages will be
@@ -214,7 +218,7 @@ void SceneGraphDisplay::reset()
 {
   rviz_common::Display::reset();
   clearVisuals();
-  // Redrawn by update() once TF is back; no new scene_graph comes for an unchanged graph.
+  // Redrawn by retryIncompleteRender() once TF is back; an unchanged graph is not republished.
   m_render_incomplete = !m_last_objects.empty();
   // Note: We do NOT reset action state here — reset() fires on every topic/frame change
   // and would wipe the progress bar mid-action. Action state is only reset when
@@ -731,18 +735,15 @@ void SceneGraphDisplay::resetActionState()
   }
 }
 
-void SceneGraphDisplay::update(std::chrono::nanoseconds wall_dt,
-                               std::chrono::nanoseconds /*ros_dt*/)
+void SceneGraphDisplay::retryIncompleteRender()
 {
   // The manager publishes only on change, so objects skipped for missing TF (e.g. the latched
   // graph arriving before any TF right after startup) are retried here instead of waiting for the
   // next scene_graph.
   // ponytail: retries every second for as long as an object stays unresolvable (e.g. a stamp
   // older than the TF cache with a moving fixed frame); rate-limit if the redraw cost shows.
-  m_retry_elapsed += wall_dt;
-  if (m_render_incomplete && m_retry_elapsed >= std::chrono::seconds(1))
+  if (m_render_incomplete)
   {
-    m_retry_elapsed = std::chrono::nanoseconds(0);
     // Only the missing objects are added: drawn ones keep their shapes and selection handlers.
     updateObjectNodes(m_last_objects);
   }
